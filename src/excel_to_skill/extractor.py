@@ -46,6 +46,15 @@ class CellIR:
     def has_marks(self) -> bool:
         return bool(self.bold) or bool(self.border) or self.fill is not None
 
+    @property
+    def significant(self) -> bool:
+        """§4.4 포함 유의성 — 값·수식 또는 테두리·배경색. 굵게 단독은 제외.
+
+        §5 used range 재계산(D-01)과 cells.jsonl 포함 규칙이 이 판정을 공유한다.
+        (bold-only 셀은 IR에는 남는다 — M2 HTML 렌더링용.)
+        """
+        return self.has_content or bool(self.border) or self.fill is not None
+
 
 @dataclass
 class SheetIR:
@@ -84,6 +93,14 @@ class WorkbookIR:
     format_limitations: str | None = None
 
 
+def _recalc_used_range(sheet: SheetIR) -> None:
+    """§5 used range 재계산(D-01): §4.4 유의 셀 기준 최대 행·열, 원점 A1."""
+    keys = [k for k, c in sheet.cells.items() if c.significant]
+    if keys:
+        sheet.max_row = max(r for r, _ in keys)
+        sheet.max_col = max(c for _, c in keys)
+
+
 def extract_workbook(path: Path) -> WorkbookIR:
     """진입점. 미지원 형식이면 UnsupportedFormatError."""
     fmt = detect_format(path)
@@ -96,12 +113,14 @@ def extract_workbook(path: Path) -> WorkbookIR:
 
 
 def _formula_text(value) -> str:
+    """수식 원문. openpyxl이 덧붙인 선행 '='를 벗겨 XML(<f>) 원문으로 복원(P3)."""
     if isinstance(value, str):
-        return value
-    text = getattr(value, "text", None)  # ArrayFormula / DataTableFormula
-    if text is not None:
-        return text
-    return str(value)
+        text = value
+    else:
+        text = getattr(value, "text", None)  # ArrayFormula / DataTableFormula
+        if text is None:
+            text = str(value)
+    return text[1:] if text.startswith("=") else text
 
 
 def _fill_repr(fill) -> str | None:
@@ -186,9 +205,7 @@ def _extract_xlsx(path: Path) -> WorkbookIR:
                         c.value = raw
                     sheet.cells[(cell.row, cell.column)] = c
 
-            if sheet.cells:
-                sheet.max_row = max(r for r, _ in sheet.cells)
-                sheet.max_col = max(c for _, c in sheet.cells)
+            _recalc_used_range(sheet)
 
             # 병합 범위: 2차(read_only)에서 미취득 시 3차 XML 직파싱
             try:
@@ -332,9 +349,7 @@ def _extract_xls(path: Path) -> WorkbookIR:
                     fill=fill,
                 )
 
-        if sheet.cells:
-            sheet.max_row = max(r for r, _ in sheet.cells)
-            sheet.max_col = max(c for _, c in sheet.cells)
+        _recalc_used_range(sheet)
 
         sheet.merged_ranges = [
             f"{get_column_letter(clo + 1)}{rlo + 1}:{get_column_letter(chi)}{rhi}"

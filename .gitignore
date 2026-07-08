@@ -4,3 +4,4 @@ __pycache__/
 converted/
 .pytest_cache/
 workingpaper_raw/
+tests/_output/
