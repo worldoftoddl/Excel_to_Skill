@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "references.json (§4.5)",
+  "description": "참조 그래프. xls는 observability.workbook=unavailable_xls(그래프 관찰 불가) + note에 한계 문자열.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["edges", "impacts", "external_refs", "unresolved", "observability"],
+  "properties": {
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from", "to", "formula", "ref_type"],
+        "properties": {
+          "from": { "type": "string", "minLength": 1 },
+          "to": { "type": "string", "minLength": 1 },
+          "formula": { "type": "string" },
+          "ref_type": { "enum": ["cell", "range"] }
+        }
+      }
+    },
+    "impacts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 }
+      }
+    },
+    "external_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cell", "raw", "target"],
+        "properties": {
+          "cell": { "type": "string", "minLength": 1 },
+          "raw": { "type": "string" },
+          "target": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "unresolved": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cell", "formula", "reason"],
+        "properties": {
+          "cell": { "type": "string", "minLength": 1 },
+          "formula": { "type": "string" },
+          "reason": { "enum": ["indirect", "offset"] }
+        }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workbook", "note"],
+      "properties": {
+        "workbook": {
+          "enum": ["full", "unavailable_xls", "not_applicable_docx"]
+        },
+        "note": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

@@ -156,6 +156,28 @@ def _cmd_convert(args: argparse.Namespace) -> int:
         return 1
 
 
+def _cmd_verify(args: argparse.Namespace) -> int:
+    from .verify import verify_package
+
+    pkg = Path(args.path)
+    if not pkg.is_dir():
+        _eprint(f"[오류] 패키지 폴더가 아님: {pkg}")
+        return 1
+    src = Path(args.source) if args.source else None
+    if src is not None and not src.is_file():
+        _eprint(f"[오류] --source 파일 없음: {src}")
+        return 1
+
+    result = verify_package(pkg, source=src)
+    for c in result.checks:  # 리포트는 stdout
+        mark = "SKIP" if c.skipped else ("PASS" if c.ok else "FAIL")
+        print(f"  [{mark}] {c.name}: {c.detail}")
+    print(f"verify: {'통과' if result.ok else '실패'} ({pkg})")
+    if not result.ok:  # 실패 사유는 stderr, exit code가 권위
+        _eprint(f"[verify 실패] {pkg}")
+    return 0 if result.ok else 1
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="excel-to-skill")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -171,7 +193,11 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument("--max-rows", type=int, default=None, help="(이번 범위 밖)")
     c.add_argument("--model", default=None, help="(미구현)")
 
-    for name in ("annotate", "review", "verify"):
+    v = sub.add_parser("verify", help="패키지 계약 검증(V1 스키마 + V3 재현성)")
+    v.add_argument("path", help="검증할 패키지 폴더")
+    v.add_argument("--source", default=None, help="원본 파일(주면 V3 재현성 검증)")
+
+    for name in ("annotate", "review"):
         sub.add_parser(name, help="(아직 구현되지 않음)").add_argument(
             "rest", nargs=argparse.REMAINDER
         )
@@ -182,8 +208,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.cmd == "convert":
         return _cmd_convert(args)
-    # annotate / review / verify — 등록만 된 스텁
-    _eprint(f"'{args.cmd}' 은(는) 아직 구현되지 않았습니다 (M3/verify 단계).")
+    if args.cmd == "verify":
+        return _cmd_verify(args)
+    # annotate / review — 등록만 된 스텁
+    _eprint(f"'{args.cmd}' 은(는) 아직 구현되지 않았습니다 (M3 단계).")
     return 2
 
 

@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "diagnostics.json (§4.6)",
+  "description": "구조 진단(전 항목 기계적 사실, P3). xls는 external_links.count=null(관찰 불가≠0), format_limitations=문자열, hidden.sheets에 숨김 시트.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "loader_path",
+    "external_links",
+    "defined_names",
+    "pii_suspects",
+    "blank_source_formulas",
+    "hidden",
+    "truncations",
+    "format_limitations"
+  ],
+  "properties": {
+    "loader_path": {
+      "enum": [
+        "openpyxl_normal",
+        "openpyxl_read_only",
+        "openpyxl_read_only+xml_merge",
+        "xlrd",
+        "python_docx"
+      ]
+    },
+    "external_links": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "targets_sample"],
+      "properties": {
+        "count": { "type": ["integer", "null"], "minimum": 0 },
+        "targets_sample": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "defined_names": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "global_total",
+        "sheet_scoped_total",
+        "broken_ref_count",
+        "legacy_path_count",
+        "samples",
+        "sample_cap",
+        "full_dump_present"
+      ],
+      "properties": {
+        "global_total": { "type": "integer", "minimum": 0 },
+        "sheet_scoped_total": { "type": "integer", "minimum": 0 },
+        "broken_ref_count": { "type": "integer", "minimum": 0 },
+        "legacy_path_count": { "type": "integer", "minimum": 0 },
+        "samples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "value_head", "flags"],
+            "properties": {
+              "name": { "type": "string" },
+              "value_head": { "type": "string" },
+              "flags": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "sample_cap": { "type": "integer", "minimum": 0 },
+        "full_dump_present": { "type": "boolean" }
+      }
+    },
+    "pii_suspects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["emails_masked", "legacy_paths_count"],
+      "properties": {
+        "emails_masked": { "type": "array", "items": { "type": "string" } },
+        "legacy_paths_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "blank_source_formulas": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cell", "source"],
+        "properties": {
+          "cell": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "hidden": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sheets", "rows_count", "cols_count"],
+      "properties": {
+        "sheets": { "type": "array", "items": { "type": "string" } },
+        "rows_count": { "type": "integer", "minimum": 0 },
+        "cols_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "truncations": { "type": "array" },
+    "format_limitations": { "type": ["string", "null"] }
+  }
+}

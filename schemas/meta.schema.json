@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "meta.json (§4.1)",
+  "description": "패키지 표지. 결정론 계층이지만 generated_at만 가변. M1 스프레드시트판(sheets 필수) — docx body 변형은 M4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "converter_version",
+    "source",
+    "loader_path",
+    "sheets",
+    "generated_at",
+    "annotation"
+  ],
+  "properties": {
+    "tool": { "const": "excel_to_skill" },
+    "converter_version": { "type": "string", "minLength": 1 },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "sha256", "size_bytes", "format"],
+      "properties": {
+        "filename": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "format": { "enum": ["xlsx", "xls", "docx"] }
+      }
+    },
+    "loader_path": {
+      "enum": [
+        "openpyxl_normal",
+        "openpyxl_read_only",
+        "openpyxl_read_only+xml_merge",
+        "xlrd",
+        "python_docx"
+      ]
+    },
+    "sheets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "dimensions", "max_row", "max_col"],
+        "properties": {
+          "name": { "type": "string" },
+          "dimensions": { "type": "string", "minLength": 1 },
+          "max_row": { "type": "integer", "minimum": 0 },
+          "max_col": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "generated_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "annotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "annotator_version", "review_status"],
+      "properties": {
+        "present": { "type": "boolean" },
+        "annotator_version": { "type": ["string", "null"] },
+        "review_status": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
