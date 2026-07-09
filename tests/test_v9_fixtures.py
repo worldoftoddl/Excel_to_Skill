@@ -53,6 +53,21 @@ def _meta_norm(pkg: Path) -> dict:
     return d
 
 
+def _skill_norm(pkg: Path) -> str:
+    """SKILL.md에서 converter_version 줄만 placeholder로 치환(릴리스마다 가변).
+
+    나머지(sha12·name·description·머리 텍스트·구성·진단)는 픽스처 바이트 기반
+    결정론이라 그대로 스냅샷 대상. meta.norm과 같은 '버전값만 정규화' 취급.
+    """
+    out = []
+    for line in (pkg / "SKILL.md").read_text(encoding="utf-8").splitlines(keepends=True):
+        if line.startswith("- converter_version: "):
+            out.append("- converter_version: `<normalized>`\n")
+        else:
+            out.append(line)
+    return "".join(out)
+
+
 def _assert_snapshot(name: str, text: str) -> None:
     path = SNAP_DIR / name
     if UPDATE:
@@ -71,6 +86,11 @@ def test_snapshot(stem: str, tmp_path: Path) -> None:
         _assert_snapshot(f"{stem}/{Path(rel).name}", (pkg / rel).read_text(encoding="utf-8"))
     meta_text = json.dumps(_meta_norm(pkg), ensure_ascii=False, indent=2) + "\n"
     _assert_snapshot(f"{stem}/meta.norm.json", meta_text)
+    # layout HTML — 가변값 없음, 정렬 glob 원문 그대로 고정
+    for html in sorted((pkg / "layout").glob("*.html")):
+        _assert_snapshot(f"{stem}/layout/{html.name}", html.read_text(encoding="utf-8"))
+    # SKILL.md — converter_version만 정규화(meta.norm과 같은 취급)
+    _assert_snapshot(f"{stem}/SKILL.norm.md", _skill_norm(pkg))
 
 
 # ── verify V1·V3 ─────────────────────────────────────────────
