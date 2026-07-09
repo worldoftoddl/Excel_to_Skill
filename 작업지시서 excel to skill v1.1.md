@@ -307,6 +307,12 @@ slug 규칙: 공백→`_`, 경로 위험 문자 제거, 한글 유지, 시트명
 - **V2 evidence 실재성**: semantics의 모든 evidence가 (a) 형식 유효 (b) 실존 대상 (c) 범위 내인지 검증. 주소 문법은 **형식별 파서 플러그인**으로 — 스프레드시트 `시트!셀|범위`(재계산 used range 기준), docx `p{n} | t{k}!r{r}c{c}(/중첩)`(실존 인덱스 기준). **approve 전 필수 통과.**
 - **V3 재현성**: 동일 입력 2회 변환 → 결정론 계층 동일(meta.json은 `generated_at` 제외 정규화 비교).
 
+**verify 구현 기준 (v1.1 명문화 — M1 확정):**
+- **스키마 3종은 실제 방출 결과에 맞춘 엄격 스키마**(`additionalProperties: false`, JSON Schema draft-07): `schemas/{meta,references,diagnostics}.schema.json`. 특히 xlsx/xls 차이를 반영한다 — xls는 `external_links.count=null`(관찰 불가≠0), `references.observability.workbook="unavailable_xls"` + `note` 문자열, `diagnostics.format_limitations` 문자열, `hidden.sheets`에 숨김 시트가 존재하는 케이스가 모두 통과해야 한다. `semantics.schema.json`은 해석 계층(M3)에서 작성한다.
+- **M1 verify 범위**: V1(위 3종 스키마) + **필수 파일 존재**(meta.json·data/cells.jsonl·references.json·diagnostics.json) + **cells.jsonl 각 줄 JSON 파싱 sanity**(jsonl은 스키마 대상 아님) + V3(아래). `semantics.json`이 있으면 스키마 미작성이므로 **생략**(skipped)으로 보고. V2는 M3.
+- **V3의 원본 처리**: 패키지에는 원본 바이트가 없으므로 재현성 비교는 `verify <패키지> --source <원본>`으로 원본을 줄 때만 수행한다(임시 폴더로 재변환 후 결정론 계층 대조, meta는 `generated_at` 제외). **`--source`가 없다는 이유만으로 실패시키지 않는다** — V1이 통과하면 verify 통과이되 리포트에 `V3 skipped(원본 필요)`를 명시한다. `--source`가 주어졌는데 재현성 비교가 실패하면(또는 원본 sha가 패키지와 불일치하면) verify 실패.
+- **판정은 exit code가 권위**: 통과 0 / 실패 비영. 검사 리포트는 stdout, 실패 사유는 stderr. `annotate`/`review`는 M3까지 스텁(exit 2).
+
 ### 8.2 코퍼스 수용 기준 (M1~M3)
 
 - **V4 전수 변환**: 스프레드시트 32종 100% 성공. 함정 1의 5개 파일은 `loader_path`가 read_only 계열.
