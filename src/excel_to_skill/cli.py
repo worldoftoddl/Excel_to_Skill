@@ -23,6 +23,7 @@ convert/verify/review 경로 밖에 둔다(review는 결정론이라 anthropic �
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -57,6 +58,63 @@ def _safe_rmtree(target: Path, root: Path) -> None:
         raise RuntimeError(f"삭제 거부: {target} 는 출력 루트 {root} 밖")
     if target.exists():
         shutil.rmtree(target)
+
+
+def _should_inherit(probe: "cache.CacheProbe", old_pkg: Path) -> bool:
+    """§6 승계 조건: converter_version만 올랐고(version_changed), 기존이 **완료 주석**을
+    가진 실재 패키지(sha 일치·semantics.json·annotation_key non-null)일 때만."""
+    return bool(
+        probe.reason == "version_changed"
+        and probe.entry is not None
+        and probe.entry.get("annotation_key")
+        and probe.entry.get("sha256") == probe.sha256  # 12자 접두 충돌 방어
+        and (old_pkg / "data" / "semantics.json").is_file()
+    )
+
+
+def _inherit_semantics(
+    old_pkg: Path, staging: Path, *, annotation_key: str
+) -> tuple[str, str]:
+    """구 semantics를 staging으로 이월하고 V2 재검증(§6). 반환 (annotation_key, review_status).
+
+    이월된 evidence를 새 결정론 계층(staging의 meta.dimensions)으로 재검사해, 실패하면
+    review.status를 draft로 강등하고 review.note에 사유를 남긴다(annotation_key는 완료
+    marker라 유지 — 재승인은 approve의 verify 게이트가 V2로 다시 막는다). 이월 상태에
+    맞춰 meta.annotation과 SKILL.md(승인판/미승인)를 재생성한다.
+    """
+    from .emit_skill_md import build_skill_md_from_package
+    from .evidence import collect_evidence_problems
+    from .meta import set_annotation
+
+    sem = json.loads((old_pkg / "data/semantics.json").read_text(encoding="utf-8"))
+    staging_meta = json.loads((staging / "meta.json").read_text(encoding="utf-8"))
+    try:
+        problems = collect_evidence_problems(sem, staging_meta)
+    except NotImplementedError:
+        problems = []
+
+    review = sem.setdefault("review", {})
+    if problems:
+        review["status"] = "draft"
+        review["reviewed_at"] = None
+        review["note"] = f"승계 후 V2 재검증 실패로 draft 강등: {problems[:5]}"
+        _eprint(f"[승계] {old_pkg.name}: V2 재검증 실패 {len(problems)}건 → draft 강등")
+        status = "draft"
+    else:
+        status = review.get("status", "draft")
+        _eprint(f"[승계] {old_pkg.name}: semantics 승계 · V2 통과(status={status})")
+
+    (staging / "data" / "semantics.json").write_text(
+        json.dumps(sem, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    av = sem.get("generator", {}).get("annotator_version")
+    set_annotation(
+        staging, present=True, annotator_version=av,
+        review_status=status, annotation_key=annotation_key,
+    )
+    with (staging / "SKILL.md").open("w", encoding="utf-8", newline="\n") as fh:
+        fh.write(build_skill_md_from_package(staging))
+    return annotation_key, status
 
 
 def _convert_one(
@@ -95,6 +153,8 @@ def _convert_one(
     staging = root / (".staging_" + probe.package_dir)
     _safe_rmtree(staging, root)  # 이전 실패 잔재 제거
     root.mkdir(parents=True, exist_ok=True)
+    carried_key: str | None = None
+    carried_status: str | None = None
     try:
         staging.mkdir(parents=True)
         data = staging / "data"
@@ -130,6 +190,13 @@ def _convert_one(
             diagnostics=diag_doc,
             layout_filenames=filenames,
         )
+        # §6 승계: converter_version만 오른 재변환이면 완료된 구 semantics를 이월한다
+        # (구 패키지 삭제 전에 읽어 staging으로 옮기고, V2 재검증·SKILL 재생성).
+        if _should_inherit(probe, final):
+            carried_key, carried_status = _inherit_semantics(
+                final, staging, annotation_key=probe.entry["annotation_key"]
+            )
+
         # 여기까지 성공 → 원자적 교체(같은 파일시스템 내 rename)
         _safe_rmtree(final, root)
         staging.rename(final)
@@ -137,10 +204,12 @@ def _convert_one(
         shutil.rmtree(staging, ignore_errors=True)  # 반쪽 폴더 정리
         raise
 
-    # 최종 폴더가 선 뒤에만 색인 기록 (실패 시 _index.json 불변)
+    # 최종 폴더가 선 뒤에만 색인 기록 (실패 시 _index.json 불변). 승계 시 주석 키·
+    # 리뷰 상태를 이월값으로 기록(미승계면 None — 새 결정론 패키지).
     cache.record(
         root, src, sha256=probe.sha256, converter_version=cv,
         conversion_params=conv_params, generated_at=gen,
+        annotation_key=carried_key, review_status=carried_status,
     )
     return final
 
