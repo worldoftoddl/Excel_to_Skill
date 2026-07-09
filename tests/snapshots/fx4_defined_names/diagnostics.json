@@ -1,0 +1,60 @@
+{
+  "loader_path": "openpyxl_normal",
+  "external_links": {
+    "count": 0,
+    "targets_sample": []
+  },
+  "defined_names": {
+    "global_total": 4,
+    "sheet_scoped_total": 1,
+    "broken_ref_count": 1,
+    "legacy_path_count": 1,
+    "samples": [
+      {
+        "name": "BrokenName",
+        "value_head": "#REF!$A$1",
+        "flags": [
+          "broken_ref"
+        ]
+      },
+      {
+        "name": "LegacyPath",
+        "value_head": "'C:\\old\\book.xlsx'!$A$1",
+        "flags": [
+          "legacy_path"
+        ]
+      },
+      {
+        "name": "GlobalRange",
+        "value_head": "Data!$A$1:$A$3",
+        "flags": []
+      },
+      {
+        "name": "Contact",
+        "value_head": "\"u***@example.com\"",
+        "flags": []
+      },
+      {
+        "name": "LocalCell",
+        "value_head": "Data!$B$1",
+        "flags": []
+      }
+    ],
+    "sample_cap": 20,
+    "full_dump_present": false
+  },
+  "pii_suspects": {
+    "emails_masked": [
+      "u***@example.com"
+    ],
+    "legacy_paths_count": 0
+  },
+  "blank_source_formulas": [],
+  "hidden": {
+    "sheets": [],
+    "rows_count": 0,
+    "cols_count": 0
+  },
+  "truncations": [],
+  "format_limitations": null
+}

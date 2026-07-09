@@ -23,13 +23,19 @@ FX_DIR = Path(__file__).parent / "fixtures"
 SNAP_DIR = Path(__file__).parent / "snapshots"
 UPDATE = os.environ.get("UPDATE_SNAPSHOTS") == "1"
 
-FIXTURES = ["fx1_merge_formula", "fx2_refs", "fx3_slots_hidden"]
+FIXTURES = ["fx1_merge_formula", "fx2_refs", "fx3_slots_hidden", "fx4_defined_names"]
 _RAW_SNAPSHOTS = ["data/cells.jsonl", "data/references.json", "data/diagnostics.json"]
 
 
 # ── 공통 헬퍼 ────────────────────────────────────────────────
-def _convert(stem: str, out_root: Path) -> Path:
-    return _convert_one(FX_DIR / f"{stem}.xlsx", out_root, force=True, cv=_converter_version())
+def _convert(stem: str, out_root: Path, *, full_names: bool = False) -> Path:
+    return _convert_one(
+        FX_DIR / f"{stem}.xlsx",
+        out_root,
+        force=True,
+        cv=_converter_version(),
+        full_names=full_names,
+    )
 
 
 def _read_json(p: Path) -> dict:
@@ -101,6 +107,49 @@ def test_verify_v1_v3(stem: str, tmp_path: Path) -> None:
     assert result.ok, [(c.name, c.detail) for c in result.checks if not c.ok]
     v3 = next(c for c in result.checks if c.name == "V3")
     assert v3.ok and not v3.skipped  # 원본 제공 → 실제 재현성 수행
+
+
+# ── --full-names 전량 덤프(§4.0) ─────────────────────────────
+def test_full_names_dump_and_flag(tmp_path: Path) -> None:
+    """fx4를 --full-names로 변환 — 덤프·full_dump_present·교차검증·V3."""
+    pkg = _convert("fx4_defined_names", tmp_path, full_names=True)
+
+    # 전량 덤프 존재 + 결정론 스냅샷(합성 데이터, 이메일은 마스킹돼 유출 없음)
+    dnf = pkg / "data/defined_names_full.json"
+    assert dnf.is_file()
+    _assert_snapshot(
+        "fx4_defined_names/defined_names_full.json", dnf.read_text(encoding="utf-8")
+    )
+
+    # diagnostics.full_dump_present == True, meta 자기증언
+    diag = _read_json(pkg / "data/diagnostics.json")
+    assert diag["defined_names"]["full_dump_present"] is True
+    meta = _read_json(pkg / "meta.json")
+    assert meta["conversion_params"]["full_names"] is True
+
+    # 덤프 카운트 == diagnostics 카운트(단일 출처), 이원 집계·플래그
+    doc = _read_json(dnf)
+    for k in ("global_total", "sheet_scoped_total", "broken_ref_count", "legacy_path_count"):
+        assert doc[k] == diag["defined_names"][k]
+    assert doc["global_total"] == 4 and doc["sheet_scoped_total"] == 1
+    assert doc["broken_ref_count"] == 1 and doc["legacy_path_count"] == 1
+    # 이메일 P7 마스킹(원문 미노출)
+    assert any(n["value"] == '"u***@example.com"' for n in doc["names"])
+    assert not any(n["value"] and "user@example.com" in n["value"] for n in doc["names"])
+
+    # verify: full_names 체크 통과 + V1/V3 통과
+    result = verify_package(pkg, source=FX_DIR / "fx4_defined_names.xlsx")
+    assert result.ok, [(c.name, c.detail) for c in result.checks if not c.ok]
+    fn = next(c for c in result.checks if c.name == "full_names")
+    assert fn.ok and not fn.skipped
+
+
+def test_full_names_off_absent(tmp_path: Path) -> None:
+    """--full-names 없이 변환하면 덤프 부재 + full_dump_present False."""
+    pkg = _convert("fx4_defined_names", tmp_path)  # full_names=False
+    assert not (pkg / "data/defined_names_full.json").is_file()
+    diag = _read_json(pkg / "data/diagnostics.json")
+    assert diag["defined_names"]["full_dump_present"] is False
 
 
 # ── 픽스처별 핵심 진단 포인트 ────────────────────────────────

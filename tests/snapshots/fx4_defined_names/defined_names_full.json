@@ -1,0 +1,42 @@
+{
+  "global_total": 4,
+  "sheet_scoped_total": 1,
+  "broken_ref_count": 1,
+  "legacy_path_count": 1,
+  "names": [
+    {
+      "name": "GlobalRange",
+      "scope": null,
+      "value": "Data!$A$1:$A$3",
+      "flags": []
+    },
+    {
+      "name": "BrokenName",
+      "scope": null,
+      "value": "#REF!$A$1",
+      "flags": [
+        "broken_ref"
+      ]
+    },
+    {
+      "name": "LegacyPath",
+      "scope": null,
+      "value": "'C:\\old\\book.xlsx'!$A$1",
+      "flags": [
+        "legacy_path"
+      ]
+    },
+    {
+      "name": "Contact",
+      "scope": null,
+      "value": "\"u***@example.com\"",
+      "flags": []
+    },
+    {
+      "name": "LocalCell",
+      "scope": "Data",
+      "value": "Data!$B$1",
+      "flags": []
+    }
+  ]
+}

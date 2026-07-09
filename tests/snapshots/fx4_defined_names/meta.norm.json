@@ -1,0 +1,27 @@
+{
+  "tool": "excel_to_skill",
+  "source": {
+    "filename": "fx4_defined_names.xlsx",
+    "sha256": "3e3addf7e0e5be57844b050749fdbc363608dfd9a854aea382e0a91384dbe05b",
+    "size_bytes": 4958,
+    "format": "xlsx"
+  },
+  "loader_path": "openpyxl_normal",
+  "conversion_params": {
+    "max_rows": 5000,
+    "full_names": false
+  },
+  "sheets": [
+    {
+      "name": "Data",
+      "dimensions": "A1:B3",
+      "max_row": 3,
+      "max_col": 2
+    }
+  ],
+  "annotation": {
+    "present": false,
+    "annotator_version": null,
+    "review_status": null
+  }
+}

@@ -12,6 +12,9 @@
 - fx3_slots_hidden.xlsx — 테두리만 있는 빈 입력 슬롯이 cells에 남고, 그 빈 칸을
   참조하는 수식이 diagnostics.blank_source_formulas에 잡히는지 / 숨김 시트·행·열이
   diagnostics.hidden에 잡히는지.
+- fx4_defined_names.xlsx — 정의된 이름 이원 집계(전역/시트 스코프), #REF!·레거시
+  경로 플래그, 이메일 P7 마스킹, --full-names 전량 덤프(defined_names_full.json)와
+  full_dump_present 연동.
 """
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Border, PatternFill, Side
+from openpyxl.workbook.defined_name import DefinedName
 
 HERE = Path(__file__).parent
 _THIN = Side(style="thin")
@@ -69,10 +73,29 @@ def fx3_slots_hidden() -> None:
     wb.save(HERE / "fx3_slots_hidden.xlsx")
 
 
+def fx4_defined_names() -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws["A1"], ws["A2"], ws["A3"] = 1, 2, 3
+    ws["B1"] = 9
+    # 전역 정의 이름: 정상 범위·#REF! 손상·레거시 경로·이메일(P7 마스킹 대상)
+    wb.defined_names.add(DefinedName("GlobalRange", attr_text="Data!$A$1:$A$3"))
+    wb.defined_names.add(DefinedName("BrokenName", attr_text="#REF!$A$1"))
+    wb.defined_names.add(
+        DefinedName("LegacyPath", attr_text="'C:\\old\\book.xlsx'!$A$1")
+    )
+    wb.defined_names.add(DefinedName("Contact", attr_text='"user@example.com"'))
+    # 시트 스코프 정의 이름
+    ws.defined_names.add(DefinedName("LocalCell", attr_text="Data!$B$1"))
+    wb.save(HERE / "fx4_defined_names.xlsx")
+
+
 def main() -> None:
     fx1_merge_formula()
     fx2_refs()
     fx3_slots_hidden()
+    fx4_defined_names()
     for p in sorted(HERE.glob("fx*.xlsx")):
         print("WROTE", p.name, p.stat().st_size, "bytes")
 
