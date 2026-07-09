@@ -327,11 +327,16 @@ def annotate_package(
     out.write_text(
         json.dumps(semantics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    # meta.annotation을 semantics 상태와 일치시킨다(생성 시 draft).
+    # meta.annotation을 semantics 상태와 일치시킨다(부분 결과여도 draft·present=true).
     set_annotation(
         pkg, present=True, annotator_version=ANNOTATOR_VERSION, review_status="draft"
     )
-    # 색인에 주석 키·리뷰 상태 기록(캐시 hit 판정 근거). 항목이 없으면 조용히 통과.
-    if cache.update_annotation(root, dirname, annotation_key=key, review_status="draft") is None:
+    # 캐시 hit는 **완료된 주석**(excluded 없음)에만 허용한다. 부분 실패면 annotation_key를
+    # clear(None)해 다음 실행이 재시도하게 한다 — 실패 결과가 캐시를 오염시키지 않도록.
+    # 이미 키가 있던 상태에서 --force 재주석이 부분 실패해도 clear되어 stale hit을 막는다.
+    key_to_record = None if excluded else key
+    if cache.update_annotation(
+        root, dirname, annotation_key=key_to_record, review_status="draft"
+    ) is None:
         eprint(f"[annotate] 경고: _index.json에 {dirname} 항목 없음 — 주석 캐시 미기록")
     return {"path": out, "sheets": len(sheets_out), "excluded": excluded, "cached": False}

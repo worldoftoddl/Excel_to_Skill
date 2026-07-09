@@ -182,6 +182,38 @@ def test_annotate_cache_miss_on_model_change(tmp_path: Path) -> None:
     assert r.get("cached") is False and stub.responses == []
 
 
+def test_partial_annotate_does_not_poison_cache(tmp_path: Path) -> None:
+    """부분 실패(excluded 있음)는 annotation_key를 남기지 않아 다음 실행이 재시도한다."""
+    from excel_to_skill import cache
+
+    pkg = _pkg(tmp_path)
+    root, dirname = pkg.parent, pkg.name
+    # 1차: 시트 2연속 실패 → excluded=['Data'], key 미기록
+    r1 = annotate_package(pkg, client=StubClient([_BAD, _BAD, _WB_OK]))
+    assert r1["excluded"] == ["Data"] and r1["sheets"] == 0
+    assert cache.load_index(root)["entries"][dirname]["annotation_key"] is None
+
+    # 2차: 좋은 stub → 캐시 hit이 아니라 재시도(호출됨)해서 성공
+    stub = StubClient([_SHEET_OK, _WB_OK])
+    r2 = annotate_package(pkg, client=stub)
+    assert r2.get("cached") is False and r2["sheets"] == 1 and stub.responses == []
+    assert cache.load_index(root)["entries"][dirname]["annotation_key"]  # 이제 기록됨
+
+
+def test_force_partial_clears_existing_key(tmp_path: Path) -> None:
+    """기존 완료 키가 있어도 --force 재주석이 부분 실패하면 키를 clear한다."""
+    from excel_to_skill import cache
+
+    pkg = _pkg(tmp_path)
+    root, dirname = pkg.parent, pkg.name
+    annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]))  # 완료 → 키 기록
+    assert cache.load_index(root)["entries"][dirname]["annotation_key"]
+
+    # --force인데 부분 실패 → 기존 키 clear(다음 실행이 stale hit 안 나게)
+    annotate_package(pkg, client=StubClient([_BAD, _BAD, _WB_OK]), force=True)
+    assert cache.load_index(root)["entries"][dirname]["annotation_key"] is None
+
+
 def test_annotator_import_does_not_load_anthropic() -> None:
     """P1 경계: annotator import는 anthropic을 top-level로 불러오면 안 된다."""
     src = Path(annotator.__file__).read_text(encoding="utf-8")

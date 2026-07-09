@@ -168,25 +168,30 @@ def annotation_key(
     return h.hexdigest()
 
 
+_UNSET = object()  # "이 인자는 건드리지 않음"을 명시적 None(=값을 None으로 설정)과 구분
+
+
 def update_annotation(
     root: Path,
     dirname: str,
     *,
-    annotation_key: str | None = None,
-    review_status: str | None = None,
+    annotation_key=_UNSET,
+    review_status=_UNSET,
 ) -> dict | None:
     """기존 색인 항목의 해석 계층 필드만 갱신한다(결정론 필드는 불변).
 
     annotate/review가 semantics를 바꿀 때 `_index.json`을 맞춘다. 항목이 없으면
-    None(convert 없이 만들어진 패키지 등 — 호출자가 경고). 인자로 준 값만 덮어쓴다.
+    None(convert 없이 만들어진 패키지 등 — 호출자가 경고). **인자를 주면(=명시적으로
+    None이라도) 덮어쓰고, 생략하면 건드리지 않는다** — annotation_key=None을 넘겨
+    '완료되지 않은 주석'의 키를 clear할 수 있게 하기 위함(partial 실패 캐시 오염 방지).
     """
     index = load_index(root)
     entry = index.get("entries", {}).get(dirname)
     if entry is None:
         return None
-    if annotation_key is not None:
+    if annotation_key is not _UNSET:
         entry["annotation_key"] = annotation_key
-    if review_status is not None:
+    if review_status is not _UNSET:
         entry["review_status"] = review_status
     save_index(root, index)
     return entry
