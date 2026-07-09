@@ -38,6 +38,8 @@ _DETERMINISTIC = [
     "data/references.json",
     "data/diagnostics.json",
 ]
+# --full-names 시에만 존재하는 결정론 산출물. 있으면 V3 대조·V1 스키마에 포함한다.
+_FULL_NAMES_REL = "data/defined_names_full.json"
 
 
 @dataclass
@@ -108,6 +110,40 @@ def _check_cells_jsonl(pkg: Path) -> Check:
     return Check("cells.jsonl", True, f"{n}줄 JSON 정상")
 
 
+def _check_full_names(pkg: Path) -> Check:
+    """defined_names_full.json 존재 ↔ diagnostics.full_dump_present 일치 + 스키마.
+
+    - --full-names 안 켠 패키지는 파일이 없어야 정상, full_dump_present=false.
+    - 켠 패키지는 파일이 있고 full_dump_present=true.
+    둘이 어긋나면(한쪽만) 실패. 파일이 있으면 스키마까지 검증한다.
+    """
+    f = pkg / _FULL_NAMES_REL
+    present = f.is_file()
+    try:
+        diag = json.loads((pkg / "data/diagnostics.json").read_text(encoding="utf-8"))
+        flag = diag.get("defined_names", {}).get("full_dump_present", False)
+    except (OSError, json.JSONDecodeError) as e:
+        return Check("full_names", False, f"diagnostics 읽기 실패: {e}")
+
+    if present != flag:
+        return Check(
+            "full_names",
+            False,
+            f"불일치: 파일 존재={present} ↔ full_dump_present={flag}",
+        )
+    if not present:
+        return Check("full_names", True, "미방출 — full_dump_present=false 일치")
+    try:
+        doc = json.loads(f.read_text(encoding="utf-8"))
+        jsonschema.validate(doc, _load_schema("defined_names_full.schema.json"))
+    except json.JSONDecodeError as e:
+        return Check("full_names", False, f"JSON 파싱 실패: {e}")
+    except jsonschema.ValidationError as e:
+        loc = "/".join(str(p) for p in e.absolute_path) or "(root)"
+        return Check("full_names", False, f"{loc}: {e.message}")
+    return Check("full_names", True, "방출 — full_dump_present=true 일치·스키마 통과")
+
+
 def _check_reproducibility(pkg: Path, source: Path) -> Check:
     """원본을 임시 폴더로 재변환해 결정론 계층을 대조한다."""
     from .cli import _convert_one  # 순환 회피 위해 지연 import
@@ -118,16 +154,28 @@ def _check_reproducibility(pkg: Path, source: Path) -> Check:
     if _source_sha256(source) != meta["source"]["sha256"]:
         return Check("V3", False, "--source가 이 패키지의 원본과 다름(sha256 불일치)")
 
-    # 재변환 입력 = (원본 + 변환 파라미터). max_rows는 layout·truncations를
-    # 좌우하므로 CLI 기본값이 아니라 패키지가 증언한 값으로 재현해야 한다.
-    max_rows = meta.get("conversion_params", {}).get("max_rows") or DEFAULT_MAX_ROWS
+    # 재변환 입력 = (원본 + 변환 파라미터). max_rows는 layout·truncations를,
+    # full_names는 defined_names_full.json 존재를 좌우하므로 CLI 기본값이 아니라
+    # 패키지가 증언한 값으로 재현해야 한다.
+    params = meta.get("conversion_params", {})
+    max_rows = params.get("max_rows") or DEFAULT_MAX_ROWS
+    full_names = bool(params.get("full_names", False))
+    # 있으면 전량 덤프도 결정론 대조 대상에 포함(양쪽 다 같은 조건으로 재변환됨).
+    deterministic = list(_DETERMINISTIC)
+    if (pkg / _FULL_NAMES_REL).is_file():
+        deterministic.append(_FULL_NAMES_REL)
     with tempfile.TemporaryDirectory() as td:
         fresh = _convert_one(
-            source, Path(td), force=True, cv=_converter_version(), max_rows=max_rows
+            source,
+            Path(td),
+            force=True,
+            cv=_converter_version(),
+            max_rows=max_rows,
+            full_names=full_names,
         )
         diffs = [
             rel
-            for rel in _DETERMINISTIC
+            for rel in deterministic
             if (pkg / rel).read_bytes() != (fresh / rel).read_bytes()
         ]
 
@@ -151,6 +199,7 @@ def verify_package(pkg: Path, source: Path | None = None) -> VerifyResult:
     for rel, schema_name in _SCHEMA_MAP.items():
         checks.append(_check_schema(pkg, rel, schema_name))
     checks.append(_check_cells_jsonl(pkg))
+    checks.append(_check_full_names(pkg))
 
     if (pkg / "data/semantics.json").is_file():
         checks.append(

@@ -48,11 +48,16 @@ def build_diagnostics(
     ir: WorkbookIR,
     references: dict | None = None,
     truncations: list[dict] | None = None,
+    *,
+    full_names: bool = False,
 ) -> dict:
     """diagnostics.json 문서(dict)를 만든다. 필드 순서는 §4.6 스키마 고정.
 
     truncations: layout HTML 절단 기록(emit_html.write_layout이 돌려준 것).
     기본 None → 빈 배열(기존 호출·M1 스냅샷 호환). 원장은 절대 자르지 않는다.
+    full_names: --full-names로 defined_names_full.json을 방출했는지. True면
+    defined_names.full_dump_present=true — 실제 파일 존재와 이 플래그가 일치해야
+    한다(verify 교차검증). 기본 False라 기존 호출·스냅샷 호환.
     """
     if references is None:
         references = build_references(ir)
@@ -139,7 +144,7 @@ def build_diagnostics(
             "legacy_path_count": legacy_path_count,
             "samples": samples,
             "sample_cap": _SAMPLE_CAP,
-            "full_dump_present": False,
+            "full_dump_present": full_names,
         },
         "pii_suspects": {
             "emails_masked": emails_masked,
@@ -163,9 +168,11 @@ def write_diagnostics(
     out_path: Path,
     references: dict | None = None,
     truncations: list[dict] | None = None,
+    *,
+    full_names: bool = False,
 ) -> dict:
     """diagnostics.json을 쓰고 문서를 반환한다."""
-    doc = build_diagnostics(ir, references, truncations)
+    doc = build_diagnostics(ir, references, truncations, full_names=full_names)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="\n") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2, allow_nan=False)

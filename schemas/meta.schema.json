@@ -40,9 +40,10 @@
     "conversion_params": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["max_rows"],
+      "required": ["max_rows", "full_names"],
       "properties": {
-        "max_rows": { "type": "integer", "minimum": 1 }
+        "max_rows": { "type": "integer", "minimum": 1 },
+        "full_names": { "type": "boolean" }
       }
     },
     "sheets": {

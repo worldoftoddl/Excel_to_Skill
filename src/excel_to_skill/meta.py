@@ -62,12 +62,14 @@ def build_meta(
     generated_at: str | None = None,
     *,
     max_rows: int = _DEFAULT_MAX_ROWS,
+    full_names: bool = False,
 ) -> dict:
     """meta.json 문서(dict)를 만든다. 필드 순서는 §4.1 스키마 고정.
 
-    conversion_params: 결정론 출력(layout·truncations)을 좌우하는 변환 파라미터를
-    패키지가 자기증언하게 한다. verify --source 재변환이 이 값을 읽어 재현한다.
-    후속 --full-names 등도 이 객체에 필드로 추가한다(구조를 객체로 열어둠).
+    conversion_params: 결정론 출력(layout·truncations·defined_names_full 존재)을
+    좌우하는 변환 파라미터를 패키지가 자기증언하게 한다. verify --source 재변환이
+    이 값을 읽어 재현한다. max_rows(layout 절단)와 full_names(전량 덤프 산출물의
+    존재 자체를 바꿈)가 그 파라미터다.
     """
     path = ir.source_path
     sheets = [
@@ -89,7 +91,7 @@ def build_meta(
             "format": ir.format,
         },
         "loader_path": ir.loader_path,
-        "conversion_params": {"max_rows": max_rows},
+        "conversion_params": {"max_rows": max_rows, "full_names": full_names},
         "sheets": sheets,
         "generated_at": generated_at if generated_at is not None else _now_iso(),
         "annotation": {
@@ -106,9 +108,10 @@ def write_meta(
     generated_at: str | None = None,
     *,
     max_rows: int = _DEFAULT_MAX_ROWS,
+    full_names: bool = False,
 ) -> dict:
     """meta.json을 쓰고 문서를 반환한다."""
-    doc = build_meta(ir, generated_at, max_rows=max_rows)
+    doc = build_meta(ir, generated_at, max_rows=max_rows, full_names=full_names)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="\n") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2, allow_nan=False)

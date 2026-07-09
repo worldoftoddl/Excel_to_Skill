@@ -28,6 +28,7 @@ from pathlib import Path
 
 from . import cache
 from .emit_cells import write_cells_jsonl
+from .emit_defined_names import write_defined_names_full
 from .emit_diag import write_diagnostics
 from .emit_html import DEFAULT_MAX_ROWS, write_layout
 from .emit_refs import write_references
@@ -58,13 +59,22 @@ def _safe_rmtree(target: Path, root: Path) -> None:
 
 
 def _convert_one(
-    src: Path, root: Path, *, force: bool, cv: str, max_rows: int = DEFAULT_MAX_ROWS
+    src: Path,
+    root: Path,
+    *,
+    force: bool,
+    cv: str,
+    max_rows: int = DEFAULT_MAX_ROWS,
+    full_names: bool = False,
 ) -> Path:
     """파일 하나를 패키지로 변환하고 최종 폴더 경로를 돌려준다.
 
     hit이면 재생성 없이 기존 경로. miss/force면 임시 폴더에 조립 후 원자적 교체.
     조립 순서: meta → cells → references → **layout(절단 계산) → diagnostics
     (truncations 반영) → SKILL.md**. 원장(cells)은 절대 자르지 않는다.
+    full_names면 data/defined_names_full.json(전량 덤프)을 추가로 쓰고 diagnostics의
+    full_dump_present=true로 맞춘다. meta.conversion_params.full_names가 그 조건을
+    자기증언해 V3 재변환이 같은 조건으로 재현한다.
     """
     probe = cache.probe(root, src, converter_version=cv, force=force)
     if probe.hit:
@@ -84,16 +94,27 @@ def _convert_one(
         data = staging / "data"
         data.mkdir()
         meta_doc = write_meta(
-            ir, staging / "meta.json", generated_at=gen, max_rows=max_rows
+            ir,
+            staging / "meta.json",
+            generated_at=gen,
+            max_rows=max_rows,
+            full_names=full_names,
         )
         write_cells_jsonl(ir, data / "cells.jsonl")
         refs = write_references(ir, data / "references.json")
+        # --full-names면 정의이름 전량 덤프(전건 + 값 전문, 이메일만 P7 마스킹).
+        if full_names:
+            write_defined_names_full(ir, data / "defined_names_full.json")
         # layout을 먼저 써서 절단 기록을 받고, 그걸 diagnostics에 반영한다.
         filenames, truncations = write_layout(
             ir, staging / "layout", max_rows=max_rows
         )
         diag_doc = write_diagnostics(
-            ir, data / "diagnostics.json", references=refs, truncations=truncations
+            ir,
+            data / "diagnostics.json",
+            references=refs,
+            truncations=truncations,
+            full_names=full_names,
         )
         write_skill_md(
             ir,
@@ -124,11 +145,6 @@ def _warn_unsupported(args: argparse.Namespace) -> None:
             "[안내] 주석기(해석 계층) 미구현 — 결정론 계층만 생성됩니다"
             "(현재 기본, =--no-annotate)."
         )
-    if args.full_names:
-        _eprint(
-            "[안내] --full-names: defined_names_full.json 방출기 미구현"
-            " — 이번 범위 밖, 무시."
-        )
     if args.force_annotate:
         _eprint("[안내] --force-annotate: annotate 미구현 — 무시.")
     if args.model is not None:
@@ -139,6 +155,7 @@ def _cmd_convert(args: argparse.Namespace) -> int:
     root = Path(args.out)
     cv = _converter_version()
     max_rows = args.max_rows
+    full_names = args.full_names
     _warn_unsupported(args)
     target = Path(args.path)
 
@@ -158,7 +175,12 @@ def _cmd_convert(args: argparse.Namespace) -> int:
         failed = 0
         for f in files:
             try:
-                print(_convert_one(f, root, force=args.force, cv=cv, max_rows=max_rows))
+                print(
+                    _convert_one(
+                        f, root, force=args.force, cv=cv,
+                        max_rows=max_rows, full_names=full_names,
+                    )
+                )
             except Exception as e:  # 한 파일 실패해도 배치 계속
                 failed += 1
                 _eprint(f"[실패] {f.name}: {e!r}")
@@ -170,7 +192,12 @@ def _cmd_convert(args: argparse.Namespace) -> int:
         _eprint(f"[오류] 파일이 아님: {target}")
         return 1
     try:
-        print(_convert_one(target, root, force=args.force, cv=cv, max_rows=max_rows))
+        print(
+            _convert_one(
+                target, root, force=args.force, cv=cv,
+                max_rows=max_rows, full_names=full_names,
+            )
+        )
         return 0
     except Exception as e:
         _eprint(f"[실패] {target.name}: {e!r}")
@@ -210,7 +237,11 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument("--force", action="store_true", help="캐시 무시하고 재생성")
     c.add_argument("--no-annotate", action="store_true", help="해석 계층 생략(현재 기본)")
     c.add_argument("--force-annotate", action="store_true", help="(미구현)")
-    c.add_argument("--full-names", action="store_true", help="(이번 범위 밖)")
+    c.add_argument(
+        "--full-names",
+        action="store_true",
+        help="정의된 이름 전량 덤프(data/defined_names_full.json) 방출",
+    )
     c.add_argument(
         "--max-rows",
         type=int,
