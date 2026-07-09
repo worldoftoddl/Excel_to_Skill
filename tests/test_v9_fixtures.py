@@ -324,6 +324,33 @@ def test_v2_skipped_when_no_semantics(tmp_path: Path) -> None:
     assert all(c.name != "V2" for c in verify_package(pkg).checks)  # 검사 자체 없음
 
 
+def test_v2_flags_bad_sheet_name_and_section_range(tmp_path: Path) -> None:
+    """sheets[].name 실존·sections[].range 범위내도 V2 대상(evidence만 맞으면 안 됨)."""
+    pkg = _convert("fx1_merge_formula", tmp_path)
+    # name은 없는 시트, range는 used range(A1:B5) 밖 — 단 evidence는 유효
+    doc = _base_semantics()
+    doc["sheets"][0]["name"] = "Nope"
+    doc["sheets"][0]["evidence"] = ["Data!A1"]  # evidence 자체는 실재
+    doc["sheets"][0]["sections"][0]["range"] = "A1:C9"  # B열·5행 초과
+    _write_semantics(pkg, doc)
+    c = _v2(pkg)
+    assert not c.ok
+    assert "sheets[0].name" in c.detail and "sheets[0].sections[0].range" in c.detail
+
+
+def test_v2_skipped_when_semantics_schema_fails(tmp_path: Path) -> None:
+    """semantics가 JSON으로는 읽혀도 스키마 실패면 V2는 크래시 없이 생략."""
+    pkg = _convert("fx1_merge_formula", tmp_path)
+    doc = _base_semantics()
+    doc["sheets"] = "not-a-list"  # 스키마 위반(배열 아님) — 과거 V2 AttributeError 경로
+    _write_semantics(pkg, doc)
+    checks = verify_package(pkg).checks
+    v1 = next(c for c in checks if c.name == "V1:data/semantics.json")
+    v2 = next(c for c in checks if c.name == "V2")
+    assert not v1.ok  # 스키마 실패
+    assert v2.skipped and v2.ok  # 크래시 대신 생략(선행 실패라 판정엔 영향 없음)
+
+
 def test_semantics_schema_rejects_missing_evidence(tmp_path: Path) -> None:
     """P4: evidence 비어 있으면 스키마(minItems 1)에서 걸린다."""
     pkg = _convert("fx1_merge_formula", tmp_path)

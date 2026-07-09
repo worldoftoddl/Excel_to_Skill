@@ -63,6 +63,20 @@ class SpreadsheetAddress:
             return f"형식 무효(단일 셀 아님): {label}={coord!r}"
         return self._contains(sheet, coord.upper(), label)
 
+    def check_sheet_name(self, name, label: str) -> str | None:
+        """sheets[].name이 meta에 실존하는 시트인지. 통과면 None."""
+        if not isinstance(name, str) or name not in self._bounds:
+            return f"실존하지 않는 시트: {label}={name!r}"
+        return None
+
+    def check_relative_ref(self, sheet, ref: str, label: str) -> str | None:
+        """section 소속 sheet 기준 상대 셀/범위 `A1`·`A1:B2` 검증. 통과면 None."""
+        if not isinstance(sheet, str) or sheet not in self._bounds:
+            return f"실존하지 않는 시트: {label} (시트 {sheet!r})"
+        if not isinstance(ref, str) or not (_CELL_RE.match(ref) or _RANGE_RE.match(ref)):
+            return f"형식 무효(셀/범위 아님): {label}={ref!r}"
+        return self._contains(sheet, ref.upper(), label)
+
     def _contains(self, sheet: str, coord: str, label: str) -> str | None:
         dims = self._bounds[sheet]
         if dims is None:
@@ -108,15 +122,34 @@ def collect_evidence_problems(semantics: dict, meta: dict) -> list[str]:
             if p:
                 problems.append(f"{where}: {p}")
 
-    for i, wc in enumerate(semantics.get("workbook_claims", [])):
-        _abs(wc.get("evidence"), f"workbook_claims[{i}].evidence")
+    # isinstance 방어: verify_package가 스키마 통과 문서만 넘기지만, 이 함수를
+    # 단독 호출해도(검증 안 된 dict) 크래시 없이 문제로 보고하도록 이중 방어한다.
+    for i, wc in enumerate(_as_list(semantics.get("workbook_claims"))):
+        if isinstance(wc, dict):
+            _abs(wc.get("evidence"), f"workbook_claims[{i}].evidence")
 
-    for si, sh in enumerate(semantics.get("sheets", [])):
+    for si, sh in enumerate(_as_list(semantics.get("sheets"))):
+        if not isinstance(sh, dict):
+            continue
         sheet_name = sh.get("name")
+        # sheets[].name은 meta에 실존하는 시트여야 한다.
+        p = plugin.check_sheet_name(sheet_name, f"sheets[{si}].name")
+        if p:
+            problems.append(p)
         _abs(sh.get("evidence"), f"sheets[{si}].evidence")
-        for ci, sec in enumerate(sh.get("sections", []) or []):
+        for ci, sec in enumerate(_as_list(sh.get("sections"))):
+            if not isinstance(sec, dict):
+                continue
+            # sections[].range는 소속 sheet 기준 상대 셀/범위로 used range 안이어야.
+            p = plugin.check_relative_ref(
+                sheet_name, sec.get("range"), f"sheets[{si}].sections[{ci}].range"
+            )
+            if p:
+                problems.append(p)
             _abs(sec.get("evidence"), f"sheets[{si}].sections[{ci}].evidence")
-            for fi, fld in enumerate(sec.get("fields", []) or []):
+            for fi, fld in enumerate(_as_list(sec.get("fields"))):
+                if not isinstance(fld, dict):
+                    continue
                 for key in ("label_cell", "value_cell"):
                     val = fld.get(key)
                     if isinstance(val, str):  # null/누락은 검증 생략, 문자열이면 필수
@@ -128,3 +161,8 @@ def collect_evidence_problems(semantics: dict, meta: dict) -> list[str]:
                         if p:
                             problems.append(p)
     return problems
+
+
+def _as_list(v) -> list:
+    """리스트가 아니면 빈 리스트로(스키마 밖 문서의 순회 크래시 방어)."""
+    return v if isinstance(v, list) else []

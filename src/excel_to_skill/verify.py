@@ -259,16 +259,30 @@ def verify_package(pkg: Path, source: Path | None = None) -> VerifyResult:
     """패키지를 검증한다. source가 있으면 V3(재현성)까지 수행."""
     files_check = _check_files(pkg)
     checks = [files_check]
+    schema_ok: dict[str, bool] = {}
     for rel, schema_name in _SCHEMA_MAP.items():
-        checks.append(_check_schema(pkg, rel, schema_name))
+        c = _check_schema(pkg, rel, schema_name)
+        schema_ok[rel] = c.ok
+        checks.append(c)
     checks.append(_check_cells_jsonl(pkg))
     checks.append(_check_full_names(pkg))
 
     if (pkg / "data/semantics.json").is_file():
-        checks.append(
-            _check_schema(pkg, "data/semantics.json", "semantics.schema.json")
-        )
-        checks.append(_check_evidence(pkg))
+        sem_check = _check_schema(pkg, "data/semantics.json", "semantics.schema.json")
+        checks.append(sem_check)
+        # V2는 스키마를 통과한 문서만 대상으로 한다. semantics 스키마가 깨졌거나
+        # meta 스키마가 깨졌으면(=sheets/format 구조를 신뢰 불가) 실재성 검증은
+        # 크래시 위험이 있으므로 생략으로 보고한다(선행 실패가 이미 verify 실패).
+        if not sem_check.ok:
+            checks.append(
+                Check("V2", True, "semantics 스키마 실패 — 실재성 검증 생략", skipped=True)
+            )
+        elif not schema_ok.get("meta.json", False):
+            checks.append(
+                Check("V2", True, "meta 스키마 실패 — 실재성 검증 생략", skipped=True)
+            )
+        else:
+            checks.append(_check_evidence(pkg))
 
     if source is None:
         checks.append(
