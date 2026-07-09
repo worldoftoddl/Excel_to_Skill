@@ -98,8 +98,12 @@ def build_meta(
             "present": False,
             "annotator_version": None,
             "review_status": None,
+            "annotation_key": None,  # 완료된 주석 marker(패키지-독립) — annotate가 채움
         },
     }
+
+
+_KEEP = object()  # set_annotation에서 "이 필드는 기존 값 유지"를 뜻하는 sentinel
 
 
 def set_annotation(
@@ -108,19 +112,26 @@ def set_annotation(
     present: bool,
     annotator_version: str | None,
     review_status: str | None,
+    annotation_key=_KEEP,
 ) -> None:
     """meta.json의 annotation 블록을 갱신한다(해석 계층 상태를 provenance에 반영).
 
     annotate/review가 semantics를 바꿀 때 meta도 함께 맞춰, meta가 semantics 상태와
     모순되지 않게 한다. 이 블록은 비결정론(해석 계층)이므로 verify V3의 meta 비교에서는
     제외된다. 형식(indent·개행·allow_nan)은 write_meta와 동일하게 유지한다.
+
+    `annotation_key`는 **완료된 주석 marker(패키지-독립)**다 — annotate가 완료 시 4성분
+    키를, partial이면 None을 넣는다. review는 이 값을 건드리지 않으므로 생략(=_KEEP)해
+    기존 값을 보존한다.
     """
     p = Path(pkg) / "meta.json"
     doc = json.loads(p.read_text(encoding="utf-8"))
+    prev = doc.get("annotation", {})
     doc["annotation"] = {
         "present": present,
         "annotator_version": annotator_version,
         "review_status": review_status,
+        "annotation_key": prev.get("annotation_key") if annotation_key is _KEEP else annotation_key,
     }
     with p.open("w", encoding="utf-8", newline="\n") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2, allow_nan=False)

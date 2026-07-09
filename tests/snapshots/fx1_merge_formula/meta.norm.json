@@ -22,6 +22,7 @@
   "annotation": {
     "present": false,
     "annotator_version": null,
-    "review_status": null
+    "review_status": null,
+    "annotation_key": null
   }
 }

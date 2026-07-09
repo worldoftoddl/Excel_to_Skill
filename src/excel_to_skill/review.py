@@ -57,10 +57,10 @@ def approve(pkg) -> dict:
 
     semantics = json.loads(path.read_text(encoding="utf-8"))
 
-    # 승인 게이트 ②: **완료된 주석만 승인**. annotation_key가 완료 marker이므로,
-    # 현재 semantics.generator+meta로 계산한 4성분 키가 _index에 기록된 키와 같아야
-    # 한다. partial annotate는 키를 남기지 않으므로(=None) 불일치 → 거부. 이로써
-    # sheets=[]·excluded=['...']인 부분 산출물이 승인되는 것을 막는다.
+    # 승인 게이트 ②: **완료된 주석만 승인**(패키지-독립). annotation_key가 완료 marker
+    # 이므로, semantics.generator+meta로 계산한 4성분 키가 **meta.annotation.annotation_key**
+    # (패키지 내부 marker)와 같아야 한다. partial annotate는 키를 남기지 않으므로(None)
+    # 불일치→거부. _index가 아니라 패키지 파일만 보므로 폴더를 옮겨도 승인이 동작한다.
     gen = semantics.get("generator", {})
     meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
     expected = cache.annotation_key(
@@ -69,8 +69,7 @@ def approve(pkg) -> dict:
         gen.get("model", ""),
         gen.get("prompt_sha", ""),
     )
-    entry = cache.load_index(pkg.parent).get("entries", {}).get(pkg.name)
-    recorded = entry.get("annotation_key") if entry else None
+    recorded = meta.get("annotation", {}).get("annotation_key")
     if recorded != expected:
         raise ReviewError(
             "완료되지 않은 주석은 승인할 수 없습니다"

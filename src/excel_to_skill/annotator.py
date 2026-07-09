@@ -327,14 +327,17 @@ def annotate_package(
     out.write_text(
         json.dumps(semantics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    # meta.annotation을 semantics 상태와 일치시킨다(부분 결과여도 draft·present=true).
-    set_annotation(
-        pkg, present=True, annotator_version=ANNOTATOR_VERSION, review_status="draft"
-    )
-    # 캐시 hit는 **완료된 주석**(excluded 없음)에만 허용한다. 부분 실패면 annotation_key를
-    # clear(None)해 다음 실행이 재시도하게 한다 — 실패 결과가 캐시를 오염시키지 않도록.
-    # 이미 키가 있던 상태에서 --force 재주석이 부분 실패해도 clear되어 stale hit을 막는다.
+    # 완료 marker: excluded 없는 완료 주석만 annotation_key를 남긴다. 부분 실패면 None으로
+    # (캐시 오염·partial 승인 방지). meta.annotation.annotation_key(패키지-독립 marker)와
+    # _index.annotation_key(캐시/승계 미러) 둘 다 같은 값으로 세운다.
     key_to_record = None if excluded else key
+    set_annotation(
+        pkg,
+        present=True,
+        annotator_version=ANNOTATOR_VERSION,
+        review_status="draft",
+        annotation_key=key_to_record,
+    )
     if cache.update_annotation(
         root, dirname, annotation_key=key_to_record, review_status="draft"
     ) is None:

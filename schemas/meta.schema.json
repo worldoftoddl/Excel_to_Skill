@@ -15,17 +15,42 @@
     "annotation"
   ],
   "properties": {
-    "tool": { "const": "excel_to_skill" },
-    "converter_version": { "type": "string", "minLength": 1 },
+    "tool": {
+      "const": "excel_to_skill"
+    },
+    "converter_version": {
+      "type": "string",
+      "minLength": 1
+    },
     "source": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["filename", "sha256", "size_bytes", "format"],
+      "required": [
+        "filename",
+        "sha256",
+        "size_bytes",
+        "format"
+      ],
       "properties": {
-        "filename": { "type": "string", "minLength": 1 },
-        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "size_bytes": { "type": "integer", "minimum": 0 },
-        "format": { "enum": ["xlsx", "xls", "docx"] }
+        "filename": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "format": {
+          "enum": [
+            "xlsx",
+            "xls",
+            "docx"
+          ]
+        }
       }
     },
     "loader_path": {
@@ -40,10 +65,18 @@
     "conversion_params": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["max_rows", "full_names"],
+      "required": [
+        "max_rows",
+        "full_names"
+      ],
       "properties": {
-        "max_rows": { "type": "integer", "minimum": 1 },
-        "full_names": { "type": "boolean" }
+        "max_rows": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "full_names": {
+          "type": "boolean"
+        }
       }
     },
     "sheets": {
@@ -51,12 +84,28 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "dimensions", "max_row", "max_col"],
+        "required": [
+          "name",
+          "dimensions",
+          "max_row",
+          "max_col"
+        ],
         "properties": {
-          "name": { "type": "string" },
-          "dimensions": { "type": "string", "minLength": 1 },
-          "max_row": { "type": "integer", "minimum": 0 },
-          "max_col": { "type": "integer", "minimum": 0 }
+          "name": {
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "string",
+            "minLength": 1
+          },
+          "max_row": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max_col": {
+            "type": "integer",
+            "minimum": 0
+          }
         }
       }
     },
@@ -67,11 +116,34 @@
     "annotation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["present", "annotator_version", "review_status"],
+      "required": [
+        "present",
+        "annotator_version",
+        "review_status",
+        "annotation_key"
+      ],
       "properties": {
-        "present": { "type": "boolean" },
-        "annotator_version": { "type": ["string", "null"] },
-        "review_status": { "type": ["string", "null"] }
+        "present": {
+          "type": "boolean"
+        },
+        "annotator_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "review_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "annotation_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     }
   }

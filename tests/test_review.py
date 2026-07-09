@@ -148,7 +148,8 @@ def test_meta_annotation_tracks_semantics_state(tmp_path: Path) -> None:
     )
     meta0 = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
     assert meta0["annotation"] == {
-        "present": False, "annotator_version": None, "review_status": None
+        "present": False, "annotator_version": None,
+        "review_status": None, "annotation_key": None,
     }
 
     annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]))
@@ -181,6 +182,25 @@ def test_approve_refused_for_partial_annotation(tmp_path: Path) -> None:
     # 완료 주석(--force)으로 다시 만들면 승인 가능
     annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]), force=True)
     assert review.approve(pkg)["status"] == "approved"
+
+
+def test_approve_is_package_standalone(tmp_path: Path) -> None:
+    """완료 marker가 meta.annotation에 있으므로, 폴더만 복사해도(부모 _index 없이) 승인된다."""
+    import shutil
+
+    pkg = _annotated_pkg(tmp_path)  # 완료 주석
+    # meta.annotation.annotation_key(패키지 내부 marker)가 채워졌는지
+    ann = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))["annotation"]
+    assert ann["annotation_key"]
+
+    copied = tmp_path / "elsewhere" / "pkgcopy"
+    copied.parent.mkdir(parents=True)
+    shutil.copytree(pkg, copied)  # _index.json은 tmp_path에 있고 복사 안 됨
+    assert not (copied.parent / "_index.json").exists()
+
+    res = review.approve(copied)  # 패키지 파일만으로 승인 동작
+    assert res["status"] == "approved"
+    assert json.loads((copied / "data/semantics.json").read_text())["review"]["status"] == "approved"
 
 
 def test_review_without_semantics_errors(tmp_path: Path) -> None:
