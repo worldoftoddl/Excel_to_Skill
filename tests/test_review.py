@@ -163,6 +163,26 @@ def test_meta_annotation_tracks_semantics_state(tmp_path: Path) -> None:
     assert verify_package(pkg, source=FX_DIR / "fx1_merge_formula.xlsx").ok
 
 
+def test_approve_refused_for_partial_annotation(tmp_path: Path) -> None:
+    """부분 주석(excluded 있음, annotation_key 미완료)은 verify가 통과해도 승인 거부."""
+    pkg = _convert_one(
+        FX_DIR / "fx1_merge_formula.xlsx", tmp_path, force=True, cv=_converter_version()
+    )
+    # 시트 2연속 실패 → excluded=['Data'], annotation_key=None(partial)
+    annotate_package(pkg, client=StubClient(["not json", "not json", _WB_OK]))
+    sem = _sem(pkg)
+    assert sem["sheets"] == [] and sem["review"]["status"] == "draft"
+    assert verify_package(pkg).ok  # V1/V2는 통과(빈 sheets 허용)
+
+    with pytest.raises(review.ReviewError):  # 그래도 승인은 거부
+        review.approve(pkg)
+    assert _sem(pkg)["review"]["status"] == "draft"  # 상태 불변
+
+    # 완료 주석(--force)으로 다시 만들면 승인 가능
+    annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]), force=True)
+    assert review.approve(pkg)["status"] == "approved"
+
+
 def test_review_without_semantics_errors(tmp_path: Path) -> None:
     pkg = _convert_one(
         FX_DIR / "fx1_merge_formula.xlsx", tmp_path, force=True, cv=_converter_version()

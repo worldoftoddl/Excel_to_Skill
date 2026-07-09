@@ -49,13 +49,34 @@ def approve(pkg) -> dict:
     pkg = Path(pkg)
     path = _semantics_path(pkg)
 
-    # 승인 게이트: 원본 없이 verify(→V3 skip). V1·V2·필수파일 등 전부 통과해야.
+    # 승인 게이트 ①: 원본 없이 verify(→V3 skip). V1·V2·필수파일 등 전부 통과해야.
     result = verify_package(pkg, source=None)
     if not result.ok:
         fails = [f"{c.name}: {c.detail}" for c in result.checks if not c.skipped and not c.ok]
         raise ReviewError(f"verify 실패로 승인 거부 — {fails}")
 
     semantics = json.loads(path.read_text(encoding="utf-8"))
+
+    # 승인 게이트 ②: **완료된 주석만 승인**. annotation_key가 완료 marker이므로,
+    # 현재 semantics.generator+meta로 계산한 4성분 키가 _index에 기록된 키와 같아야
+    # 한다. partial annotate는 키를 남기지 않으므로(=None) 불일치 → 거부. 이로써
+    # sheets=[]·excluded=['...']인 부분 산출물이 승인되는 것을 막는다.
+    gen = semantics.get("generator", {})
+    meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
+    expected = cache.annotation_key(
+        meta.get("source", {}).get("sha256", ""),
+        gen.get("annotator_version", ""),
+        gen.get("model", ""),
+        gen.get("prompt_sha", ""),
+    )
+    entry = cache.load_index(pkg.parent).get("entries", {}).get(pkg.name)
+    recorded = entry.get("annotation_key") if entry else None
+    if recorded != expected:
+        raise ReviewError(
+            "완료되지 않은 주석은 승인할 수 없습니다"
+            "(annotation_key 미완료/불일치 — annotate를 다시 완료하세요)."
+        )
+
     semantics["review"] = {"status": "approved", "reviewed_at": _now_iso(), "note": None}
     _write_semantics(path, semantics)
     _sync_meta(pkg, semantics, "approved")
