@@ -117,6 +117,14 @@ excel-to-skill verify  <패키지경로>
 - `annotate` / `review` / `verify`: v1.0과 동일. `verify`는 §8의 V1~V3, 실패 시 비영 exit code.
 - 기본 출력: `./converted/`, 색인 `converted/_index.json`.
 
+**convert 조립 계약 (v1.1 명문화 — cli 1차 구현 확정):**
+- **stdout/stderr 분리**: stdout에는 **패키지 경로만** 출력한다(단일 파일=마지막 한 줄, `--all`=성공한 파일마다 한 줄). 진행 로그·캐시 hit/miss 사유·경고·오류는 **전부 stderr**로 보낸다.
+- **generated_at 단일 계산**: 한 번의 convert에서 시각을 1회만 계산해 `meta.json`과 `_index.json` 항목에 **같은 값**을 넣는다.
+- **원자적 생성**: 임시 폴더(`.staging_*`)에 모든 산출물을 쓴 뒤 성공하면 최종 폴더로 교체(rename)하고, **그 다음에야** `_index.json`을 upsert한다. 도중 실패 시 임시 폴더만 제거하고 색인은 손대지 않는다 — 반쪽 폴더가 캐시 hit로 잡히지 않는다. 재생성 시 기존 최종 폴더는 클린 슬레이트로 교체하되, **삭제 대상은 반드시 출력 루트 내부로 한정**(root 바깥 경로 삭제는 거부).
+- **캐시 hit**: 어떤 파일도 다시 쓰지 않고 기존 패키지 경로만 stdout에 출력한다.
+- **`--all`**: 디렉터리 **최상위**의 `*.xlsx`·`*.xls`만 정렬 순회한다(재귀 없음, Excel 임시잠금 `~$*` 제외). 한 파일이 실패해도 나머지는 계속 처리하고, **하나라도 실패하면 최종 exit code는 비영**.
+- **M1 1차 범위(갈래 1)**: convert가 조립하는 결정론 산출물은 `meta.json` + `data/{cells.jsonl, references.json, diagnostics.json}`까지다. `SKILL.md`·`layout/*.html`은 방출기(§4.2·§4.3)가 M2에서 생기면 cli에 끼워 넣는다. 그 전까지 `--full-names`(§4.0 defined_names_full)와 `--max-rows` truncation은 **미배선**이며, 지정 시 조용히 무시하지 않고 stderr로 "미적용"을 고지한다. `--force-annotate`·`--model`은 어노테이터(M3)가 붙기 전까지 무의미하므로 동일하게 고지한다. `annotate`/`review`/`verify`는 서브커맨드만 등록한 스텁(**exit 2**)이며 `verify`는 별도 단계에서 구현한다.
+
 ---
 
 ## 4. 산출물 계약 — 공통 골격과 스프레드시트 사양
