@@ -76,6 +76,16 @@ M3 해석 계층의 2단계로, **실제 LLM 호출 경로**를 처음 도입해
 
 ---
 
+## 개정 이력 (v1.6 → v1.7, M3 3단계 — `review`·승인판 SKILL.md)
+
+M3 해석 계층의 3단계로, 승인/반려와 **승인판 SKILL.md 재생성**을 구현한다. `review`는 LLM을 쓰지 않는 **결정론** 명령이다(anthropic 무관). 주석 캐시/승계·32종 시드는 후속.
+
+1. **§7 `review` 서브커맨드** — `review <패키지> (--approve | --reject --note "사유")`. `--approve`는 **승인 전 `verify` 전체 통과가 전제**(오너 확정 — V2만이 아니라 V1·필수파일·full_names 일관성까지; 깨진 패키지는 승인 불가), 통과 시 `review={status:approved, reviewed_at, note:null}`로 갱신하고 승인판 SKILL.md 재생성. `--reject`는 `--note` 필수, `{rejected, reviewed_at, note}`로 갱신하고 SKILL.md를 **미승인 형태로 재생성**(approve→reject 시에도 ⑥가 승인 의미를 노출하지 않음 — 상태와 SKILL 항상 일치).
+2. **§4.2 승인판 SKILL.md — IR 없이 패키지 파일에서 재구성** — 내부 IR은 디스크에 없고(§9) review는 원본도 없으므로, `build_skill_md`를 **IR 비의존 코어(`_render_skill_md`)로 리팩터**하고 `build_skill_md_from_package(pkg)`를 신설한다. 머리 텍스트는 `cells.jsonl`에서 (row,col) 사전식 최소 비공백 텍스트 셀로 재계산(IR과 동일 규칙), layout 파일명은 `data-sheet` 마커로 매핑. ①~⑤(구조 사실)는 계층 무관 동일하고, `description`(2단)과 ⑥ 해석만 `review.status`로 갈린다 — approved면 `description`=`workbook_claims[0].claim`, ⑥에 claim·purpose·section·field를 **각 evidence 주소·confidence와 함께** 렌더(P4). (semantics 없는 패키지는 이 함수가 convert-time draft와 바이트 동일 — 회귀 테스트로 고정.)
+3. **§8.1 V3 SKILL 제외 규칙** — `semantics.json`이 있으면(annotate/review 수행됨) SKILL.md는 해석 계층에서 파생돼 fresh convert(항상 draft)와 바이트가 다를 수 있으므로 **V3 바이트 대조에서 제외**한다. SKILL의 구조 부분은 결정론 3종·layout으로, 해석 부분은 V1·V2로 담보한다. (승인 후에도 `verify --source`가 참으로 통과.)
+
+---
+
 ## 0. 목적과 위치
 
 ### 0.1 한 줄 정의
@@ -375,7 +385,7 @@ slug 규칙: 공백→`_`, 경로 위험 문자 제거, 한글 유지, 시트명
 **verify 구현 기준 (v1.1 명문화 — M1 확정):**
 - **스키마 3종은 실제 방출 결과에 맞춘 엄격 스키마**(`additionalProperties: false`, JSON Schema draft-07): `schemas/{meta,references,diagnostics}.schema.json`. 특히 xlsx/xls 차이를 반영한다 — xls는 `external_links.count=null`(관찰 불가≠0), `references.observability.workbook="unavailable_xls"` + `note` 문자열, `diagnostics.format_limitations` 문자열, `hidden.sheets`에 숨김 시트가 존재하는 케이스가 모두 통과해야 한다. `semantics.schema.json`은 M3 1단계에서 작성됐다(v1.5) — 있을 때만 조건부 검증.
 - **M1 verify 범위**: V1(위 3종 스키마) + **필수 파일 존재**(meta.json·data/cells.jsonl·references.json·diagnostics.json + **M2 산출물 SKILL.md·layout/\*.html**[v1.4 — layout은 디렉터리+html 1개 이상]) + **cells.jsonl 각 줄 JSON 파싱 sanity**(jsonl은 스키마 대상 아님) + V3(아래). `semantics.json`이 있으면 `semantics.schema.json`으로 V1 검증하고 **V2(실재성)까지 수행**한다(v1.5 — M3 1단계). 없으면 V1:semantics·V2 검사 자체를 건너뛴다.
-- **V3의 원본 처리**: 패키지에는 원본 바이트가 없으므로 재현성 비교는 `verify <패키지> --source <원본>`으로 원본을 줄 때만 수행한다(임시 폴더로 재변환 후 결정론 계층 대조, meta는 `generated_at` 제외). **재변환의 `--max-rows`·`--full-names`는 패키지의 `meta.conversion_params`(`max_rows`·`full_names`)를 읽어 쓴다**(v1.2 max_rows·v1.3 full_names — 없으면 각각 기본 5,000·false로 방어). 대조 대상은 결정론 3종(cells.jsonl·references.json·diagnostics.json) + **M2 산출물 SKILL.md(고정 경로 바이트 비교)·layout/\*.html(파일 목록·내용)**(v1.4)이며, 패키지에 `defined_names_full.json`이 있으면(=full_names) 그것도 포함한다. **`--source`가 없다는 이유만으로 실패시키지 않는다** — V1이 통과하면 verify 통과이되 리포트에 `V3 skipped(원본 필요)`를 명시한다. `--source`가 주어졌는데 재현성 비교가 실패하면(또는 원본 sha가 패키지와 불일치하면) verify 실패.
+- **V3의 원본 처리**: 패키지에는 원본 바이트가 없으므로 재현성 비교는 `verify <패키지> --source <원본>`으로 원본을 줄 때만 수행한다(임시 폴더로 재변환 후 결정론 계층 대조, meta는 `generated_at` 제외). **재변환의 `--max-rows`·`--full-names`는 패키지의 `meta.conversion_params`(`max_rows`·`full_names`)를 읽어 쓴다**(v1.2 max_rows·v1.3 full_names — 없으면 각각 기본 5,000·false로 방어). 대조 대상은 결정론 3종(cells.jsonl·references.json·diagnostics.json) + **M2 산출물 SKILL.md(고정 경로 바이트 비교)·layout/\*.html(파일 목록·내용)**(v1.4)이며, 패키지에 `defined_names_full.json`이 있으면(=full_names) 그것도 포함한다. **단 `semantics.json`이 있으면(annotate/review 수행) SKILL.md는 해석 계층 파생물이라 대조에서 제외한다**(v1.7 — 구조는 결정론 3종·layout이, 해석은 V1·V2가 담보). **`--source`가 없다는 이유만으로 실패시키지 않는다** — V1이 통과하면 verify 통과이되 리포트에 `V3 skipped(원본 필요)`를 명시한다. `--source`가 주어졌는데 재현성 비교가 실패하면(또는 원본 sha가 패키지와 불일치하면) verify 실패.
 - **판정은 exit code가 권위**: 통과 0 / 실패 비영. 검사 리포트는 stdout, 실패 사유는 stderr. `annotate`는 M3 2단계에서 구현됐고(v1.6), `review`는 M3 3단계까지 스텁(exit 2).
 
 ### 8.2 코퍼스 수용 기준 (M1~M3)

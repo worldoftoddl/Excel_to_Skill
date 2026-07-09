@@ -225,6 +225,11 @@ def _check_reproducibility(pkg: Path, source: Path) -> Check:
     deterministic = list(_DETERMINISTIC)
     if (pkg / _FULL_NAMES_REL).is_file():
         deterministic.append(_FULL_NAMES_REL)
+    # semantics.json이 있으면(annotate/review 수행됨) SKILL.md는 해석 계층에서 파생돼
+    # fresh convert(항상 draft)와 바이트가 다를 수 있으므로 V3 대조에서 제외한다.
+    # SKILL.md의 구조 부분은 결정론 3종·layout으로, 해석 부분은 V1·V2로 담보한다.
+    if (pkg / "data/semantics.json").is_file() and "SKILL.md" in deterministic:
+        deterministic.remove("SKILL.md")
     with tempfile.TemporaryDirectory() as td:
         fresh = _convert_one(
             source,
