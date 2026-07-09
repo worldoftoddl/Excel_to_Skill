@@ -105,6 +105,17 @@ M3 4단계 두 번째 하위 단계로, §6 승계 규칙을 `convert` 원자적
 
 ---
 
+## 개정 이력 (v1.9 → v1.10, M3 4c단계 — 어노테이터 실 LLM화)
+
+M3 4단계 세 번째 하위 단계로, 어노테이터를 실 LLM 호출에 맞춰 강화한다(오너 지시: structured output·LangSmith·모델 확정). **32종 코퍼스 draft 시드(운영 실행)는 키 환경에서 별도로 수행하며 원문 비노출·카운트 보고**한다.
+
+1. **Structured output(강제 tool_use)** — 응답을 §4.7 하위 스키마를 `input_schema`로 준 도구로 강제(`tool_choice`)해 모델이 스키마-유효 JSON을 구조적으로 방출하게 한다(텍스트 파싱 실패 제거). 클라이언트 계약이 `(*, system, user, schema) -> dict`로 바뀌고, `_call_unit`은 dict면 그대로/문자열이면 파싱한 뒤 **기존 하위 스키마 검증 + V2 실재성 + 1회 재시도**를 그대로 건다(belt-and-suspenders). 스텁은 `schema=None`을 받아 JSON 문자열을 그대로 돌려주므로 무키 테스트는 불변.
+2. **LangSmith 트래킹(선택)** — `LANGCHAIN_API_KEY`/`LANGSMITH_API_KEY`가 있으면 `langsmith.wrappers.wrap_anthropic`로 클라이언트를 감싸 호출을 트레이스한다(`LANGCHAIN_TRACING_V2`·`LANGCHAIN_PROJECT`로 제어, 없으면 무트래킹). `langsmith`도 `anthropic`처럼 `build_anthropic_client` 안에서만 지연 import(P1 경계). `pyproject`의 `annotate` extra에 `langsmith` 추가.
+3. **모델** — `DEFAULT_MODEL="claude-sonnet-4-5"`(오너 확정). 코드 상수 1곳 + README.
+4. **실 LLM 검증** — 합성 픽스처 fx1(PII 없음)에 실제 `annotate` 1건 성공(structured output→스키마-유효 dict, V1·V2·annotation PASS, LangSmith 트래킹 활성). 노트북 `tests/9. annotate_live_test.ipynb`가 `.env`(gitignore)를 로드해 이 스모크를 재현한다.
+
+---
+
 ## 0. 목적과 위치
 
 ### 0.1 한 줄 정의

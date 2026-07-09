@@ -37,7 +37,7 @@ class StubClient:
     def __init__(self, responses):
         self.responses = list(responses)
 
-    def __call__(self, *, system, user):
+    def __call__(self, *, system, user, schema=None):
         return self.responses.pop(0)
 
 

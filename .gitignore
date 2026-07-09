@@ -5,3 +5,4 @@ converted/
 .pytest_cache/
 workingpaper_raw/
 tests/_output/
+.env

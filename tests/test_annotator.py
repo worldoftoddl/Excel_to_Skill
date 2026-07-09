@@ -48,7 +48,7 @@ class StubClient:
         self.responses = list(responses)
         self.calls: list[str] = []
 
-    def __call__(self, *, system: str, user: str) -> str:
+    def __call__(self, *, system: str, user: str, schema: dict | None = None) -> str:
         self.calls.append(user)
         return self.responses.pop(0)
 

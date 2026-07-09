@@ -36,7 +36,7 @@ _PROMPT_PATH = _ROOT / "prompts" / "annotator_v1.md"
 _SCHEMA_DIR = _ROOT / "schemas"
 
 ANNOTATOR_VERSION = "0.1.0"
-DEFAULT_MODEL = "claude-sonnet-5"  # §7 기본 모델명 — 유일 출처(코드 상수 1곳 + README)
+DEFAULT_MODEL = "claude-sonnet-4-5"  # §7 기본 모델명 — 유일 출처(코드 상수 1곳 + README)
 TEMPERATURE = 0
 _MAX_RETRY = 1  # 스키마 불일치 시 오류 첨부 1회 재시도
 _MAX_TOKENS = 4096
@@ -52,12 +52,20 @@ def _load_schema(name: str) -> dict:
     return json.loads((_SCHEMA_DIR / name).read_text(encoding="utf-8"))
 
 
-# ── 실 클라이언트 팩토리 (anthropic import는 여기서만) ─────────────
-def build_anthropic_client(model: str):
-    """실 anthropic 클라이언트를 `(*, system, user) -> str` 콜러블로 감싼다.
+# ── 실 클라이언트 팩토리 (anthropic·langsmith import는 여기서만) ──────
+_TOOL_NAME = "emit_semantics"  # structured output용 강제 도구 이름
 
-    ANTHROPIC_API_KEY가 없으면 RuntimeError(무키 환경 방어). anthropic 패키지는 이
-    함수 안에서만 import한다(P1 경계 + optional extra).
+
+def build_anthropic_client(model: str):
+    """실 anthropic 클라이언트를 `(*, system, user, schema) -> dict` 콜러블로 감싼다.
+
+    - **Structured output**: 응답 스키마를 도구 `input_schema`로 주고 `tool_choice`로
+      강제해, 모델이 스키마-유효 JSON을 구조적으로 방출하게 한다(텍스트 파싱 실패 제거).
+      반환은 tool_use 블록의 `input`(dict).
+    - **LangSmith 트래킹(선택)**: `LANGCHAIN_API_KEY`/`LANGSMITH_API_KEY`가 있으면
+      `wrap_anthropic`로 감싼다(없으면 무트래킹으로 정상 동작).
+    - anthropic·langsmith는 **이 함수 안에서만 지연 import**(P1 경계 + optional extra).
+      ANTHROPIC_API_KEY가 없으면 RuntimeError(무키 방어).
     """
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
@@ -67,15 +75,32 @@ def build_anthropic_client(model: str):
     import anthropic  # 지연 import
 
     client = anthropic.Anthropic(api_key=key)
+    if os.environ.get("LANGCHAIN_API_KEY") or os.environ.get("LANGSMITH_API_KEY"):
+        try:  # LangSmith 트레이싱(env로 on/off, 실패해도 주석은 계속)
+            from langsmith.wrappers import wrap_anthropic
 
-    def _call(*, system: str, user: str) -> str:
+            client = wrap_anthropic(client)
+        except Exception as e:  # noqa: BLE001
+            print(f"[annotate] LangSmith 래핑 실패(무트래킹 진행): {e}", file=sys.stderr)
+
+    def _call(*, system: str, user: str, schema: dict) -> dict | str:
         resp = client.messages.create(
             model=model,
             max_tokens=_MAX_TOKENS,
             temperature=TEMPERATURE,
             system=system,
+            tools=[{
+                "name": _TOOL_NAME,
+                "description": "요청된 스키마에 정확히 맞는 결과 하나를 방출한다.",
+                "input_schema": schema,
+            }],
+            tool_choice={"type": "tool", "name": _TOOL_NAME},
             messages=[{"role": "user", "content": user}],
         )
+        for b in resp.content:
+            if getattr(b, "type", None) == "tool_use":
+                return b.input  # 스키마-유효 dict
+        # 이례적으로 tool_use가 없으면 텍스트 폴백(하위 검증에서 걸림)
         return "".join(
             b.text for b in resp.content if getattr(b, "type", None) == "text"
         )
@@ -123,9 +148,10 @@ def _call_unit(
     attempt_user = user
     last_err: Exception | None = None
     for attempt in range(_MAX_RETRY + 1):
-        text = client(system=system, user=attempt_user)
+        # structured output이면 dict를 그대로, 텍스트 폴백/스텁 문자열이면 파싱한다.
+        raw = client(system=system, user=attempt_user, schema=subschema)
         try:
-            doc = _extract_json(text)
+            doc = raw if isinstance(raw, dict) else _extract_json(raw)
             jsonschema.validate(doc, subschema)
             if validator is not None:
                 problems = validator(doc)

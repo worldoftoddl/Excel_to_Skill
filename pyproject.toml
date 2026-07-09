@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-annotate = ["anthropic"]
+annotate = ["anthropic", "langsmith"]
 
 [project.scripts]
 excel-to-skill = "excel_to_skill.cli:main"
