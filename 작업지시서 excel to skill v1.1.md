@@ -66,6 +66,16 @@ M3 해석 계층의 1단계로, **어노테이터(LLM) 없이** semantics 계약
 
 ---
 
+## 개정 이력 (v1.5 → v1.6, M3 2단계 — 어노테이터·`annotate`)
+
+M3 해석 계층의 2단계로, **실제 LLM 호출 경로**를 처음 도입해 `semantics.json`(status=`draft`)을 생성한다. `review`(승인·승인판 SKILL.md 재생성)·주석 캐시/승계·32종 시드는 후속 단계다.
+
+1. **§7 어노테이터 구현** — 새 `src/excel_to_skill/annotator.py`가 **`anthropic`을 import하는 유일한 모듈**이며, 그것도 `build_anthropic_client()` 안에서만 **지연 import**한다(P1 물리적 경계 + optional extra). 클라이언트는 `(*, system, user) -> str` 콜러블로 추상화해 **주입 가능** — 테스트·미리보기는 스텁으로 anthropic 미설치·무네트워크에서 돈다. 입력 = 패키지의 `layout/*.html`+`cells.jsonl`+`references`(요약), 호출 = **시트 단위 → 워크북 단위** 순(구현 재량). `temperature=0`, 응답 JSON을 `semantics.schema.json` 하위 스키마로 검증하고 **불일치 시 오류 첨부 1회 재시도, 재실패면 그 단위 제외 + stderr**(진단 파일엔 LLM 실패 미기록). 산출 `generator`(model·`annotator_version`·`prompt_sha`·temperature·generated_at) + `review`=draft.
+2. **프롬프트·모델 상수** — `prompts/annotator_v1.md` 단일 파일, `prompt_sha`=그 파일 sha256(P4·개방형 어휘·"관찰한 것만, 불확실하면 confidence↓"·§0.2 명문화). 기본 모델명은 **코드 상수 1곳(`DEFAULT_MODEL="claude-sonnet-5"`) + README**에만, `--model`로 교체.
+3. **§3 `annotate` 서브커맨드** — `annotate <패키지> [--model]`로 **별도 명령**(convert와 분리). cli가 annotator를 지연 import해 convert/verify 경로의 anthropic 무접촉을 보장. stdout=산출 `semantics.json` 경로, 제외 단위는 stderr, exit=제외 있으면 비영. 무키·비패키지는 크래시 아닌 실패(exit 1). `review`만 스텁(exit 2, M3 3단계).
+
+---
+
 ## 0. 목적과 위치
 
 ### 0.1 한 줄 정의
@@ -366,7 +376,7 @@ slug 규칙: 공백→`_`, 경로 위험 문자 제거, 한글 유지, 시트명
 - **스키마 3종은 실제 방출 결과에 맞춘 엄격 스키마**(`additionalProperties: false`, JSON Schema draft-07): `schemas/{meta,references,diagnostics}.schema.json`. 특히 xlsx/xls 차이를 반영한다 — xls는 `external_links.count=null`(관찰 불가≠0), `references.observability.workbook="unavailable_xls"` + `note` 문자열, `diagnostics.format_limitations` 문자열, `hidden.sheets`에 숨김 시트가 존재하는 케이스가 모두 통과해야 한다. `semantics.schema.json`은 M3 1단계에서 작성됐다(v1.5) — 있을 때만 조건부 검증.
 - **M1 verify 범위**: V1(위 3종 스키마) + **필수 파일 존재**(meta.json·data/cells.jsonl·references.json·diagnostics.json + **M2 산출물 SKILL.md·layout/\*.html**[v1.4 — layout은 디렉터리+html 1개 이상]) + **cells.jsonl 각 줄 JSON 파싱 sanity**(jsonl은 스키마 대상 아님) + V3(아래). `semantics.json`이 있으면 `semantics.schema.json`으로 V1 검증하고 **V2(실재성)까지 수행**한다(v1.5 — M3 1단계). 없으면 V1:semantics·V2 검사 자체를 건너뛴다.
 - **V3의 원본 처리**: 패키지에는 원본 바이트가 없으므로 재현성 비교는 `verify <패키지> --source <원본>`으로 원본을 줄 때만 수행한다(임시 폴더로 재변환 후 결정론 계층 대조, meta는 `generated_at` 제외). **재변환의 `--max-rows`·`--full-names`는 패키지의 `meta.conversion_params`(`max_rows`·`full_names`)를 읽어 쓴다**(v1.2 max_rows·v1.3 full_names — 없으면 각각 기본 5,000·false로 방어). 대조 대상은 결정론 3종(cells.jsonl·references.json·diagnostics.json) + **M2 산출물 SKILL.md(고정 경로 바이트 비교)·layout/\*.html(파일 목록·내용)**(v1.4)이며, 패키지에 `defined_names_full.json`이 있으면(=full_names) 그것도 포함한다. **`--source`가 없다는 이유만으로 실패시키지 않는다** — V1이 통과하면 verify 통과이되 리포트에 `V3 skipped(원본 필요)`를 명시한다. `--source`가 주어졌는데 재현성 비교가 실패하면(또는 원본 sha가 패키지와 불일치하면) verify 실패.
-- **판정은 exit code가 권위**: 통과 0 / 실패 비영. 검사 리포트는 stdout, 실패 사유는 stderr. `annotate`/`review`는 M3까지 스텁(exit 2).
+- **판정은 exit code가 권위**: 통과 0 / 실패 비영. 검사 리포트는 stdout, 실패 사유는 stderr. `annotate`는 M3 2단계에서 구현됐고(v1.6), `review`는 M3 3단계까지 스텁(exit 2).
 
 ### 8.2 코퍼스 수용 기준 (M1~M3)
 
