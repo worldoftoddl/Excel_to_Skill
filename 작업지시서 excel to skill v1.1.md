@@ -34,6 +34,19 @@ M2 표현 계층(layout HTML·SKILL.md draft·cli 배선) 구현에서 확정된
 
 ---
 
+## 개정 이력 (v1.2 → v1.3, `--full-names` 배선 명문화)
+
+정의된 이름 전량 덤프(`--full-names`) 배선에서 확정된 사항의 명문화다. 코드·스키마·픽스처 스냅샷(fx4)에 이미 반영됐다.
+
+1. **§4.0 `defined_names_full.json` 형태 확정** — `{global_total, sheet_scoped_total, broken_ref_count, legacy_path_count, names:[{name, scope, value, flags}]}`. 카운트 4종은 diagnostics와 같은 값(단일 출처), `names`는 추출 순서 보존, `value`는 전문+이메일만 P7 마스킹, 스키마 엄격.
+2. **§4.1 `conversion_params.full_names` 편입** — 필드가 `{max_rows, full_names}`로 확장. `--full-names`는 전량 덤프 파일의 **존재 자체**를 좌우하므로 재현 입력에 포함.
+3. **§4.6 `full_dump_present` 연동** — 파일 존재와 이 플래그가 반드시 일치(어긋나면 verify 실패).
+4. **§3 `--full-names` 실배선** — references 뒤(layout 앞)에 덤프 방출, meta·diagnostics에 플래그 전달, 미적용 고지 제거.
+5. **§8.1 full_names 일관성 검사 + V3 보강** — 존재↔플래그 일치 검사(+조건부 스키마), V3 재변환이 `conversion_params.full_names`를 읽어 수행하고 덤프도 대조.
+6. **§8.2 V9 fx4 픽스처 추가** — 정의된 이름(전역·시트·`#REF!`·레거시 경로·이메일) 합성 픽스처로 이원 집계·플래그·마스킹·전량 덤프·`full_dump_present` 연동을 스냅샷 고정.
+
+---
+
 ## 0. 목적과 위치
 
 ### 0.1 한 줄 정의
@@ -135,7 +148,8 @@ excel-to-skill verify  <패키지경로>
 - **캐시 hit**: 어떤 파일도 다시 쓰지 않고 기존 패키지 경로만 stdout에 출력한다.
 - **`--all`**: 디렉터리 **최상위**의 `*.xlsx`·`*.xls`만 정렬 순회한다(재귀 없음, Excel 임시잠금 `~$*` 제외). 한 파일이 실패해도 나머지는 계속 처리하고, **하나라도 실패하면 최종 exit code는 비영**.
 - **M1 1차 범위(갈래 1)**: convert가 조립하는 결정론 산출물은 `meta.json` + `data/{cells.jsonl, references.json, diagnostics.json}`까지다. `SKILL.md`·`layout/*.html`은 방출기(§4.2·§4.3)가 M2에서 생기면 cli에 끼워 넣는다. 그 전까지 `--full-names`(§4.0 defined_names_full)와 `--max-rows` truncation은 **미배선**이며, 지정 시 조용히 무시하지 않고 stderr로 "미적용"을 고지한다. `--force-annotate`·`--model`은 어노테이터(M3)가 붙기 전까지 무의미하므로 동일하게 고지한다. `annotate`/`review`/`verify`는 서브커맨드만 등록한 스텁(**exit 2**)이며 `verify`는 별도 단계에서 구현한다.
-- **M2 배선 완료(v1.2 명문화)**: 위 "미배선" 항목 중 `SKILL.md`·`layout/*.html`·`--max-rows`가 M2에서 배선됐다. convert 조립 순서는 **meta → cells → references → layout(절단 계산) → diagnostics(truncations 반영) → SKILL.md**다 — layout을 먼저 써 절단 기록을 받고 그것을 diagnostics에 넘긴 뒤, 그 diagnostics로 SKILL.md를 짓는다. `--max-rows`는 실동작하며(기본 5,000) 미적용 고지는 제거됐다. `--full-names`는 여전히 미배선(다음 단계)이라 고지를 유지한다. `--force-annotate`·`--model`도 M3 전까지 고지 유지.
+- **M2 배선 완료(v1.2 명문화)**: 위 "미배선" 항목 중 `SKILL.md`·`layout/*.html`·`--max-rows`가 M2에서 배선됐다. convert 조립 순서는 **meta → cells → references → layout(절단 계산) → diagnostics(truncations 반영) → SKILL.md**다 — layout을 먼저 써 절단 기록을 받고 그것을 diagnostics에 넘긴 뒤, 그 diagnostics로 SKILL.md를 짓는다. `--max-rows`는 실동작하며(기본 5,000) 미적용 고지는 제거됐다. `--force-annotate`·`--model`은 M3 전까지 고지 유지.
+- **`--full-names` 배선 완료(v1.3 명문화)**: 지정 시 `data/defined_names_full.json`(§4.0)을 추가로 방출하고 `diagnostics.defined_names.full_dump_present`를 `true`로 맞춘다. 조립 순서상 references 뒤(layout 앞)에 끼우며, meta·diagnostics에 `full_names` 플래그를 함께 넘긴다. 미적용 고지는 제거됐다. 켜지 않은 패키지는 이 파일이 **없어야 정상**이고 `full_dump_present`는 `false`다 — 파일 존재와 이 플래그가 어긋나면 verify가 실패시킨다(§8.1).
 
 ---
 
@@ -159,6 +173,8 @@ converted/{원본stem_slug}_{sha256 앞 12자리}/
 
 slug 규칙: 공백→`_`, 경로 위험 문자 제거, 한글 유지, 시트명 충돌 시 `_2` 접미. **봉투(파일 배치·역할·semantics 스키마·캐시·CLI·P1~P7)는 형식 공통이고, 주소 문법과 원장 스키마는 형식 고유다** — 어느 부분이 어느 쪽인지의 판별 기준: *형식을 모르는 공용 장치가 만지는 부분인가?* 만지면 공통, 아니면 형식대로.
 
+`defined_names_full.json`(v1.3 명문화 — `--full-names` 전량 덤프): `diagnostics.defined_names`가 샘플 ≤20으로 요약하는 것과 달리 정의된 이름 **전건**을 담는다(감사계약 파일은 전역 1,363 + 시트 594 = 1,957개). 형태는 `{ "global_total", "sheet_scoped_total", "broken_ref_count", "legacy_path_count", "names": [ { "name", "scope", "value", "flags" } ] }`. 카운트 4종은 `diagnostics.defined_names`와 **같은 값**이어야 한다(같은 규칙으로 도출 — 단일 출처). `names`는 **추출 순서 그대로**(원본 이름표 순서 보존, 감사 추적). `scope`는 전역이면 `null`, 아니면 시트명. `value`는 **전문**을 담되 이메일만 P7 마스킹한다(`#REF!`·레거시 경로는 마스킹 대상이 아니므로 원문) — "full"은 마스킹 해제가 아니라 "전건 + 값 전문"이라는 뜻이다. `name`은 원문 유지. `flags`는 `broken_ref`·`legacy_path`. 스키마(`defined_names_full.schema.json`)가 `additionalProperties: false`로 엄격 검증한다.
+
 ### 4.1 meta.json
 
 가변 값(타임스탬프)이 허용되는 유일한 결정론 계층 파일.
@@ -178,7 +194,7 @@ slug 규칙: 공백→`_`, 경로 위험 문자 제거, 한글 유지, 시트명
 
 `sheets[].dimensions`는 dimension 레코드가 아니라 **§5의 재계산 used range**다(D-01). docx는 `sheets` 대신 `body: {"paragraphs": N, "tables": K}`를 기록한다.
 
-`conversion_params`(v1.2 명문화 — M2 확정)는 **결정론 출력을 좌우하는 변환 파라미터의 자기증언**이다. 같은 원본이라도 `--max-rows`가 다르면 `layout/*.html`과 `diagnostics.truncations`가 달라지므로, 재현의 '입력'은 (원본 파일 + 변환 파라미터)다. 이 블록이 그 파라미터를 패키지 안에 남겨 V3 재변환이 외부 지식 없이 재현할 수 있게 한다(§8.1). `converter_version`·`generated_at`과 같은 성격의 재현 조건 증언이며, meta.json이 §4.1에서 이미 가변 값 예외 계층이므로 결정론 원칙 위반이 아니다. 후속 `--full-names` 등 출력을 바꾸는 옵션도 이 객체에 필드로 추가한다.
+`conversion_params`(v1.2 명문화 — M2 확정)는 **결정론 출력을 좌우하는 변환 파라미터의 자기증언**이다. 같은 원본이라도 `--max-rows`가 다르면 `layout/*.html`과 `diagnostics.truncations`가, `--full-names`가 다르면 `data/defined_names_full.json`의 **존재 자체**가 달라지므로, 재현의 '입력'은 (원본 파일 + 변환 파라미터)다. 이 블록이 그 파라미터를 패키지 안에 남겨 V3 재변환이 외부 지식 없이 재현할 수 있게 한다(§8.1). `converter_version`·`generated_at`과 같은 성격의 재현 조건 증언이며, meta.json이 §4.1에서 이미 가변 값 예외 계층이므로 결정론 원칙 위반이 아니다. 필드는 `{ "max_rows": N, "full_names": bool }`이다(v1.3 명문화 — `full_names` 편입). 후속 출력 변경 옵션도 같은 방식으로 이 객체에 필드를 더한다.
 
 ### 4.2 SKILL.md
 
@@ -243,6 +259,8 @@ slug 규칙: 공백→`_`, 경로 위험 문자 제거, 한글 유지, 시트명
 권고 문장("확인 필요" 등) 금지 — 사실만. docx 항목은 §12.6.
 
 `truncations` 항목 형태(v1.2 명문화 — M2 확정): 각 원소는 `{ "sheet": 시트명, "kept_head": 상한 N, "kept_tail": 5, "total_rows": 원래 총 행수, "target": "layout" }`. layout HTML이 절단된 시트마다 한 원소가 생기며, 절단이 없으면 빈 배열이다. `target`은 지금은 `"layout"` 하나뿐이다(원장은 절단하지 않으므로). 스키마(`diagnostics.schema.json`)는 이 형태를 `additionalProperties: false`로 엄격 검증한다.
+
+`full_dump_present`(v1.3 명문화 — `--full-names` 배선): `--full-names`로 전량 덤프(`data/defined_names_full.json`, §4.0)를 방출했으면 `true`, 아니면 `false`다. **파일 존재와 이 플래그는 반드시 일치**하며, 어긋나면(한쪽만) verify가 실패시킨다(§8.1). `samples`(상한 20)는 요약이고, 전건은 전량 덤프에만 있다.
 
 ### 4.7 data/semantics.json — 해석 계층 (형식 공통)
 
@@ -320,14 +338,15 @@ slug 규칙: 공백→`_`, 경로 위험 문자 제거, 한글 유지, 시트명
 
 ### 8.1 verify 명령 (패키지 단위)
 
-- **V1 스키마 검증**: `schemas/*.schema.json`으로 meta/references/diagnostics/semantics 검증.
+- **V1 스키마 검증**: `schemas/*.schema.json`으로 meta/references/diagnostics/semantics 검증. `--full-names` 패키지의 `defined_names_full.json`은 있을 때만 조건부로 검증(§8.1 full_names 일관성 검사).
 - **V2 evidence 실재성**: semantics의 모든 evidence가 (a) 형식 유효 (b) 실존 대상 (c) 범위 내인지 검증. 주소 문법은 **형식별 파서 플러그인**으로 — 스프레드시트 `시트!셀|범위`(재계산 used range 기준), docx `p{n} | t{k}!r{r}c{c}(/중첩)`(실존 인덱스 기준). **approve 전 필수 통과.**
-- **V3 재현성**: 동일 입력 2회 변환 → 결정론 계층 동일(meta.json은 `generated_at` 제외 정규화 비교). 재현의 '입력'은 (원본 파일 + 변환 파라미터)이므로, 재변환은 CLI 기본값이 아니라 **패키지의 `meta.conversion_params`를 읽어 그 값으로 수행한다**(v1.2 — M2 확정). 이로써 `--max-rows`를 비기본값으로 만든 패키지도 truncations가 일치해 V3가 참으로 통과한다.
+- **V3 재현성**: 동일 입력 2회 변환 → 결정론 계층 동일(meta.json은 `generated_at` 제외 정규화 비교). 재현의 '입력'은 (원본 파일 + 변환 파라미터)이므로, 재변환은 CLI 기본값이 아니라 **패키지의 `meta.conversion_params`를 읽어 그 값으로 수행한다**(v1.2 — M2 확정). 이로써 `--max-rows`를 비기본값으로 만든 패키지도 truncations가 일치해 V3가 참으로 통과한다. `--full-names`도 같은 성질이라 `conversion_params.full_names`를 읽어 재변환하며, 전량 덤프가 있으면 그것도 결정론 대조 대상에 포함한다(v1.3).
+- **full_names 일관성 검사(v1.3 — `--full-names` 배선)**: `data/defined_names_full.json`의 **존재**와 `diagnostics.defined_names.full_dump_present`가 일치하는지 본다. 어긋나면(파일은 없는데 플래그 true, 또는 그 반대) verify 실패. 파일이 있으면 `defined_names_full.schema.json`으로 스키마까지 검증한다. 이 파일은 `--full-names` 시에만 존재하므로 V1 필수 파일 목록에는 넣지 않는다(조건부).
 
 **verify 구현 기준 (v1.1 명문화 — M1 확정):**
 - **스키마 3종은 실제 방출 결과에 맞춘 엄격 스키마**(`additionalProperties: false`, JSON Schema draft-07): `schemas/{meta,references,diagnostics}.schema.json`. 특히 xlsx/xls 차이를 반영한다 — xls는 `external_links.count=null`(관찰 불가≠0), `references.observability.workbook="unavailable_xls"` + `note` 문자열, `diagnostics.format_limitations` 문자열, `hidden.sheets`에 숨김 시트가 존재하는 케이스가 모두 통과해야 한다. `semantics.schema.json`은 해석 계층(M3)에서 작성한다.
 - **M1 verify 범위**: V1(위 3종 스키마) + **필수 파일 존재**(meta.json·data/cells.jsonl·references.json·diagnostics.json) + **cells.jsonl 각 줄 JSON 파싱 sanity**(jsonl은 스키마 대상 아님) + V3(아래). `semantics.json`이 있으면 스키마 미작성이므로 **생략**(skipped)으로 보고. V2는 M3.
-- **V3의 원본 처리**: 패키지에는 원본 바이트가 없으므로 재현성 비교는 `verify <패키지> --source <원본>`으로 원본을 줄 때만 수행한다(임시 폴더로 재변환 후 결정론 계층 대조, meta는 `generated_at` 제외). **재변환의 `--max-rows`는 패키지의 `meta.conversion_params.max_rows`를 읽어 쓴다**(v1.2 — M2 확정. 없으면 기본 5,000으로 방어). **`--source`가 없다는 이유만으로 실패시키지 않는다** — V1이 통과하면 verify 통과이되 리포트에 `V3 skipped(원본 필요)`를 명시한다. `--source`가 주어졌는데 재현성 비교가 실패하면(또는 원본 sha가 패키지와 불일치하면) verify 실패.
+- **V3의 원본 처리**: 패키지에는 원본 바이트가 없으므로 재현성 비교는 `verify <패키지> --source <원본>`으로 원본을 줄 때만 수행한다(임시 폴더로 재변환 후 결정론 계층 대조, meta는 `generated_at` 제외). **재변환의 `--max-rows`·`--full-names`는 패키지의 `meta.conversion_params`(`max_rows`·`full_names`)를 읽어 쓴다**(v1.2 max_rows·v1.3 full_names — 없으면 각각 기본 5,000·false로 방어). 대조 대상은 결정론 3종(cells.jsonl·references.json·diagnostics.json)이며, 패키지에 `defined_names_full.json`이 있으면(=full_names) 그것도 포함한다. **`--source`가 없다는 이유만으로 실패시키지 않는다** — V1이 통과하면 verify 통과이되 리포트에 `V3 skipped(원본 필요)`를 명시한다. `--source`가 주어졌는데 재현성 비교가 실패하면(또는 원본 sha가 패키지와 불일치하면) verify 실패.
 - **판정은 exit code가 권위**: 통과 0 / 실패 비영. 검사 리포트는 stdout, 실패 사유는 stderr. `annotate`/`review`는 M3까지 스텁(exit 2).
 
 ### 8.2 코퍼스 수용 기준 (M1~M3)
