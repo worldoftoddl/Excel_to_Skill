@@ -104,6 +104,38 @@ def test_no_inherit_without_annotation(tmp_path: Path) -> None:
     assert entry["annotation_key"] is None and entry["review_status"] is None
 
 
+def test_no_inherit_when_params_also_change(tmp_path: Path) -> None:
+    """버전+옵션(max_rows)이 동시에 바뀌면 승계하지 않는다(§6: converter_version만)."""
+    root = tmp_path / "out"
+    src = FX_DIR / "fx1_merge_formula.xlsx"
+    pkg = _convert_one(src, root, force=True, cv="cvA", max_rows=5000)
+    annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]))
+    review.approve(pkg)
+    # cv도 바뀌고 max_rows도 바뀜 → reason=version_changed지만 conv_params 다름 → 미승계
+    pkg2 = _convert_one(src, root, force=False, cv="cvB", max_rows=1)
+    assert not (pkg2 / "data/semantics.json").is_file()
+    entry = cache.load_index(root)["entries"][pkg2.name]
+    assert entry["annotation_key"] is None and entry["review_status"] is None
+
+
+def test_no_inherit_when_package_marker_missing(tmp_path: Path) -> None:
+    """meta.annotation.annotation_key(패키지 내부 marker)가 없으면 승계 안 함 + verify 실패."""
+    root = tmp_path / "out"
+    src = FX_DIR / "fx1_merge_formula.xlsx"
+    pkg = _approved_pkg(root, cv="cvA")
+
+    # 패키지 내부 완료 marker를 null로 훼손(=_index만 key 보유). approved+null이므로
+    # verify가 실패해야 하고(4b 보정), 버전 범프 재변환도 승계하지 않아야 한다.
+    meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
+    meta["annotation"]["annotation_key"] = None
+    (pkg / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    ann = next(c for c in verify_package(pkg).checks if c.name == "annotation")
+    assert not ann.ok and "approved" in ann.detail
+
+    pkg2 = _convert_one(src, root, force=False, cv="cvB")
+    assert not (pkg2 / "data/semantics.json").is_file()  # marker 불일치 → 미승계
+
+
 def test_no_inherit_on_force(tmp_path: Path) -> None:
     """--force 재변환은 승계하지 않는다(§6: converter_version만 올랐을 때만)."""
     root = tmp_path / "out"

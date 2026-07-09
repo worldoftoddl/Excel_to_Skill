@@ -241,6 +241,10 @@ def _check_annotation_consistency(pkg: Path) -> Check:
         # 재계산한 4성분 키와 일치해야 한다(훼손·가짜 완료 키 주입 검출). null이면
         # partial(미완료) draft로 허용 — 완료성은 approve 게이트가 본다.
         ak = ann.get("annotation_key")
+        # approved는 완료 상태이므로 annotation_key가 반드시 있어야 한다(null은 partial
+        # draft 허용이지 approved 완료가 아니다). draft/rejected는 null 허용.
+        if ann.get("review_status") == "approved" and ak is None:
+            problems.append("review_status=approved인데 annotation_key=null(완료 marker 없음)")
         if ak is not None:
             from . import cache
 

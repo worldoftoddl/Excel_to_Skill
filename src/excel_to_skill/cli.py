@@ -60,16 +60,33 @@ def _safe_rmtree(target: Path, root: Path) -> None:
         shutil.rmtree(target)
 
 
-def _should_inherit(probe: "cache.CacheProbe", old_pkg: Path) -> bool:
-    """§6 승계 조건: converter_version만 올랐고(version_changed), 기존이 **완료 주석**을
-    가진 실재 패키지(sha 일치·semantics.json·annotation_key non-null)일 때만."""
-    return bool(
-        probe.reason == "version_changed"
-        and probe.entry is not None
-        and probe.entry.get("annotation_key")
-        and probe.entry.get("sha256") == probe.sha256  # 12자 접두 충돌 방어
-        and (old_pkg / "data" / "semantics.json").is_file()
-    )
+def _should_inherit(
+    probe: "cache.CacheProbe", old_pkg: Path, conv_params: dict
+) -> bool:
+    """§6 승계 조건: **converter_version만** 올랐고 기존이 완료 주석을 가진 실재 패키지.
+
+    - `version_changed`이되 **conversion_params까지 완전히 동일**해야 한다. probe가
+      version을 params보다 먼저 보므로, 버전과 max_rows/full_names가 동시에 바뀌면
+      reason이 version_changed로 나온다 → 명시적으로 conv_params 동일을 재확인한다.
+    - 완료 marker의 권위는 **패키지 내부 `meta.annotation.annotation_key`**(4a). 이 값이
+      non-null이고 `_index.annotation_key`와 일치할 때만 완료로 본다.
+    """
+    entry = probe.entry
+    if not (probe.reason == "version_changed" and entry is not None):
+        return False
+    if entry.get("conversion_params") != conv_params:
+        return False  # 버전+옵션 동시 변경 → 승계 대상 아님
+    if entry.get("sha256") != probe.sha256:  # 12자 접두 충돌 방어
+        return False
+    idx_key = entry.get("annotation_key")
+    if not idx_key or not (old_pkg / "data" / "semantics.json").is_file():
+        return False
+    try:
+        meta = json.loads((old_pkg / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    meta_key = meta.get("annotation", {}).get("annotation_key")
+    return bool(meta_key) and meta_key == idx_key  # 패키지 marker ↔ 색인 일치
 
 
 def _inherit_semantics(
@@ -192,7 +209,7 @@ def _convert_one(
         )
         # §6 승계: converter_version만 오른 재변환이면 완료된 구 semantics를 이월한다
         # (구 패키지 삭제 전에 읽어 staging으로 옮기고, V2 재검증·SKILL 재생성).
-        if _should_inherit(probe, final):
+        if _should_inherit(probe, final, conv_params):
             carried_key, carried_status = _inherit_semantics(
                 final, staging, annotation_key=probe.entry["annotation_key"]
             )
