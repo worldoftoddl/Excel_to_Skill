@@ -231,6 +231,109 @@ def test_verify_covers_skill_and_layout(tmp_path: Path) -> None:
     assert next(c for c in res4.checks if c.name == "V3").skipped
 
 
+# ── M3 1단계: V2 evidence 실재성(semantics.json, LLM 없음) ───
+def _write_semantics(pkg: Path, doc: dict) -> None:
+    (pkg / "data/semantics.json").write_text(
+        json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _base_semantics() -> dict:
+    """fx1(시트 Data, used range A1:B5) 기준 스키마 유효·주소 실재 semantics."""
+    return {
+        "generator": {
+            "model": "m", "annotator_version": "0.1.0", "prompt_sha": "sha",
+            "temperature": 0, "generated_at": "2026-07-09T00:00:00Z",
+        },
+        "review": {"status": "draft", "reviewed_at": None, "note": None},
+        "workbook_claims": [
+            {"claim": "표 하나", "evidence": ["Data!A1", "Data!A1:B5"], "confidence": 0.9}
+        ],
+        "sheets": [
+            {
+                "name": "Data", "purpose": "표", "evidence": ["Data!A1"], "confidence": 0.8,
+                "sections": [
+                    {
+                        "range": "A1:B5", "semantic_type": "table_header",
+                        "evidence": ["Data!A1:B1"], "confidence": 0.7,
+                        "fields": [
+                            {"label_cell": "A1", "value_cell": "B1", "role": "머리"},
+                            {"label_cell": "A2", "value_cell": None, "role": "라벨만"},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _v2(pkg: Path) -> "object":
+    return next(c for c in verify_package(pkg).checks if c.name == "V2")
+
+
+def test_v2_passes_on_valid_evidence(tmp_path: Path) -> None:
+    pkg = _convert("fx1_merge_formula", tmp_path)
+    _write_semantics(pkg, _base_semantics())
+    c = _v2(pkg)
+    assert c.ok and not c.skipped, c.detail
+    # V1:semantics 스키마도 통과
+    v1 = next(c for c in verify_package(pkg).checks if c.name == "V1:data/semantics.json")
+    assert v1.ok, v1.detail
+
+
+def test_v2_flags_out_of_range_and_bad_addresses(tmp_path: Path) -> None:
+    pkg = _convert("fx1_merge_formula", tmp_path)
+    doc = _base_semantics()
+    # 절대 evidence 4종 위반: 범위밖 열 / 범위밖 행 / 없는 시트 / 전열(수식용) 형식
+    doc["workbook_claims"][0]["evidence"] = [
+        "Data!C1", "Data!A6", "Nope!A1", "Data!A:B",
+    ]
+    _write_semantics(pkg, doc)
+    c = _v2(pkg)
+    assert not c.ok
+    assert "C1" in c.detail and "A6" in c.detail
+    assert "Nope" in c.detail and "A:B" in c.detail
+
+
+def test_v2_flags_broken_field_cell(tmp_path: Path) -> None:
+    pkg = _convert("fx1_merge_formula", tmp_path)
+    doc = _base_semantics()
+    # fields 셀은 sheet 상대 A1 형식 — 범위밖 셀·시트접두 붙은 형식은 실패
+    doc["sheets"][0]["sections"][0]["fields"] = [
+        {"label_cell": "C9", "value_cell": "Data!A1", "role": "깨짐"},
+    ]
+    _write_semantics(pkg, doc)
+    c = _v2(pkg)
+    assert not c.ok
+    assert "label_cell" in c.detail and "value_cell" in c.detail
+
+
+def test_v2_null_field_cell_allowed(tmp_path: Path) -> None:
+    pkg = _convert("fx1_merge_formula", tmp_path)
+    doc = _base_semantics()
+    doc["sheets"][0]["sections"][0]["fields"] = [
+        {"label_cell": "A1", "value_cell": None, "role": "빈 슬롯"},
+    ]
+    _write_semantics(pkg, doc)
+    assert _v2(pkg).ok  # null value_cell은 검증 생략 → 통과
+
+
+def test_v2_skipped_when_no_semantics(tmp_path: Path) -> None:
+    pkg = _convert("fx1_merge_formula", tmp_path)
+    assert not (pkg / "data/semantics.json").is_file()
+    assert all(c.name != "V2" for c in verify_package(pkg).checks)  # 검사 자체 없음
+
+
+def test_semantics_schema_rejects_missing_evidence(tmp_path: Path) -> None:
+    """P4: evidence 비어 있으면 스키마(minItems 1)에서 걸린다."""
+    pkg = _convert("fx1_merge_formula", tmp_path)
+    doc = _base_semantics()
+    doc["workbook_claims"][0]["evidence"] = []  # P4 위반
+    _write_semantics(pkg, doc)
+    v1 = next(c for c in verify_package(pkg).checks if c.name == "V1:data/semantics.json")
+    assert not v1.ok
+
+
 # ── 픽스처별 핵심 진단 포인트 ────────────────────────────────
 def test_fx1_merge_anchor_and_formula_edges(tmp_path: Path) -> None:
     pkg = _convert("fx1_merge_formula", tmp_path)

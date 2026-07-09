@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "data/semantics.json (§4.7)",
+  "description": "해석 계층(어노테이터 산출). 모든 주장은 evidence 주소를 동반한다(P4). evidence는 형식별 주소 문자열 배열 — 스프레드시트는 시트!셀 또는 시트!범위. docx 변형(sheets 대신 body_claims)은 M4-a 후 확정하므로 이 스키마는 최상위 generator·review만 필수로 두고 나머지는 형식별 확장 여지를 남긴다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generator", "review"],
+  "properties": {
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "annotator_version", "prompt_sha", "temperature", "generated_at"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "annotator_version": { "type": "string", "minLength": 1 },
+        "prompt_sha": { "type": "string", "minLength": 1 },
+        "temperature": { "type": "number" },
+        "generated_at": { "type": "string", "minLength": 1 }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reviewed_at", "note"],
+      "properties": {
+        "status": { "enum": ["draft", "approved", "rejected"] },
+        "reviewed_at": { "type": ["string", "null"] },
+        "note": { "type": ["string", "null"] }
+      }
+    },
+    "workbook_claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "evidence", "confidence"],
+        "properties": {
+          "claim": { "type": "string", "minLength": 1 },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "sheets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "purpose", "evidence", "confidence"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "purpose": { "type": "string" },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["range", "semantic_type", "evidence", "confidence"],
+              "properties": {
+                "range": { "type": "string", "minLength": 1 },
+                "semantic_type": { "type": "string", "minLength": 1 },
+                "fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["label_cell", "value_cell", "role"],
+                    "properties": {
+                      "label_cell": { "type": ["string", "null"], "minLength": 1 },
+                      "value_cell": { "type": ["string", "null"], "minLength": 1 },
+                      "role": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                },
+                "evidence": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

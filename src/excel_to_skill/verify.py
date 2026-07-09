@@ -1,15 +1,18 @@
-"""§8.1 verify — 패키지 단위 검증(M1: V1 스키마 + V3 재현성).
+"""§8.1 verify — 패키지 단위 검증(V1 스키마 + V2 실재성 + V3 재현성).
 
 - **V1 스키마**: `schemas/{meta,references,diagnostics}.schema.json`으로 세 결정론
   산출물을 검증한다(엄격: additionalProperties=false). cells.jsonl은 스키마 대상이
-  아니라 각 줄 JSON 파싱 sanity만 본다. semantics는 M3(스키마 미작성)라 있으면 생략.
-  필수 파일 존재 검사에는 M2 산출물 SKILL.md·layout/*.html도 포함한다.
+  아니라 각 줄 JSON 파싱 sanity만 본다. `semantics.json`은 있을 때만 조건부로
+  `semantics.schema.json` 검증한다(해석 계층). 필수 파일 존재 검사에는 M2 산출물
+  SKILL.md·layout/*.html도 포함한다.
+- **V2 실재성(M3)**: `semantics.json`이 있으면 모든 evidence 주소와 fields 셀 주소가
+  (a) 형식 유효 (b) 실존 (c) `meta.sheets[].dimensions`(D-01 used range) 범위 내인지
+  검증한다(§8.1, 형식별 파서 플러그인 — 스프레드시트만 구현, docx는 M4에서 생략됨).
+  approve 전 필수 통과. semantics가 없으면 이 검사 자체를 건너뛴다.
 - **V3 재현성**: `--source` 원본이 주어지면 임시 폴더로 재변환해 결정론 계층을 비교한다
   (meta.json은 generated_at 제외). 대조 대상은 data 3종 + SKILL.md(고정 경로) +
   layout/*.html(목록·내용) + (있으면) defined_names_full.json. 원본이 없으면 **실패가
   아니라 생략**으로 보고하고 V1만으로 통과를 판정한다. 원본이 주어졌는데 불일치면 실패.
-
-V2(evidence 실재성)는 해석 계층(M3)이 붙은 뒤 추가한다.
 """
 from __future__ import annotations
 
@@ -174,6 +177,34 @@ def _layout_diffs(pkg: Path, fresh: Path) -> list[str]:
     return diffs
 
 
+def _check_evidence(pkg: Path) -> Check:
+    """V2 — semantics.json의 evidence·fields 셀 주소 실재성(§8.1).
+
+    semantics가 있을 때만 호출된다. meta가 없거나 JSON이 깨지면 크래시가 아니라
+    실패 Check로 보고한다(누락 패키지 방어). docx 등 미구현 형식은 생략으로 본다.
+    """
+    from .evidence import collect_evidence_problems
+
+    meta_f = pkg / "meta.json"
+    sem_f = pkg / "data/semantics.json"
+    if not meta_f.is_file():
+        return Check("V2", False, "meta.json 없음 — 실재성 대조 불가")
+    try:
+        meta = json.loads(meta_f.read_text(encoding="utf-8"))
+        semantics = json.loads(sem_f.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return Check("V2", False, f"읽기/파싱 실패: {e}")
+    try:
+        problems = collect_evidence_problems(semantics, meta)
+    except NotImplementedError as e:
+        return Check("V2", True, f"{e} — 실재성 검증 생략", skipped=True)
+    if problems:
+        shown = problems[:10]
+        more = f" 외 {len(problems) - len(shown)}건" if len(problems) > len(shown) else ""
+        return Check("V2", False, f"실재성 실패 {len(problems)}건: {shown}{more}")
+    return Check("V2", True, "evidence·필드 주소 모두 실재")
+
+
 def _check_reproducibility(pkg: Path, source: Path) -> Check:
     """원본을 임시 폴더로 재변환해 결정론 계층을 대조한다."""
     from .cli import _convert_one  # 순환 회피 위해 지연 import
@@ -235,8 +266,9 @@ def verify_package(pkg: Path, source: Path | None = None) -> VerifyResult:
 
     if (pkg / "data/semantics.json").is_file():
         checks.append(
-            Check("V1:semantics", True, "스키마 미작성(M3) — 생략", skipped=True)
+            _check_schema(pkg, "data/semantics.json", "semantics.schema.json")
         )
+        checks.append(_check_evidence(pkg))
 
     if source is None:
         checks.append(
