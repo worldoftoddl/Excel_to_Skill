@@ -196,36 +196,39 @@ def test_verify_covers_skill_and_layout(tmp_path: Path) -> None:
     pkg = _convert("fx1_merge_formula", tmp_path)
     assert verify_package(pkg, source=src).ok  # 정상 패키지는 통과
 
-    def _v3(p: Path):
-        return next(c for c in verify_package(p, source=src).checks if c.name == "V3")
-
-    def _files(p: Path):
-        return next(c for c in verify_package(p).checks if c.name == "files")
+    def _check(p: Path, name: str):
+        return next(c for c in verify_package(p, source=src).checks if c.name == name)
 
     # SKILL.md 내용 훼손 → V3 실패(detail에 SKILL.md)
     t1 = tmp_path / "t1"; shutil.copytree(pkg, t1)
     (t1 / "SKILL.md").write_text("tampered\n", encoding="utf-8")
-    c1 = _v3(t1)
+    c1 = _check(t1, "V3")
     assert not c1.ok and "SKILL.md" in c1.detail
 
     # layout html 내용 훼손 → V3 실패(detail에 layout/)
     t2 = tmp_path / "t2"; shutil.copytree(pkg, t2)
     next((t2 / "layout").glob("*.html")).write_text("<x>t</x>", encoding="utf-8")
-    c2 = _v3(t2)
+    c2 = _check(t2, "V3")
     assert not c2.ok and "layout/" in c2.detail
 
-    # SKILL.md 삭제 → V1 files 실패
+    # SKILL.md 삭제 → files 실패 + source를 줘도 크래시 없이 V3 생략(선행 실패)
     t3 = tmp_path / "t3"; shutil.copytree(pkg, t3)
     (t3 / "SKILL.md").unlink()
-    f3 = _files(t3)
+    res3 = verify_package(t3, source=src)  # 과거 FileNotFoundError로 크래시하던 경로
+    assert not res3.ok
+    f3 = next(c for c in res3.checks if c.name == "files")
     assert not f3.ok and "SKILL.md" in f3.detail
+    assert next(c for c in res3.checks if c.name == "V3").skipped
 
-    # layout html 전부 삭제 → V1 files 실패
+    # layout html 전부 삭제 → files 실패 + source 줘도 크래시 없이 V3 생략
     t4 = tmp_path / "t4"; shutil.copytree(pkg, t4)
     for h in (t4 / "layout").glob("*.html"):
         h.unlink()
-    f4 = _files(t4)
+    res4 = verify_package(t4, source=src)
+    assert not res4.ok
+    f4 = next(c for c in res4.checks if c.name == "files")
     assert not f4.ok and "layout" in f4.detail
+    assert next(c for c in res4.checks if c.name == "V3").skipped
 
 
 # ── 픽스처별 핵심 진단 포인트 ────────────────────────────────

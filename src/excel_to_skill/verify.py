@@ -226,7 +226,8 @@ def _check_reproducibility(pkg: Path, source: Path) -> Check:
 
 def verify_package(pkg: Path, source: Path | None = None) -> VerifyResult:
     """패키지를 검증한다. source가 있으면 V3(재현성)까지 수행."""
-    checks = [_check_files(pkg)]
+    files_check = _check_files(pkg)
+    checks = [files_check]
     for rel, schema_name in _SCHEMA_MAP.items():
         checks.append(_check_schema(pkg, rel, schema_name))
     checks.append(_check_cells_jsonl(pkg))
@@ -240,6 +241,12 @@ def verify_package(pkg: Path, source: Path | None = None) -> VerifyResult:
     if source is None:
         checks.append(
             Check("V3", True, "원본 미제공 — 재현성 검증 생략(--source)", skipped=True)
+        )
+    elif not files_check.ok:
+        # 필수 파일이 빠진 패키지는 재변환 대조 대상이 없어 read가 크래시한다.
+        # files가 이미 실패(=verify 실패)이므로 V3는 생략으로 보고한다.
+        checks.append(
+            Check("V3", True, "필수 파일 누락 — 재현성 검증 생략", skipped=True)
         )
     else:
         checks.append(_check_reproducibility(pkg, source))
