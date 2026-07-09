@@ -1,0 +1,39 @@
+{
+  "edges": [
+    {
+      "from": "Data!B4",
+      "to": "Data!B3",
+      "formula": "B3-B2",
+      "ref_type": "cell"
+    },
+    {
+      "from": "Data!B4",
+      "to": "Data!B2",
+      "formula": "B3-B2",
+      "ref_type": "cell"
+    },
+    {
+      "from": "Data!B5",
+      "to": "Data!B2:B3",
+      "formula": "SUM(B2:B3)",
+      "ref_type": "range"
+    }
+  ],
+  "impacts": {
+    "Data!B2": [
+      "Data!B4"
+    ],
+    "Data!B2:B3": [
+      "Data!B5"
+    ],
+    "Data!B3": [
+      "Data!B4"
+    ]
+  },
+  "external_refs": [],
+  "unresolved": [],
+  "observability": {
+    "workbook": "full",
+    "note": null
+  }
+}

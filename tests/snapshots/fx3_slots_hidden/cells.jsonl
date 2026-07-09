@@ -1,0 +1,7 @@
+{"sheet":"Main","cell":"A1","row":1,"col":1,"value":"이름","formula":null,"cached_value":null,"data_type":"s","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"Main","cell":"B1","row":1,"col":2,"value":null,"formula":null,"cached_value":null,"data_type":"n","number_format":"General","merged_range":null,"bold":false,"border":true,"fill":null}
+{"sheet":"Main","cell":"A2","row":2,"col":1,"value":"메모","formula":null,"cached_value":null,"data_type":"s","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"Main","cell":"B2","row":2,"col":2,"value":null,"formula":null,"cached_value":null,"data_type":"n","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":"#FFFF00"}
+{"sheet":"Main","cell":"A3","row":3,"col":1,"value":"확인","formula":null,"cached_value":null,"data_type":"s","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"Main","cell":"B3","row":3,"col":2,"value":null,"formula":"Main!B1","cached_value":null,"data_type":"f","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"숨김시트","cell":"A1","row":1,"col":1,"value":"비밀","formula":null,"cached_value":null,"data_type":"s","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}

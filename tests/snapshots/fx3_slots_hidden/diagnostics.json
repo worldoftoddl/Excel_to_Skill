@@ -1,0 +1,35 @@
+{
+  "loader_path": "openpyxl_normal",
+  "external_links": {
+    "count": 0,
+    "targets_sample": []
+  },
+  "defined_names": {
+    "global_total": 0,
+    "sheet_scoped_total": 0,
+    "broken_ref_count": 0,
+    "legacy_path_count": 0,
+    "samples": [],
+    "sample_cap": 20,
+    "full_dump_present": false
+  },
+  "pii_suspects": {
+    "emails_masked": [],
+    "legacy_paths_count": 0
+  },
+  "blank_source_formulas": [
+    {
+      "cell": "Main!B3",
+      "source": "Main!B1"
+    }
+  ],
+  "hidden": {
+    "sheets": [
+      "숨김시트"
+    ],
+    "rows_count": 1,
+    "cols_count": 1
+  },
+  "truncations": [],
+  "format_limitations": null
+}

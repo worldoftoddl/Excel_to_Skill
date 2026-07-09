@@ -1,0 +1,9 @@
+{"sheet":"Data","cell":"A1","row":1,"col":1,"value":"매출 요약","formula":null,"cached_value":null,"data_type":"s","number_format":"General","merged_range":"A1:B1","bold":false,"border":false,"fill":null}
+{"sheet":"Data","cell":"A2","row":2,"col":1,"value":"1분기","formula":null,"cached_value":null,"data_type":"s","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"Data","cell":"B2","row":2,"col":2,"value":100,"formula":null,"cached_value":null,"data_type":"n","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"Data","cell":"A3","row":3,"col":1,"value":"2분기","formula":null,"cached_value":null,"data_type":"s","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"Data","cell":"B3","row":3,"col":2,"value":200,"formula":null,"cached_value":null,"data_type":"n","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"Data","cell":"A4","row":4,"col":1,"value":"증가","formula":null,"cached_value":null,"data_type":"s","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"Data","cell":"B4","row":4,"col":2,"value":null,"formula":"B3-B2","cached_value":null,"data_type":"f","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"Data","cell":"A5","row":5,"col":1,"value":"합계","formula":null,"cached_value":null,"data_type":"s","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"Data","cell":"B5","row":5,"col":2,"value":null,"formula":"SUM(B2:B3)","cached_value":null,"data_type":"f","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}

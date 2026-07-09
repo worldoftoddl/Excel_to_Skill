@@ -1,0 +1,21 @@
+{
+  "edges": [
+    {
+      "from": "Main!B3",
+      "to": "Main!B1",
+      "formula": "Main!B1",
+      "ref_type": "cell"
+    }
+  ],
+  "impacts": {
+    "Main!B1": [
+      "Main!B3"
+    ]
+  },
+  "external_refs": [],
+  "unresolved": [],
+  "observability": {
+    "workbook": "full",
+    "note": null
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "edges": [
+    {
+      "from": "S2!B1",
+      "to": "S1!A1",
+      "formula": "S1!A1",
+      "ref_type": "cell"
+    },
+    {
+      "from": "S2!B2",
+      "to": "S1!A1:A3",
+      "formula": "SUM(S1!A1:A3)",
+      "ref_type": "range"
+    }
+  ],
+  "impacts": {
+    "S1!A1": [
+      "S2!B1"
+    ],
+    "S1!A1:A3": [
+      "S2!B2"
+    ]
+  },
+  "external_refs": [],
+  "unresolved": [
+    {
+      "cell": "S2!B3",
+      "formula": "INDIRECT(\"S1!A1\")",
+      "reason": "indirect"
+    }
+  ],
+  "observability": {
+    "workbook": "full",
+    "note": null
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "tool": "excel_to_skill",
+  "source": {
+    "filename": "fx2_refs.xlsx",
+    "sha256": "e85b28393b5c214cfa6a69e98380428f7122a1f5c7efa26d5e314b4b900d52ed",
+    "size_bytes": 5329,
+    "format": "xlsx"
+  },
+  "loader_path": "openpyxl_normal",
+  "sheets": [
+    {
+      "name": "S1",
+      "dimensions": "A1:A3",
+      "max_row": 3,
+      "max_col": 1
+    },
+    {
+      "name": "S2",
+      "dimensions": "A1:B3",
+      "max_row": 3,
+      "max_col": 2
+    }
+  ],
+  "annotation": {
+    "present": false,
+    "annotator_version": null,
+    "review_status": null
+  }
+}

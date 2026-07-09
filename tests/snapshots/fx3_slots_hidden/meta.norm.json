@@ -1,0 +1,29 @@
+{
+  "tool": "excel_to_skill",
+  "source": {
+    "filename": "fx3_slots_hidden.xlsx",
+    "sha256": "0ea5f9d5f282d718f329de62ead690ae5f75b6860a0b7f52aa90749aeea0d4b4",
+    "size_bytes": 5515,
+    "format": "xlsx"
+  },
+  "loader_path": "openpyxl_normal",
+  "sheets": [
+    {
+      "name": "Main",
+      "dimensions": "A1:B3",
+      "max_row": 3,
+      "max_col": 2
+    },
+    {
+      "name": "숨김시트",
+      "dimensions": "A1:A1",
+      "max_row": 1,
+      "max_col": 1
+    }
+  ],
+  "annotation": {
+    "present": false,
+    "annotator_version": null,
+    "review_status": null
+  }
+}

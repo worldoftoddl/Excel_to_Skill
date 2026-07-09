@@ -1,0 +1,23 @@
+{
+  "tool": "excel_to_skill",
+  "source": {
+    "filename": "fx1_merge_formula.xlsx",
+    "sha256": "b8919869195a841a3c8503a73ff56f2236178cc0a1ed183305b6cf68940abb06",
+    "size_bytes": 4987,
+    "format": "xlsx"
+  },
+  "loader_path": "openpyxl_normal",
+  "sheets": [
+    {
+      "name": "Data",
+      "dimensions": "A1:B5",
+      "max_row": 5,
+      "max_col": 2
+    }
+  ],
+  "annotation": {
+    "present": false,
+    "annotator_version": null,
+    "review_status": null
+  }
+}

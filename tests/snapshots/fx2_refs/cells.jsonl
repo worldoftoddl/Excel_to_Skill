@@ -1,0 +1,6 @@
+{"sheet":"S1","cell":"A1","row":1,"col":1,"value":10,"formula":null,"cached_value":null,"data_type":"n","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"S1","cell":"A2","row":2,"col":1,"value":20,"formula":null,"cached_value":null,"data_type":"n","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"S1","cell":"A3","row":3,"col":1,"value":30,"formula":null,"cached_value":null,"data_type":"n","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"S2","cell":"B1","row":1,"col":2,"value":null,"formula":"S1!A1","cached_value":null,"data_type":"f","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"S2","cell":"B2","row":2,"col":2,"value":null,"formula":"SUM(S1!A1:A3)","cached_value":null,"data_type":"f","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
+{"sheet":"S2","cell":"B3","row":3,"col":2,"value":null,"formula":"INDIRECT(\"S1!A1\")","cached_value":null,"data_type":"f","number_format":"General","merged_range":null,"bold":false,"border":false,"fill":null}
