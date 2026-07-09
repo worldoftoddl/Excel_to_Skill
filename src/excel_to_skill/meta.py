@@ -54,8 +54,21 @@ def _now_iso() -> str:
     )
 
 
-def build_meta(ir: WorkbookIR, generated_at: str | None = None) -> dict:
-    """meta.json 문서(dict)를 만든다. 필드 순서는 §4.1 스키마 고정."""
+_DEFAULT_MAX_ROWS = 5000  # emit_html.DEFAULT_MAX_ROWS와 동기(순환 import 회피용 리터럴)
+
+
+def build_meta(
+    ir: WorkbookIR,
+    generated_at: str | None = None,
+    *,
+    max_rows: int = _DEFAULT_MAX_ROWS,
+) -> dict:
+    """meta.json 문서(dict)를 만든다. 필드 순서는 §4.1 스키마 고정.
+
+    conversion_params: 결정론 출력(layout·truncations)을 좌우하는 변환 파라미터를
+    패키지가 자기증언하게 한다. verify --source 재변환이 이 값을 읽어 재현한다.
+    후속 --full-names 등도 이 객체에 필드로 추가한다(구조를 객체로 열어둠).
+    """
     path = ir.source_path
     sheets = [
         {
@@ -76,6 +89,7 @@ def build_meta(ir: WorkbookIR, generated_at: str | None = None) -> dict:
             "format": ir.format,
         },
         "loader_path": ir.loader_path,
+        "conversion_params": {"max_rows": max_rows},
         "sheets": sheets,
         "generated_at": generated_at if generated_at is not None else _now_iso(),
         "annotation": {
@@ -87,10 +101,14 @@ def build_meta(ir: WorkbookIR, generated_at: str | None = None) -> dict:
 
 
 def write_meta(
-    ir: WorkbookIR, out_path: Path, generated_at: str | None = None
+    ir: WorkbookIR,
+    out_path: Path,
+    generated_at: str | None = None,
+    *,
+    max_rows: int = _DEFAULT_MAX_ROWS,
 ) -> dict:
     """meta.json을 쓰고 문서를 반환한다."""
-    doc = build_meta(ir, generated_at)
+    doc = build_meta(ir, generated_at, max_rows=max_rows)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="\n") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2, allow_nan=False)

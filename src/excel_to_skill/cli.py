@@ -29,7 +29,9 @@ from pathlib import Path
 from . import cache
 from .emit_cells import write_cells_jsonl
 from .emit_diag import write_diagnostics
+from .emit_html import DEFAULT_MAX_ROWS, write_layout
 from .emit_refs import write_references
+from .emit_skill_md import write_skill_md
 from .extractor import extract_workbook
 from .meta import _converter_version, _now_iso, write_meta
 
@@ -55,10 +57,14 @@ def _safe_rmtree(target: Path, root: Path) -> None:
         shutil.rmtree(target)
 
 
-def _convert_one(src: Path, root: Path, *, force: bool, cv: str) -> Path:
+def _convert_one(
+    src: Path, root: Path, *, force: bool, cv: str, max_rows: int = DEFAULT_MAX_ROWS
+) -> Path:
     """파일 하나를 패키지로 변환하고 최종 폴더 경로를 돌려준다.
 
     hit이면 재생성 없이 기존 경로. miss/force면 임시 폴더에 조립 후 원자적 교체.
+    조립 순서: meta → cells → references → **layout(절단 계산) → diagnostics
+    (truncations 반영) → SKILL.md**. 원장(cells)은 절대 자르지 않는다.
     """
     probe = cache.probe(root, src, converter_version=cv, force=force)
     if probe.hit:
@@ -77,10 +83,26 @@ def _convert_one(src: Path, root: Path, *, force: bool, cv: str) -> Path:
         staging.mkdir(parents=True)
         data = staging / "data"
         data.mkdir()
-        write_meta(ir, staging / "meta.json", generated_at=gen)
+        meta_doc = write_meta(
+            ir, staging / "meta.json", generated_at=gen, max_rows=max_rows
+        )
         write_cells_jsonl(ir, data / "cells.jsonl")
         refs = write_references(ir, data / "references.json")
-        write_diagnostics(ir, data / "diagnostics.json", references=refs)
+        # layout을 먼저 써서 절단 기록을 받고, 그걸 diagnostics에 반영한다.
+        filenames, truncations = write_layout(
+            ir, staging / "layout", max_rows=max_rows
+        )
+        diag_doc = write_diagnostics(
+            ir, data / "diagnostics.json", references=refs, truncations=truncations
+        )
+        write_skill_md(
+            ir,
+            staging / "SKILL.md",
+            meta=meta_doc,
+            references=refs,
+            diagnostics=diag_doc,
+            layout_filenames=filenames,
+        )
         # 여기까지 성공 → 원자적 교체(같은 파일시스템 내 rename)
         _safe_rmtree(final, root)
         staging.rename(final)
@@ -107,8 +129,6 @@ def _warn_unsupported(args: argparse.Namespace) -> None:
             "[안내] --full-names: defined_names_full.json 방출기 미구현"
             " — 이번 범위 밖, 무시."
         )
-    if args.max_rows is not None:
-        _eprint("[안내] --max-rows: 행 상한 truncation 미배선 — 이번 범위 밖, 무시.")
     if args.force_annotate:
         _eprint("[안내] --force-annotate: annotate 미구현 — 무시.")
     if args.model is not None:
@@ -118,6 +138,7 @@ def _warn_unsupported(args: argparse.Namespace) -> None:
 def _cmd_convert(args: argparse.Namespace) -> int:
     root = Path(args.out)
     cv = _converter_version()
+    max_rows = args.max_rows
     _warn_unsupported(args)
     target = Path(args.path)
 
@@ -137,7 +158,7 @@ def _cmd_convert(args: argparse.Namespace) -> int:
         failed = 0
         for f in files:
             try:
-                print(_convert_one(f, root, force=args.force, cv=cv))
+                print(_convert_one(f, root, force=args.force, cv=cv, max_rows=max_rows))
             except Exception as e:  # 한 파일 실패해도 배치 계속
                 failed += 1
                 _eprint(f"[실패] {f.name}: {e!r}")
@@ -149,7 +170,7 @@ def _cmd_convert(args: argparse.Namespace) -> int:
         _eprint(f"[오류] 파일이 아님: {target}")
         return 1
     try:
-        print(_convert_one(target, root, force=args.force, cv=cv))
+        print(_convert_one(target, root, force=args.force, cv=cv, max_rows=max_rows))
         return 0
     except Exception as e:
         _eprint(f"[실패] {target.name}: {e!r}")
@@ -190,7 +211,12 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument("--no-annotate", action="store_true", help="해석 계층 생략(현재 기본)")
     c.add_argument("--force-annotate", action="store_true", help="(미구현)")
     c.add_argument("--full-names", action="store_true", help="(이번 범위 밖)")
-    c.add_argument("--max-rows", type=int, default=None, help="(이번 범위 밖)")
+    c.add_argument(
+        "--max-rows",
+        type=int,
+        default=DEFAULT_MAX_ROWS,
+        help=f"layout HTML 표 행 상한(기본 {DEFAULT_MAX_ROWS}). 초과 시 첫 N+말미 5행",
+    )
     c.add_argument("--model", default=None, help="(미구현)")
 
     v = sub.add_parser("verify", help="패키지 계약 검증(V1 스키마 + V3 재현성)")

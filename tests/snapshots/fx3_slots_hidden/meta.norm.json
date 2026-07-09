@@ -7,6 +7,9 @@
     "format": "xlsx"
   },
   "loader_path": "openpyxl_normal",
+  "conversion_params": {
+    "max_rows": 5000
+  },
   "sheets": [
     {
       "name": "Main",

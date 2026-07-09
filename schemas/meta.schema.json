@@ -9,6 +9,7 @@
     "converter_version",
     "source",
     "loader_path",
+    "conversion_params",
     "sheets",
     "generated_at",
     "annotation"
@@ -35,6 +36,14 @@
         "xlrd",
         "python_docx"
       ]
+    },
+    "conversion_params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_rows"],
+      "properties": {
+        "max_rows": { "type": "integer", "minimum": 1 }
+      }
     },
     "sheets": {
       "type": "array",

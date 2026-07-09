@@ -33,8 +33,12 @@ _OBSERV_KO = {
 }
 
 
-def _name_slug(stem: str) -> str:
-    """frontmatter name — 소문자-하이픈 slug(ASCII 영숫자만, 그 외 하이픈)."""
+def _name_slug(stem: str, sha12: str) -> str:
+    """frontmatter name — `{ascii_slug_or_untitled}-{sha12}`.
+
+    ASCII 영숫자만 소문자-하이픈으로 남기고(한글 등은 하이픈), sha256 앞 12자를
+    접미해 유일성을 보장한다(한글 파일 다수 코퍼스에서 `untitled` 충돌 방지).
+    """
     parts = []
     cur = []
     for ch in stem.lower():
@@ -45,7 +49,8 @@ def _name_slug(stem: str) -> str:
             cur = []
     if cur:
         parts.append("".join(cur))
-    return "-".join(parts) or "untitled"
+    ascii_slug = "-".join(parts) or "untitled"
+    return f"{ascii_slug}-{sha12}"
 
 
 def _yaml_dq(s: str) -> str:
@@ -93,7 +98,7 @@ def build_skill_md(
     desc = f"스프레드시트 {len(ir.sheets)}매 — {head_join}. (의미 주석 미승인)"
     lines = [
         "---",
-        f"name: {_name_slug(Path(src['filename']).stem)}",
+        f"name: {_name_slug(Path(src['filename']).stem, sha12)}",
         f"description: {_yaml_dq(desc)}",
         "---",
         "",

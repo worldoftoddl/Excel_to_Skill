@@ -44,8 +44,16 @@ def _name_flags(value: str) -> list[str]:
     return flags
 
 
-def build_diagnostics(ir: WorkbookIR, references: dict | None = None) -> dict:
-    """diagnostics.json 문서(dict)를 만든다. 필드 순서는 §4.6 스키마 고정."""
+def build_diagnostics(
+    ir: WorkbookIR,
+    references: dict | None = None,
+    truncations: list[dict] | None = None,
+) -> dict:
+    """diagnostics.json 문서(dict)를 만든다. 필드 순서는 §4.6 스키마 고정.
+
+    truncations: layout HTML 절단 기록(emit_html.write_layout이 돌려준 것).
+    기본 None → 빈 배열(기존 호출·M1 스냅샷 호환). 원장은 절대 자르지 않는다.
+    """
     if references is None:
         references = build_references(ir)
 
@@ -145,16 +153,19 @@ def build_diagnostics(ir: WorkbookIR, references: dict | None = None) -> dict:
             "rows_count": rows_count,
             "cols_count": cols_count,
         },
-        "truncations": [],
+        "truncations": truncations if truncations is not None else [],
         "format_limitations": ir.format_limitations,
     }
 
 
 def write_diagnostics(
-    ir: WorkbookIR, out_path: Path, references: dict | None = None
+    ir: WorkbookIR,
+    out_path: Path,
+    references: dict | None = None,
+    truncations: list[dict] | None = None,
 ) -> dict:
     """diagnostics.json을 쓰고 문서를 반환한다."""
-    doc = build_diagnostics(ir, references)
+    doc = build_diagnostics(ir, references, truncations)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="\n") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2, allow_nan=False)

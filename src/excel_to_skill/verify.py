@@ -111,15 +111,19 @@ def _check_cells_jsonl(pkg: Path) -> Check:
 def _check_reproducibility(pkg: Path, source: Path) -> Check:
     """원본을 임시 폴더로 재변환해 결정론 계층을 대조한다."""
     from .cli import _convert_one  # 순환 회피 위해 지연 import
+    from .emit_html import DEFAULT_MAX_ROWS
     from .meta import _converter_version, _source_sha256
 
     meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
     if _source_sha256(source) != meta["source"]["sha256"]:
         return Check("V3", False, "--source가 이 패키지의 원본과 다름(sha256 불일치)")
 
+    # 재변환 입력 = (원본 + 변환 파라미터). max_rows는 layout·truncations를
+    # 좌우하므로 CLI 기본값이 아니라 패키지가 증언한 값으로 재현해야 한다.
+    max_rows = meta.get("conversion_params", {}).get("max_rows") or DEFAULT_MAX_ROWS
     with tempfile.TemporaryDirectory() as td:
         fresh = _convert_one(
-            source, Path(td), force=True, cv=_converter_version()
+            source, Path(td), force=True, cv=_converter_version(), max_rows=max_rows
         )
         diffs = [
             rel
