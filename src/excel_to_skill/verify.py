@@ -231,14 +231,32 @@ def _check_annotation_consistency(pkg: Path) -> Check:
             problems.append(
                 f"review_status 불일치: meta={ann.get('review_status')!r} ↔ semantics={rs!r}"
             )
-        av = sem.get("generator", {}).get("annotator_version")
+        gen = sem.get("generator", {})
+        av = gen.get("annotator_version")
         if ann.get("annotator_version") != av:
             problems.append(
                 f"annotator_version 불일치: meta={ann.get('annotator_version')!r} ↔ semantics={av!r}"
             )
+        # 완료 marker 검증: annotation_key가 non-null이면 semantics.generator+meta로
+        # 재계산한 4성분 키와 일치해야 한다(훼손·가짜 완료 키 주입 검출). null이면
+        # partial(미완료) draft로 허용 — 완료성은 approve 게이트가 본다.
+        ak = ann.get("annotation_key")
+        if ak is not None:
+            from . import cache
+
+            expected = cache.annotation_key(
+                meta.get("source", {}).get("sha256", ""),
+                av or "",
+                gen.get("model", ""),
+                gen.get("prompt_sha", ""),
+            )
+            if ak != expected:
+                problems.append("annotation_key 불일치(훼손 또는 재계산과 다름)")
     else:
         if ann.get("present"):
             problems.append("semantics.json이 없는데 meta.annotation.present=true")
+        if ann.get("annotation_key") is not None:
+            problems.append("semantics.json이 없는데 meta.annotation.annotation_key가 있음")
 
     if problems:
         return Check("annotation", False, f"meta↔semantics 불일치: {problems}")

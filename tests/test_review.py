@@ -236,6 +236,31 @@ def test_verify_catches_meta_semantics_mismatch(tmp_path: Path) -> None:
     assert not c2.ok and "review_status" in c2.detail
 
 
+def test_verify_catches_tampered_annotation_key(tmp_path: Path) -> None:
+    """meta.annotation.annotation_key가 non-null인데 재계산과 다르면 verify가 잡는다."""
+    pkg = _annotated_pkg(tmp_path)  # 완료 → annotation_key 채워짐
+    assert verify_package(pkg).ok
+
+    meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
+    meta["annotation"]["annotation_key"] = "0" * 64  # 가짜 완료 키 주입
+    (pkg / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    c = next(x for x in verify_package(pkg).checks if x.name == "annotation")
+    assert not c.ok and "annotation_key" in c.detail
+    assert not verify_package(pkg).ok
+
+
+def test_verify_allows_partial_draft_null_key(tmp_path: Path) -> None:
+    """partial annotate(annotation_key=null)는 손상이 아니라 미완료 draft로 verify 통과."""
+    pkg = _convert_one(
+        FX_DIR / "fx1_merge_formula.xlsx", tmp_path, force=True, cv=_converter_version()
+    )
+    annotate_package(pkg, client=StubClient(["not json", "not json", _WB_OK]))  # partial
+    assert json.loads((pkg / "meta.json").read_text())["annotation"]["annotation_key"] is None
+    c = next(x for x in verify_package(pkg).checks if x.name == "annotation")
+    assert c.ok  # partial은 허용(완료성은 approve가 거부)
+    assert verify_package(pkg).ok
+
+
 def test_review_updates_index_review_status(tmp_path: Path) -> None:
     """approve/reject가 _index.json의 review_status도 갱신한다."""
     from excel_to_skill import cache
