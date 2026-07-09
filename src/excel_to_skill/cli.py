@@ -76,7 +76,12 @@ def _convert_one(
     full_dump_present=true로 맞춘다. meta.conversion_params.full_names가 그 조건을
     자기증언해 V3 재변환이 같은 조건으로 재현한다.
     """
-    probe = cache.probe(root, src, converter_version=cv, force=force)
+    # 변환 파라미터도 캐시 키의 일부다(옵션이 바뀌면 산출이 달라짐). meta의 것과
+    # 같은 형태·키 순서로 만들어 probe 대조·색인 기록에 함께 쓴다.
+    conv_params = {"max_rows": max_rows, "full_names": full_names}
+    probe = cache.probe(
+        root, src, converter_version=cv, conversion_params=conv_params, force=force
+    )
     if probe.hit:
         _eprint(f"[cache hit] {src.name} → {probe.package_dir} (재생성 생략)")
         return probe.package_path
@@ -133,7 +138,8 @@ def _convert_one(
 
     # 최종 폴더가 선 뒤에만 색인 기록 (실패 시 _index.json 불변)
     cache.record(
-        root, src, sha256=probe.sha256, converter_version=cv, generated_at=gen
+        root, src, sha256=probe.sha256, converter_version=cv,
+        conversion_params=conv_params, generated_at=gen,
     )
     return final
 

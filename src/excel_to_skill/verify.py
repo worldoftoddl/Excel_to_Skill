@@ -3,9 +3,11 @@
 - **V1 스키마**: `schemas/{meta,references,diagnostics}.schema.json`으로 세 결정론
   산출물을 검증한다(엄격: additionalProperties=false). cells.jsonl은 스키마 대상이
   아니라 각 줄 JSON 파싱 sanity만 본다. semantics는 M3(스키마 미작성)라 있으면 생략.
+  필수 파일 존재 검사에는 M2 산출물 SKILL.md·layout/*.html도 포함한다.
 - **V3 재현성**: `--source` 원본이 주어지면 임시 폴더로 재변환해 결정론 계층을 비교한다
-  (meta.json은 generated_at 제외). 원본이 없으면 **실패가 아니라 생략**으로 보고하고
-  V1만으로 통과를 판정한다. 원본이 주어졌는데 불일치면 verify 실패.
+  (meta.json은 generated_at 제외). 대조 대상은 data 3종 + SKILL.md(고정 경로) +
+  layout/*.html(목록·내용) + (있으면) defined_names_full.json. 원본이 없으면 **실패가
+  아니라 생략**으로 보고하고 V1만으로 통과를 판정한다. 원본이 주어졌는데 불일치면 실패.
 
 V2(evidence 실재성)는 해석 계층(M3)이 붙은 뒤 추가한다.
 """
@@ -29,15 +31,21 @@ _SCHEMA_MAP = {
 }
 _REQUIRED = [
     "meta.json",
+    "SKILL.md",
     "data/cells.jsonl",
     "data/references.json",
     "data/diagnostics.json",
 ]
+# 고정 경로 결정론 산출물(V3 바이트 대조 대상). SKILL.md의 유일한 가변값
+# converter_version은 재변환이 같은 cv를 쓰므로 바이트가 일치한다 → 정규화 불필요.
+# layout/*.html은 파일명이 시트명 기반 가변이라 목록·내용을 별도 로직으로 대조한다.
 _DETERMINISTIC = [
     "data/cells.jsonl",
     "data/references.json",
     "data/diagnostics.json",
+    "SKILL.md",
 ]
+_LAYOUT_DIR = "layout"
 # --full-names 시에만 존재하는 결정론 산출물. 있으면 V3 대조·V1 스키마에 포함한다.
 _FULL_NAMES_REL = "data/defined_names_full.json"
 
@@ -65,8 +73,17 @@ def _load_schema(name: str) -> dict:
     return json.loads((_SCHEMA_DIR / name).read_text(encoding="utf-8"))
 
 
+def _layout_htmls(pkg: Path) -> list[Path]:
+    """패키지의 layout/*.html을 파일명 정렬로 돌려준다(없으면 빈 리스트)."""
+    d = pkg / _LAYOUT_DIR
+    return sorted(d.glob("*.html")) if d.is_dir() else []
+
+
 def _check_files(pkg: Path) -> Check:
     missing = [rel for rel in _REQUIRED if not (pkg / rel).is_file()]
+    # layout/은 시트별 html이라 파일명이 가변 — 디렉터리 + html 1개 이상을 본다.
+    if not _layout_htmls(pkg):
+        missing.append("layout/*.html")
     return Check(
         "files",
         not missing,
@@ -144,6 +161,19 @@ def _check_full_names(pkg: Path) -> Check:
     return Check("full_names", True, "방출 — full_dump_present=true 일치·스키마 통과")
 
 
+def _layout_diffs(pkg: Path, fresh: Path) -> list[str]:
+    """layout/*.html의 파일 목록·내용을 재변환 결과와 대조한 차이 목록."""
+    want = {p.name for p in _layout_htmls(pkg)}
+    got = {p.name for p in _layout_htmls(fresh)}
+    diffs: list[str] = []
+    if want != got:
+        diffs.append(f"layout 파일 목록 불일치: {sorted(want ^ got)}")
+    for name in sorted(want & got):
+        if (pkg / _LAYOUT_DIR / name).read_bytes() != (fresh / _LAYOUT_DIR / name).read_bytes():
+            diffs.append(f"layout/{name}")
+    return diffs
+
+
 def _check_reproducibility(pkg: Path, source: Path) -> Check:
     """원본을 임시 폴더로 재변환해 결정론 계층을 대조한다."""
     from .cli import _convert_one  # 순환 회피 위해 지연 import
@@ -178,6 +208,7 @@ def _check_reproducibility(pkg: Path, source: Path) -> Check:
             for rel in deterministic
             if (pkg / rel).read_bytes() != (fresh / rel).read_bytes()
         ]
+        diffs.extend(_layout_diffs(pkg, fresh))
 
         def _meta_norm(p: Path) -> dict:
             d = json.loads((p / "meta.json").read_text(encoding="utf-8"))

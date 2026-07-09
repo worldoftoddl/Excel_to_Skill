@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from excel_to_skill import cache
 from excel_to_skill.cli import _convert_one
 from excel_to_skill.meta import _converter_version
 from excel_to_skill.verify import verify_package
@@ -150,6 +151,81 @@ def test_full_names_off_absent(tmp_path: Path) -> None:
     assert not (pkg / "data/defined_names_full.json").is_file()
     diag = _read_json(pkg / "data/diagnostics.json")
     assert diag["defined_names"]["full_dump_present"] is False
+
+
+# ── M2 보정①: 캐시가 conversion_params를 본다 ────────────────
+def test_cache_respects_conversion_params(tmp_path: Path) -> None:
+    """옵션이 바뀌면 stale hit 없이 재생성한다(--full-names·--max-rows).
+
+    같은 sha·같은 converter_version이어도 conversion_params가 다르면 다른 패키지다.
+    캐시가 이를 무시하면 옛 옵션 패키지를 그대로 반환하는 버그가 난다.
+    """
+    root = tmp_path / "out"
+    src = FX_DIR / "fx4_defined_names.xlsx"
+    cv = _converter_version()
+
+    # 1) full_names=False로 첫 변환(miss)
+    p1 = _convert_one(src, root, force=False, cv=cv, full_names=False)
+    assert not (p1 / "data/defined_names_full.json").is_file()
+    # 2) 같은 옵션 재변환 → hit, 덤프 여전히 없음
+    p2 = _convert_one(src, root, force=False, cv=cv, full_names=False)
+    assert p2 == p1 and not (p2 / "data/defined_names_full.json").is_file()
+    # 3) full_names=True로 변환 → params_changed miss라 재생성, 덤프가 생겨야 정상
+    #    (stale hit이었다면 이전 패키지를 반환해 덤프가 없었을 것)
+    p3 = _convert_one(src, root, force=False, cv=cv, full_names=True)
+    assert p3 == p1  # 같은 sha → 같은 폴더
+    assert (p3 / "data/defined_names_full.json").is_file()
+
+    # probe 사유 직접 확인: 색인엔 지금 full_names=True 항목 → False로 조회하면 params_changed
+    pr = cache.probe(
+        root, src, converter_version=cv,
+        conversion_params={"max_rows": 5000, "full_names": False},
+    )
+    assert not pr.hit and pr.reason == "params_changed"
+    # 색인 항목에 conversion_params가 실제로 기록됐는지
+    entry = cache.load_index(root)["entries"][pr.package_dir]
+    assert entry["conversion_params"] == {"max_rows": 5000, "full_names": True}
+
+
+# ── M2 보정②: verify가 SKILL.md·layout 훼손을 잡는다 ─────────
+def test_verify_covers_skill_and_layout(tmp_path: Path) -> None:
+    """V1은 SKILL.md·layout 존재를, V3는 그 내용 재현성을 검증한다."""
+    import shutil
+
+    src = FX_DIR / "fx1_merge_formula.xlsx"
+    pkg = _convert("fx1_merge_formula", tmp_path)
+    assert verify_package(pkg, source=src).ok  # 정상 패키지는 통과
+
+    def _v3(p: Path):
+        return next(c for c in verify_package(p, source=src).checks if c.name == "V3")
+
+    def _files(p: Path):
+        return next(c for c in verify_package(p).checks if c.name == "files")
+
+    # SKILL.md 내용 훼손 → V3 실패(detail에 SKILL.md)
+    t1 = tmp_path / "t1"; shutil.copytree(pkg, t1)
+    (t1 / "SKILL.md").write_text("tampered\n", encoding="utf-8")
+    c1 = _v3(t1)
+    assert not c1.ok and "SKILL.md" in c1.detail
+
+    # layout html 내용 훼손 → V3 실패(detail에 layout/)
+    t2 = tmp_path / "t2"; shutil.copytree(pkg, t2)
+    next((t2 / "layout").glob("*.html")).write_text("<x>t</x>", encoding="utf-8")
+    c2 = _v3(t2)
+    assert not c2.ok and "layout/" in c2.detail
+
+    # SKILL.md 삭제 → V1 files 실패
+    t3 = tmp_path / "t3"; shutil.copytree(pkg, t3)
+    (t3 / "SKILL.md").unlink()
+    f3 = _files(t3)
+    assert not f3.ok and "SKILL.md" in f3.detail
+
+    # layout html 전부 삭제 → V1 files 실패
+    t4 = tmp_path / "t4"; shutil.copytree(pkg, t4)
+    for h in (t4 / "layout").glob("*.html"):
+        h.unlink()
+    f4 = _files(t4)
+    assert not f4.ok and "layout" in f4.detail
 
 
 # ── 픽스처별 핵심 진단 포인트 ────────────────────────────────

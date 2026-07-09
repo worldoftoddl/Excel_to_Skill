@@ -78,16 +78,23 @@ def _build_entry(
     source_path: Path,
     sha256_hex: str,
     converter_version: str,
+    conversion_params: dict | None,
     generated_at: str,
     annotation_key: str | None,
     review_status: str | None,
 ) -> dict:
-    """§6 색인 항목 — 필드 순서 고정(원본명·sha256·경로·버전·주석키·리뷰·시각)."""
+    """§6 색인 항목 — 필드 순서 고정(원본명·sha256·경로·버전·변환파라미터·주석키·리뷰·시각).
+
+    conversion_params(max_rows·full_names)는 결정론 산출을 좌우하므로 캐시 키의
+    일부다. 같은 sha·같은 converter_version이어도 옵션이 다르면 다른 패키지이며,
+    probe가 이 값을 대조해 stale hit(옛 옵션 패키지 재사용)을 막는다.
+    """
     return {
         "source_filename": source_path.name,
         "sha256": sha256_hex,
         "package_path": package_dirname(source_path, sha256_hex),
         "converter_version": converter_version,
+        "conversion_params": conversion_params,
         "annotation_key": annotation_key,  # 해석 계층(M3)까지 None
         "review_status": review_status,  # 해석 계층(M3)까지 None
         "generated_at": generated_at,  # 가변 — 재현성 비교(V3) 제외
@@ -99,7 +106,8 @@ class CacheProbe:
     """추출 캐시 조회 결과.
 
     reason: hit이면 ``match``. miss면 ``force``/``absent``/``version_changed``/
-    ``sha_mismatch``/``folder_missing`` 중 하나 — cli가 stderr/로그로 사유를 밝힐 때 쓴다.
+    ``params_changed``/``sha_mismatch``/``folder_missing`` 중 하나 — cli가 stderr/로그로
+    사유를 밝힐 때 쓴다.
     """
 
     hit: bool
@@ -115,9 +123,15 @@ def probe(
     source_path: Path | str,
     *,
     converter_version: str | None = None,
+    conversion_params: dict | None = None,
     force: bool = False,
 ) -> CacheProbe:
-    """원본을 캐시에 대조한다. hit이면 재생성 없이 기존 폴더를 재사용하면 된다."""
+    """원본을 캐시에 대조한다. hit이면 재생성 없이 기존 폴더를 재사용하면 된다.
+
+    conversion_params(max_rows·full_names)를 주면 색인 항목의 값과 대조해, 다르면
+    ``params_changed`` miss로 재생성한다(옵션이 바뀌면 산출이 달라지므로). 주지 않으면
+    이 대조를 건너뛴다(하위호환 — cli는 항상 현재 옵션을 넘긴다).
+    """
     src = Path(source_path)
     cv = converter_version if converter_version is not None else _converter_version()
     sha = _source_sha256(src)
@@ -131,6 +145,8 @@ def probe(
         return CacheProbe(False, "absent", sha, dirname, pkg, None)
     if entry.get("converter_version") != cv:
         return CacheProbe(False, "version_changed", sha, dirname, pkg, entry)
+    if conversion_params is not None and entry.get("conversion_params") != conversion_params:
+        return CacheProbe(False, "params_changed", sha, dirname, pkg, entry)
     if entry.get("sha256") != sha:  # 12자 접두 충돌 방어
         return CacheProbe(False, "sha_mismatch", sha, dirname, pkg, entry)
     if not pkg.is_dir():
@@ -144,6 +160,7 @@ def record(
     *,
     sha256: str | None = None,
     converter_version: str | None = None,
+    conversion_params: dict | None = None,
     generated_at: str | None = None,
     annotation_key: str | None = None,
     review_status: str | None = None,
@@ -151,12 +168,13 @@ def record(
     """변환 성공 후 색인에 항목을 upsert하고, 그 항목을 반환한다.
 
     sha256/converter_version은 ``probe``에서 이미 계산했으면 넘겨 재해시를 피한다.
+    conversion_params는 이 변환에 실제로 쓴 옵션(max_rows·full_names)을 그대로 기록한다.
     """
     src = Path(source_path)
     sha = sha256 if sha256 is not None else _source_sha256(src)
     cv = converter_version if converter_version is not None else _converter_version()
     ts = generated_at if generated_at is not None else _now_iso()
-    entry = _build_entry(src, sha, cv, ts, annotation_key, review_status)
+    entry = _build_entry(src, sha, cv, conversion_params, ts, annotation_key, review_status)
 
     index = load_index(root)
     index.setdefault("entries", {})[entry["package_path"]] = entry

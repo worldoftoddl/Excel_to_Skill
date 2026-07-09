@@ -47,6 +47,15 @@ M2 표현 계층(layout HTML·SKILL.md draft·cli 배선) 구현에서 확정된
 
 ---
 
+## 개정 이력 (v1.3 → v1.4, M2 마감 검수 결함 2건 보정)
+
+M3 착수 전 M2 검수에서 드러난 결함 2건을 닫은 명문화다. 코드·테스트에 이미 반영됐다.
+
+1. **§6 추출 캐시 키에 `conversion_params` 편입** — 캐시 hit 조건이 `sha256 + converter_version + 패키지 실재`만이라, 같은 파일을 `--full-names`·`--max-rows`만 바꿔 재변환하면 옛 옵션 패키지가 stale hit로 그대로 반환되는 결함. `_index.json` 항목에 `conversion_params`(`max_rows`·`full_names`)를 기록하고, probe가 현재 옵션과 다르면 `params_changed` miss로 재생성한다.
+2. **§8.1 verify에 M2 산출물 포함** — verify가 `SKILL.md`·`layout/*.html` 훼손을 잡지 못하던 결함. **V1 필수 파일**에 `SKILL.md`와 `layout/*.html`(디렉터리+1개 이상) 존재를 추가하고, **V3 재변환 대조**에 `SKILL.md`(고정 경로 바이트 비교 — 가변값 `converter_version`은 재변환이 같은 값을 써 일치)와 `layout/*.html`(파일 목록·내용)을 포함한다.
+
+---
+
 ## 0. 목적과 위치
 
 ### 0.1 한 줄 정의
@@ -315,10 +324,10 @@ slug 규칙: 공백→`_`, 경로 위험 문자 제거, 한글 유지, 시트명
 
 | 층 | 키 | 무효화 트리거 |
 |---|---|---|
-| 추출 캐시(결정론 계층) | `sha256(file) + converter_version` | 파일 변경 또는 변환기 버전 업 |
+| 추출 캐시(결정론 계층) | `sha256(file) + converter_version + conversion_params` | 파일 변경, 변환기 버전 업, 또는 옵션(`max_rows`·`full_names`) 변경 |
 | 주석 캐시(해석 계층) | `sha256(file) + annotator_version + model + prompt_sha` | 파일·어노테이터·모델·프롬프트 변경 |
 
-- `converted/_index.json` 항목: `{원본명, sha256, 패키지경로, converter_version, annotation_key, review_status, 최종생성시각}`.
+- `converted/_index.json` 항목: `{원본명, sha256, 패키지경로, converter_version, conversion_params, annotation_key, review_status, 최종생성시각}`. `conversion_params`(`max_rows`·`full_names`)는 캐시 키의 일부이며(v1.4 — 옵션이 산출을 좌우), probe가 현재 옵션과 대조해 다르면 `params_changed` miss로 재생성한다.
 - **승계 규칙**: `converter_version`만 올라 결정론 계층을 재생성하는 경우, sha와 annotation_key가 동일하면 `semantics.json` 승계. 승계 직후 V2 재검증, 실패 시 `review.status`를 `draft`로 강등하고 사유를 `review.note`에 기록.
 
 ---
@@ -345,8 +354,8 @@ slug 규칙: 공백→`_`, 경로 위험 문자 제거, 한글 유지, 시트명
 
 **verify 구현 기준 (v1.1 명문화 — M1 확정):**
 - **스키마 3종은 실제 방출 결과에 맞춘 엄격 스키마**(`additionalProperties: false`, JSON Schema draft-07): `schemas/{meta,references,diagnostics}.schema.json`. 특히 xlsx/xls 차이를 반영한다 — xls는 `external_links.count=null`(관찰 불가≠0), `references.observability.workbook="unavailable_xls"` + `note` 문자열, `diagnostics.format_limitations` 문자열, `hidden.sheets`에 숨김 시트가 존재하는 케이스가 모두 통과해야 한다. `semantics.schema.json`은 해석 계층(M3)에서 작성한다.
-- **M1 verify 범위**: V1(위 3종 스키마) + **필수 파일 존재**(meta.json·data/cells.jsonl·references.json·diagnostics.json) + **cells.jsonl 각 줄 JSON 파싱 sanity**(jsonl은 스키마 대상 아님) + V3(아래). `semantics.json`이 있으면 스키마 미작성이므로 **생략**(skipped)으로 보고. V2는 M3.
-- **V3의 원본 처리**: 패키지에는 원본 바이트가 없으므로 재현성 비교는 `verify <패키지> --source <원본>`으로 원본을 줄 때만 수행한다(임시 폴더로 재변환 후 결정론 계층 대조, meta는 `generated_at` 제외). **재변환의 `--max-rows`·`--full-names`는 패키지의 `meta.conversion_params`(`max_rows`·`full_names`)를 읽어 쓴다**(v1.2 max_rows·v1.3 full_names — 없으면 각각 기본 5,000·false로 방어). 대조 대상은 결정론 3종(cells.jsonl·references.json·diagnostics.json)이며, 패키지에 `defined_names_full.json`이 있으면(=full_names) 그것도 포함한다. **`--source`가 없다는 이유만으로 실패시키지 않는다** — V1이 통과하면 verify 통과이되 리포트에 `V3 skipped(원본 필요)`를 명시한다. `--source`가 주어졌는데 재현성 비교가 실패하면(또는 원본 sha가 패키지와 불일치하면) verify 실패.
+- **M1 verify 범위**: V1(위 3종 스키마) + **필수 파일 존재**(meta.json·data/cells.jsonl·references.json·diagnostics.json + **M2 산출물 SKILL.md·layout/\*.html**[v1.4 — layout은 디렉터리+html 1개 이상]) + **cells.jsonl 각 줄 JSON 파싱 sanity**(jsonl은 스키마 대상 아님) + V3(아래). `semantics.json`이 있으면 스키마 미작성이므로 **생략**(skipped)으로 보고. V2는 M3.
+- **V3의 원본 처리**: 패키지에는 원본 바이트가 없으므로 재현성 비교는 `verify <패키지> --source <원본>`으로 원본을 줄 때만 수행한다(임시 폴더로 재변환 후 결정론 계층 대조, meta는 `generated_at` 제외). **재변환의 `--max-rows`·`--full-names`는 패키지의 `meta.conversion_params`(`max_rows`·`full_names`)를 읽어 쓴다**(v1.2 max_rows·v1.3 full_names — 없으면 각각 기본 5,000·false로 방어). 대조 대상은 결정론 3종(cells.jsonl·references.json·diagnostics.json) + **M2 산출물 SKILL.md(고정 경로 바이트 비교)·layout/\*.html(파일 목록·내용)**(v1.4)이며, 패키지에 `defined_names_full.json`이 있으면(=full_names) 그것도 포함한다. **`--source`가 없다는 이유만으로 실패시키지 않는다** — V1이 통과하면 verify 통과이되 리포트에 `V3 skipped(원본 필요)`를 명시한다. `--source`가 주어졌는데 재현성 비교가 실패하면(또는 원본 sha가 패키지와 불일치하면) verify 실패.
 - **판정은 exit code가 권위**: 통과 0 / 실패 비영. 검사 리포트는 stdout, 실패 사유는 stderr. `annotate`/`review`는 M3까지 스텁(exit 2).
 
 ### 8.2 코퍼스 수용 기준 (M1~M3)
