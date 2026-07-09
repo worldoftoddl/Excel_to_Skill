@@ -243,7 +243,7 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
         _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
         return 1
     try:
-        result = annotate_package(pkg, model=args.model)
+        result = annotate_package(pkg, model=args.model, force=args.force)
     except RuntimeError as e:  # 무키 등 — 명확히 실패로 보고(크래시 아님)
         _eprint(f"[annotate 실패] {e}")
         return 1
@@ -252,6 +252,9 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
         return 1
 
     print(result["path"])  # stdout = 산출 semantics.json 경로
+    if result.get("cached"):
+        _eprint(f"[annotate] {pkg.name}: 캐시 hit — 재주석 생략(--force로 재생성)")
+        return 0
     excluded = result["excluded"]
     if excluded:
         _eprint(f"[annotate] 제외된 단위 {len(excluded)}건: {excluded}")
@@ -316,6 +319,7 @@ def _build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("annotate", help="패키지에 해석 계층(semantics.json draft) 생성")
     a.add_argument("path", help="주석할 패키지 폴더")
     a.add_argument("--model", default=None, help="어노테이터 모델(기본은 코드 상수)")
+    a.add_argument("--force", action="store_true", help="주석 캐시 무시하고 재주석")
 
     r = sub.add_parser("review", help="해석 계층 승인(--approve)/반려(--reject)")
     r.add_argument("path", help="검토할 패키지 폴더")

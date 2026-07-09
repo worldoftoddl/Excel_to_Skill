@@ -201,6 +201,50 @@ def _check_skill_consistency(pkg: Path) -> Check:
     )
 
 
+def _check_annotation_consistency(pkg: Path) -> Check:
+    """meta.annotation ↔ semantics.review/generator 일관성(원본 불요).
+
+    meta.annotation을 운영 필드로 쓰므로(annotate/review가 갱신), semantics와 어긋나면
+    후속 캐시/승계가 잘못된 상태를 읽는다. 검사:
+      - semantics 있으면: present=true · review_status==review.status ·
+        annotator_version==generator.annotator_version.
+      - semantics 없으면: present=false.
+    둘 중 하나만 있거나 값이 어긋나면 실패.
+    """
+    try:
+        meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return Check("annotation", False, f"meta 읽기 실패: {e}")
+    ann = meta.get("annotation", {}) or {}
+    sem_path = pkg / "data" / "semantics.json"
+    problems: list[str] = []
+
+    if sem_path.is_file():
+        try:
+            sem = json.loads(sem_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            return Check("annotation", False, f"semantics 읽기 실패: {e}")
+        if not ann.get("present"):
+            problems.append("semantics.json이 있는데 meta.annotation.present=false")
+        rs = sem.get("review", {}).get("status")
+        if ann.get("review_status") != rs:
+            problems.append(
+                f"review_status 불일치: meta={ann.get('review_status')!r} ↔ semantics={rs!r}"
+            )
+        av = sem.get("generator", {}).get("annotator_version")
+        if ann.get("annotator_version") != av:
+            problems.append(
+                f"annotator_version 불일치: meta={ann.get('annotator_version')!r} ↔ semantics={av!r}"
+            )
+    else:
+        if ann.get("present"):
+            problems.append("semantics.json이 없는데 meta.annotation.present=true")
+
+    if problems:
+        return Check("annotation", False, f"meta↔semantics 불일치: {problems}")
+    return Check("annotation", True, "meta.annotation ↔ semantics 일관")
+
+
 def _check_evidence(pkg: Path) -> Check:
     """V2 — semantics.json의 evidence·fields 셀 주소 실재성(§8.1).
 
@@ -300,6 +344,10 @@ def verify_package(pkg: Path, source: Path | None = None) -> VerifyResult:
         checks.append(
             Check("SKILL", True, "필수 파일 누락 — SKILL 일관성 검증 생략", skipped=True)
         )
+
+    # meta.annotation ↔ semantics 일관성(원본 불요, meta만 있으면 수행 가능).
+    if (pkg / "meta.json").is_file():
+        checks.append(_check_annotation_consistency(pkg))
 
     if (pkg / "data/semantics.json").is_file():
         sem_check = _check_schema(pkg, "data/semantics.json", "semantics.schema.json")

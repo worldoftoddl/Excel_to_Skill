@@ -27,6 +27,7 @@ from pathlib import Path
 
 import jsonschema
 
+from . import cache
 from .evidence import collect_evidence_problems
 from .meta import _now_iso, set_annotation
 
@@ -222,20 +223,46 @@ def _workbook_user_message(meta: dict, sheets_out: list[dict]) -> str:
 
 
 # ── 오케스트레이션 ────────────────────────────────────────────
-def annotate_package(pkg, *, model: str | None = None, client=None, eprint=None) -> dict:
+def annotate_package(
+    pkg, *, model: str | None = None, client=None, eprint=None, force: bool = False
+) -> dict:
     """패키지에 data/semantics.json(draft)을 생성한다.
 
     client를 주입하면 그걸 쓰고(테스트·미리보기), 없으면 실 anthropic 클라이언트를
-    만든다(ANTHROPIC_API_KEY 필요). 반환: {"path", "sheets", "excluded"}.
+    만든다(ANTHROPIC_API_KEY 필요). 반환: {"path","sheets","excluded","cached"}.
+
+    주석 캐시(§6): annotation_key(sha+annotator_version+model+prompt_sha)가 색인 항목과
+    같고 semantics.json이 이미 있으면 **재주석을 생략**한다(LLM 미호출·클라이언트 미생성).
+    force=True면 캐시를 무시하고 재생성한다.
     """
     pkg = Path(pkg)
     eprint = eprint or (lambda *a: print(*a, file=sys.stderr))
     model = model or DEFAULT_MODEL
     prompt_text, prompt_sha = _prompt_text_and_sha()
+
+    meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
+    out = pkg / "data" / "semantics.json"
+    key = cache.annotation_key(
+        meta["source"]["sha256"], ANNOTATOR_VERSION, model, prompt_sha
+    )
+    root, dirname = pkg.parent, pkg.name
+
+    # 주석 캐시 hit: 키 일치 + semantics 실재 → 재주석 생략(클라이언트도 안 만든다).
+    if not force and out.is_file():
+        entry = cache.load_index(root)["entries"].get(dirname)
+        if entry and entry.get("annotation_key") == key:
+            existing = json.loads(out.read_text(encoding="utf-8"))
+            eprint(f"[annotate cache hit] {pkg.name} → 재주석 생략")
+            return {
+                "path": out,
+                "sheets": len(existing.get("sheets", [])),
+                "excluded": [],
+                "cached": True,
+            }
+
     if client is None:
         client = build_anthropic_client(model)
 
-    meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
     refs = json.loads((pkg / "data/references.json").read_text(encoding="utf-8"))
     sem_schema = _load_schema("semantics.schema.json")
     sheet_subschema = sem_schema["properties"]["sheets"]["items"]
@@ -297,7 +324,6 @@ def annotate_package(pkg, *, model: str | None = None, client=None, eprint=None)
     if sanity:
         eprint(f"[annotate] 경고: 최종 V2 잔존 {len(sanity)}건: {sanity[:5]}")
 
-    out = pkg / "data" / "semantics.json"
     out.write_text(
         json.dumps(semantics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -305,4 +331,7 @@ def annotate_package(pkg, *, model: str | None = None, client=None, eprint=None)
     set_annotation(
         pkg, present=True, annotator_version=ANNOTATOR_VERSION, review_status="draft"
     )
-    return {"path": out, "sheets": len(sheets_out), "excluded": excluded}
+    # 색인에 주석 키·리뷰 상태 기록(캐시 hit 판정 근거). 항목이 없으면 조용히 통과.
+    if cache.update_annotation(root, dirname, annotation_key=key, review_status="draft") is None:
+        eprint(f"[annotate] 경고: _index.json에 {dirname} 항목 없음 — 주석 캐시 미기록")
+    return {"path": out, "sheets": len(sheets_out), "excluded": excluded, "cached": False}

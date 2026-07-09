@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from . import cache
 from .emit_skill_md import build_skill_md_from_package
 from .meta import _now_iso, set_annotation
 
@@ -82,6 +83,11 @@ def reject(pkg, *, note: str | None) -> dict:
 
 
 def _sync_meta(pkg: Path, semantics: dict, status: str) -> None:
-    """meta.annotation을 semantics 상태와 일치시킨다(present=true·review_status·버전)."""
+    """meta.annotation과 _index.json을 semantics 상태와 일치시킨다.
+
+    meta.annotation(present·review_status·버전)과 색인의 review_status를 함께 갱신해,
+    세 출처(semantics.review / meta.annotation / _index)가 어긋나지 않게 한다.
+    """
     av = semantics.get("generator", {}).get("annotator_version")
     set_annotation(pkg, present=True, annotator_version=av, review_status=status)
+    cache.update_annotation(pkg.parent, pkg.name, review_status=status)

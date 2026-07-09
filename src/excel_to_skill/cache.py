@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -95,8 +96,8 @@ def _build_entry(
         "package_path": package_dirname(source_path, sha256_hex),
         "converter_version": converter_version,
         "conversion_params": conversion_params,
-        "annotation_key": annotation_key,  # 해석 계층(M3)까지 None
-        "review_status": review_status,  # 해석 계층(M3)까지 None
+        "annotation_key": annotation_key,  # convert 시 None → annotate가 갱신(§6)
+        "review_status": review_status,  # convert 시 None → annotate/review가 갱신
         "generated_at": generated_at,  # 가변 — 재현성 비교(V3) 제외
     }
 
@@ -152,6 +153,43 @@ def probe(
     if not pkg.is_dir():
         return CacheProbe(False, "folder_missing", sha, dirname, pkg, entry)
     return CacheProbe(True, "match", sha, dirname, pkg, entry)
+
+
+def annotation_key(
+    file_sha256: str, annotator_version: str, model: str, prompt_sha: str
+) -> str:
+    """주석 캐시 키(§6) = sha256(file + annotator_version + model + prompt_sha) hex.
+
+    파일·어노테이터·모델·프롬프트 중 하나라도 바뀌면 키가 달라져 재주석 대상이 된다.
+    성분 원문은 meta.source.sha256과 semantics.generator에 남으므로 키는 해시로 압축한다.
+    """
+    h = hashlib.sha256()
+    h.update("\n".join([file_sha256, annotator_version, model, prompt_sha]).encode("utf-8"))
+    return h.hexdigest()
+
+
+def update_annotation(
+    root: Path,
+    dirname: str,
+    *,
+    annotation_key: str | None = None,
+    review_status: str | None = None,
+) -> dict | None:
+    """기존 색인 항목의 해석 계층 필드만 갱신한다(결정론 필드는 불변).
+
+    annotate/review가 semantics를 바꿀 때 `_index.json`을 맞춘다. 항목이 없으면
+    None(convert 없이 만들어진 패키지 등 — 호출자가 경고). 인자로 준 값만 덮어쓴다.
+    """
+    index = load_index(root)
+    entry = index.get("entries", {}).get(dirname)
+    if entry is None:
+        return None
+    if annotation_key is not None:
+        entry["annotation_key"] = annotation_key
+    if review_status is not None:
+        entry["review_status"] = review_status
+    save_index(root, index)
+    return entry
 
 
 def record(

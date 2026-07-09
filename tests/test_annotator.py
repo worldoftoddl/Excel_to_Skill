@@ -144,6 +144,44 @@ def test_annotate_recovers_v2_invalid_on_retry(tmp_path: Path) -> None:
     assert v2.ok, v2.detail
 
 
+def test_annotate_cache_hit_skips_llm(tmp_path: Path) -> None:
+    """같은 키 재실행은 재주석 생략(클라이언트 미호출) — 캐시 hit."""
+    from excel_to_skill import cache
+
+    pkg = _pkg(tmp_path)
+    root, dirname = pkg.parent, pkg.name
+    r1 = annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]))
+    assert r1.get("cached") is False
+    # 색인에 annotation_key·review_status 기록됨
+    entry = cache.load_index(root)["entries"][dirname]
+    assert entry["annotation_key"] and entry["review_status"] == "draft"
+
+    # 두 번째 호출: 응답 없는 스텁을 줘도 캐시 hit면 호출되지 않아야(pop 안 됨)
+    empty = StubClient([])
+    r2 = annotate_package(pkg, client=empty)
+    assert r2.get("cached") is True and r2["sheets"] == 1
+    assert empty.responses == []  # 애초에 소비 대상 없음(호출 자체가 없었음 확인용)
+
+
+def test_annotate_force_reannotates(tmp_path: Path) -> None:
+    """--force면 캐시 hit여도 재주석(LLM 재호출)."""
+    pkg = _pkg(tmp_path)
+    annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]))
+    stub = StubClient([_SHEET_OK, _WB_OK])
+    r = annotate_package(pkg, client=stub, force=True)
+    assert r.get("cached") is False
+    assert stub.responses == []  # 재주석하며 2개 응답 모두 소비
+
+
+def test_annotate_cache_miss_on_model_change(tmp_path: Path) -> None:
+    """모델이 바뀌면 annotation_key가 달라져 재주석(캐시 miss)."""
+    pkg = _pkg(tmp_path)
+    annotate_package(pkg, model="m1", client=StubClient([_SHEET_OK, _WB_OK]))
+    stub = StubClient([_SHEET_OK, _WB_OK])
+    r = annotate_package(pkg, model="m2", client=stub)  # 다른 모델
+    assert r.get("cached") is False and stub.responses == []
+
+
 def test_annotator_import_does_not_load_anthropic() -> None:
     """P1 경계: annotator import는 anthropic을 top-level로 불러오면 안 된다."""
     src = Path(annotator.__file__).read_text(encoding="utf-8")

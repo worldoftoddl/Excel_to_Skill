@@ -172,6 +172,43 @@ def test_review_without_semantics_errors(tmp_path: Path) -> None:
         review.approve(pkg)
 
 
+def test_verify_catches_meta_semantics_mismatch(tmp_path: Path) -> None:
+    """meta.annotation ↔ semantics.review가 어긋나면 annotation 검사가 잡는다."""
+    pkg = _annotated_pkg(tmp_path)
+    review.approve(pkg)
+    assert verify_package(pkg).ok  # 일관된 상태
+
+    def _ann(p):
+        return next(c for c in verify_package(p).checks if c.name == "annotation")
+
+    # meta.annotation.present=false로 수동 훼손 → 불일치 검출
+    meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
+    meta["annotation"]["present"] = False
+    (pkg / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    c = _ann(pkg)
+    assert not c.ok and "present" in c.detail
+    assert not verify_package(pkg).ok
+
+    # review_status 어긋남도 검출
+    meta["annotation"] = {"present": True, "annotator_version": "0.1.0", "review_status": "draft"}
+    (pkg / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    c2 = _ann(pkg)
+    assert not c2.ok and "review_status" in c2.detail
+
+
+def test_review_updates_index_review_status(tmp_path: Path) -> None:
+    """approve/reject가 _index.json의 review_status도 갱신한다."""
+    from excel_to_skill import cache
+
+    pkg = _annotated_pkg(tmp_path)
+    root, dirname = pkg.parent, pkg.name
+    assert cache.load_index(root)["entries"][dirname]["review_status"] == "draft"
+    review.approve(pkg)
+    assert cache.load_index(root)["entries"][dirname]["review_status"] == "approved"
+    review.reject(pkg, note="x")
+    assert cache.load_index(root)["entries"][dirname]["review_status"] == "rejected"
+
+
 def test_skill_from_package_reproduces_draft(tmp_path: Path) -> None:
     """semantics 없는 패키지의 build_skill_md_from_package == convert-time draft SKILL."""
     from excel_to_skill.emit_skill_md import build_skill_md_from_package
