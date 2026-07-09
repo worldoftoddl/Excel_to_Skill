@@ -125,6 +125,44 @@ def test_approve_then_reject_reverts_skill(tmp_path: Path) -> None:
     assert _sem(pkg)["review"]["status"] == "rejected"
 
 
+def test_tampered_approved_skill_fails_verify(tmp_path: Path) -> None:
+    """승인 후 SKILL.md를 훼손하면 verify가 잡는다(V3 제외 공백 보정)."""
+    src = FX_DIR / "fx1_merge_formula.xlsx"
+    pkg = _annotated_pkg(tmp_path)
+    review.approve(pkg)
+    assert verify_package(pkg, source=src).ok  # 승인 직후 정상
+
+    (pkg / "SKILL.md").write_text("tampered skill", encoding="utf-8")
+    result = verify_package(pkg, source=src)
+    assert not result.ok  # 과거엔 통과하던 공백
+    skill = next(c for c in result.checks if c.name == "SKILL")
+    assert not skill.ok and not skill.skipped
+    # 원본 없이도 잡힌다
+    assert not verify_package(pkg, source=None).ok
+
+
+def test_meta_annotation_tracks_semantics_state(tmp_path: Path) -> None:
+    """meta.annotation이 annotate/approve/reject 상태를 반영한다(모순 제거)."""
+    pkg = _convert_one(
+        FX_DIR / "fx1_merge_formula.xlsx", tmp_path, force=True, cv=_converter_version()
+    )
+    meta0 = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
+    assert meta0["annotation"] == {
+        "present": False, "annotator_version": None, "review_status": None
+    }
+
+    annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]))
+    a = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))["annotation"]
+    assert a["present"] is True and a["review_status"] == "draft" and a["annotator_version"]
+
+    review.approve(pkg)
+    assert json.loads((pkg / "meta.json").read_text(encoding="utf-8"))["annotation"]["review_status"] == "approved"
+    review.reject(pkg, note="x")
+    assert json.loads((pkg / "meta.json").read_text(encoding="utf-8"))["annotation"]["review_status"] == "rejected"
+    # meta가 바뀌어도 verify(V3 포함, source)로 통과 — annotation은 V3 meta 비교서 제외
+    assert verify_package(pkg, source=FX_DIR / "fx1_merge_formula.xlsx").ok
+
+
 def test_review_without_semantics_errors(tmp_path: Path) -> None:
     pkg = _convert_one(
         FX_DIR / "fx1_merge_formula.xlsx", tmp_path, force=True, cv=_converter_version()

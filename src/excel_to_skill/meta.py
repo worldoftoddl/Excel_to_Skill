@@ -102,6 +102,31 @@ def build_meta(
     }
 
 
+def set_annotation(
+    pkg: Path,
+    *,
+    present: bool,
+    annotator_version: str | None,
+    review_status: str | None,
+) -> None:
+    """meta.json의 annotation 블록을 갱신한다(해석 계층 상태를 provenance에 반영).
+
+    annotate/review가 semantics를 바꿀 때 meta도 함께 맞춰, meta가 semantics 상태와
+    모순되지 않게 한다. 이 블록은 비결정론(해석 계층)이므로 verify V3의 meta 비교에서는
+    제외된다. 형식(indent·개행·allow_nan)은 write_meta와 동일하게 유지한다.
+    """
+    p = Path(pkg) / "meta.json"
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    doc["annotation"] = {
+        "present": present,
+        "annotator_version": annotator_version,
+        "review_status": review_status,
+    }
+    with p.open("w", encoding="utf-8", newline="\n") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2, allow_nan=False)
+        f.write("\n")
+
+
 def write_meta(
     ir: WorkbookIR,
     out_path: Path,

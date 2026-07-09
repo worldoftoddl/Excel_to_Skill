@@ -39,14 +39,16 @@ _REQUIRED = [
     "data/references.json",
     "data/diagnostics.json",
 ]
-# 고정 경로 결정론 산출물(V3 바이트 대조 대상). SKILL.md의 유일한 가변값
-# converter_version은 재변환이 같은 cv를 쓰므로 바이트가 일치한다 → 정규화 불필요.
+# 고정 경로 결정론 산출물(V3 바이트 대조 대상 — fresh convert와 비교).
 # layout/*.html은 파일명이 시트명 기반 가변이라 목록·내용을 별도 로직으로 대조한다.
+# SKILL.md는 여기 넣지 않는다: 승인판은 해석 계층(semantics)에서 파생돼 fresh
+# convert(항상 draft)와 바이트가 다를 수 있다. 대신 별도의 SKILL 자기일관성 검사
+# (_check_skill_consistency)가 SKILL.md가 현재 패키지 파일에서 재생성한 결과와
+# 일치하는지 원본 없이도 검증한다(훼손 검출 — v1.7 defect 보정).
 _DETERMINISTIC = [
     "data/cells.jsonl",
     "data/references.json",
     "data/diagnostics.json",
-    "SKILL.md",
 ]
 _LAYOUT_DIR = "layout"
 # --full-names 시에만 존재하는 결정론 산출물. 있으면 V3 대조·V1 스키마에 포함한다.
@@ -177,6 +179,28 @@ def _layout_diffs(pkg: Path, fresh: Path) -> list[str]:
     return diffs
 
 
+def _check_skill_consistency(pkg: Path) -> Check:
+    """SKILL.md가 현재 패키지 파일에서 재생성한 결과와 일치하는지(원본 불요).
+
+    승인판/draft 모두 SKILL.md는 meta·references·diagnostics·cells·layout·semantics
+    에서 결정론적으로 재생성된다. 그 재생성 결과와 바이트가 다르면 훼손이거나 구버전
+    이므로 실패. V3(fresh convert)가 SKILL.md를 대조하지 않는 대신 이 검사가 담보한다.
+    """
+    from .emit_skill_md import build_skill_md_from_package
+
+    try:
+        expected = build_skill_md_from_package(pkg)
+        actual = (pkg / "SKILL.md").read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError) as e:
+        return Check("SKILL", False, f"재생성/읽기 실패: {e}")
+    if actual == expected:
+        return Check("SKILL", True, "SKILL.md가 재생성 결과와 일치")
+    return Check(
+        "SKILL", False,
+        "SKILL.md가 meta/references/diagnostics/semantics 재생성 결과와 불일치(훼손/구버전)",
+    )
+
+
 def _check_evidence(pkg: Path) -> Check:
     """V2 — semantics.json의 evidence·fields 셀 주소 실재성(§8.1).
 
@@ -225,11 +249,6 @@ def _check_reproducibility(pkg: Path, source: Path) -> Check:
     deterministic = list(_DETERMINISTIC)
     if (pkg / _FULL_NAMES_REL).is_file():
         deterministic.append(_FULL_NAMES_REL)
-    # semantics.json이 있으면(annotate/review 수행됨) SKILL.md는 해석 계층에서 파생돼
-    # fresh convert(항상 draft)와 바이트가 다를 수 있으므로 V3 대조에서 제외한다.
-    # SKILL.md의 구조 부분은 결정론 3종·layout으로, 해석 부분은 V1·V2로 담보한다.
-    if (pkg / "data/semantics.json").is_file() and "SKILL.md" in deterministic:
-        deterministic.remove("SKILL.md")
     with tempfile.TemporaryDirectory() as td:
         fresh = _convert_one(
             source,
@@ -248,7 +267,8 @@ def _check_reproducibility(pkg: Path, source: Path) -> Check:
 
         def _meta_norm(p: Path) -> dict:
             d = json.loads((p / "meta.json").read_text(encoding="utf-8"))
-            d.pop("generated_at", None)
+            d.pop("generated_at", None)  # 매 변환 가변
+            d.pop("annotation", None)  # 해석 계층 상태(annotate/review가 갱신) — 비결정론
             return d
 
         if _meta_norm(pkg) != _meta_norm(fresh):
@@ -271,6 +291,15 @@ def verify_package(pkg: Path, source: Path | None = None) -> VerifyResult:
         checks.append(c)
     checks.append(_check_cells_jsonl(pkg))
     checks.append(_check_full_names(pkg))
+
+    # SKILL 자기일관성(원본 불요). 필수 파일이 빠졌으면 재생성이 크래시하므로 생략
+    # (files가 이미 실패 = verify 실패). defect-3와 같은 선행-게이팅 원칙.
+    if files_check.ok:
+        checks.append(_check_skill_consistency(pkg))
+    else:
+        checks.append(
+            Check("SKILL", True, "필수 파일 누락 — SKILL 일관성 검증 생략", skipped=True)
+        )
 
     if (pkg / "data/semantics.json").is_file():
         sem_check = _check_schema(pkg, "data/semantics.json", "semantics.schema.json")

@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 from .emit_skill_md import build_skill_md_from_package
-from .meta import _now_iso
+from .meta import _now_iso, set_annotation
 
 
 class ReviewError(RuntimeError):
@@ -57,6 +57,7 @@ def approve(pkg) -> dict:
     semantics = json.loads(path.read_text(encoding="utf-8"))
     semantics["review"] = {"status": "approved", "reviewed_at": _now_iso(), "note": None}
     _write_semantics(path, semantics)
+    _sync_meta(pkg, semantics, "approved")
     _regen_skill(pkg)  # 승인판 SKILL.md(⑥ 해석 렌더)
     return {"status": "approved", "skill": str(pkg / "SKILL.md")}
 
@@ -75,5 +76,12 @@ def reject(pkg, *, note: str | None) -> dict:
         "note": note.strip(),
     }
     _write_semantics(path, semantics)
+    _sync_meta(pkg, semantics, "rejected")
     _regen_skill(pkg)  # rejected → 미승인 SKILL.md
     return {"status": "rejected", "skill": str(pkg / "SKILL.md")}
+
+
+def _sync_meta(pkg: Path, semantics: dict, status: str) -> None:
+    """meta.annotation을 semantics 상태와 일치시킨다(present=true·review_status·버전)."""
+    av = semantics.get("generator", {}).get("annotator_version")
+    set_annotation(pkg, present=True, annotator_version=av, review_status=status)

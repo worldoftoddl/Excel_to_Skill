@@ -28,7 +28,7 @@ from pathlib import Path
 import jsonschema
 
 from .evidence import collect_evidence_problems
-from .meta import _now_iso
+from .meta import _now_iso, set_annotation
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROMPT_PATH = _ROOT / "prompts" / "annotator_v1.md"
@@ -300,5 +300,9 @@ def annotate_package(pkg, *, model: str | None = None, client=None, eprint=None)
     out = pkg / "data" / "semantics.json"
     out.write_text(
         json.dumps(semantics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    # meta.annotation을 semantics 상태와 일치시킨다(생성 시 draft).
+    set_annotation(
+        pkg, present=True, annotator_version=ANNOTATOR_VERSION, review_status="draft"
     )
     return {"path": out, "sheets": len(sheets_out), "excluded": excluded}

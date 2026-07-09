@@ -189,21 +189,22 @@ def test_cache_respects_conversion_params(tmp_path: Path) -> None:
 
 # ── M2 보정②: verify가 SKILL.md·layout 훼손을 잡는다 ─────────
 def test_verify_covers_skill_and_layout(tmp_path: Path) -> None:
-    """V1은 SKILL.md·layout 존재를, V3는 그 내용 재현성을 검증한다."""
+    """SKILL.md 훼손은 SKILL 자기일관성 검사가(원본 불요), layout 훼손은 V3가 잡는다."""
     import shutil
 
     src = FX_DIR / "fx1_merge_formula.xlsx"
     pkg = _convert("fx1_merge_formula", tmp_path)
     assert verify_package(pkg, source=src).ok  # 정상 패키지는 통과
 
-    def _check(p: Path, name: str):
-        return next(c for c in verify_package(p, source=src).checks if c.name == name)
+    def _check(p: Path, name: str, *, source=src):
+        return next(c for c in verify_package(p, source=source).checks if c.name == name)
 
-    # SKILL.md 내용 훼손 → V3 실패(detail에 SKILL.md)
+    # SKILL.md 내용 훼손 → SKILL 일관성 실패(원본 없이도)
     t1 = tmp_path / "t1"; shutil.copytree(pkg, t1)
     (t1 / "SKILL.md").write_text("tampered\n", encoding="utf-8")
-    c1 = _check(t1, "V3")
-    assert not c1.ok and "SKILL.md" in c1.detail
+    c1 = _check(t1, "SKILL", source=None)  # source 없이도 잡혀야
+    assert not c1.ok and not c1.skipped
+    assert not verify_package(t1, source=None).ok
 
     # layout html 내용 훼손 → V3 실패(detail에 layout/)
     t2 = tmp_path / "t2"; shutil.copytree(pkg, t2)
@@ -211,16 +212,17 @@ def test_verify_covers_skill_and_layout(tmp_path: Path) -> None:
     c2 = _check(t2, "V3")
     assert not c2.ok and "layout/" in c2.detail
 
-    # SKILL.md 삭제 → files 실패 + source를 줘도 크래시 없이 V3 생략(선행 실패)
+    # SKILL.md 삭제 → files 실패 + 크래시 없이 SKILL·V3 생략(선행 실패)
     t3 = tmp_path / "t3"; shutil.copytree(pkg, t3)
     (t3 / "SKILL.md").unlink()
-    res3 = verify_package(t3, source=src)  # 과거 FileNotFoundError로 크래시하던 경로
+    res3 = verify_package(t3, source=src)
     assert not res3.ok
     f3 = next(c for c in res3.checks if c.name == "files")
     assert not f3.ok and "SKILL.md" in f3.detail
+    assert next(c for c in res3.checks if c.name == "SKILL").skipped
     assert next(c for c in res3.checks if c.name == "V3").skipped
 
-    # layout html 전부 삭제 → files 실패 + source 줘도 크래시 없이 V3 생략
+    # layout html 전부 삭제 → files 실패 + 크래시 없이 SKILL·V3 생략
     t4 = tmp_path / "t4"; shutil.copytree(pkg, t4)
     for h in (t4 / "layout").glob("*.html"):
         h.unlink()
