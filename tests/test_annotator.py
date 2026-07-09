@@ -32,6 +32,13 @@ _WB_OK = json.dumps({
     "workbook_claims": [{"claim": "표 하나", "evidence": ["Data!A1:B5"], "confidence": 0.9}]
 }, ensure_ascii=False)
 _BAD = "이건 JSON이 아닙니다"
+# 스키마는 통과하지만 evidence가 used range(A1:B5) 밖 — V2 실재성 실패용.
+_SHEET_BAD_ADDR = json.dumps({
+    "name": "Data", "purpose": "표", "evidence": ["Data!ZZ999"], "confidence": 0.5,
+}, ensure_ascii=False)
+_WB_BAD_ADDR = json.dumps({
+    "workbook_claims": [{"claim": "x", "evidence": ["Data!ZZ999"], "confidence": 0.5}]
+}, ensure_ascii=False)
 
 
 class StubClient:
@@ -109,6 +116,32 @@ def test_annotate_excludes_unit_after_second_failure(tmp_path: Path) -> None:
     checks = verify_package(pkg).checks
     assert next(c for c in checks if c.name == "V1:data/semantics.json").ok
     assert next(c for c in checks if c.name == "V2").ok
+
+
+def test_annotate_retries_then_excludes_on_v2_invalid_evidence(tmp_path: Path) -> None:
+    """스키마 통과여도 evidence가 used range 밖이면 재시도→재실패 시 단위 제외."""
+    pkg = _pkg(tmp_path)
+    # 시트: V2-불량 2연속 → 제외. 워크북: V2-불량 2연속 → 제외(빈 배열).
+    stub = StubClient([_SHEET_BAD_ADDR, _SHEET_BAD_ADDR, _WB_BAD_ADDR, _WB_BAD_ADDR])
+    res = annotate_package(pkg, client=stub)
+    assert res["sheets"] == 0 and res["excluded"] == ["Data", "workbook_claims"]
+    assert "used range" in stub.calls[1]  # 재시도 메시지에 실재성 사유 첨부
+    sem = json.loads((pkg / "data/semantics.json").read_text(encoding="utf-8"))
+    assert sem["sheets"] == [] and sem["workbook_claims"] == []
+    # 핵심 계약: 산출물은 V2를 통과해야 한다(불량 evidence가 남지 않음).
+    v2 = next(c for c in verify_package(pkg).checks if c.name == "V2")
+    assert v2.ok, v2.detail
+
+
+def test_annotate_recovers_v2_invalid_on_retry(tmp_path: Path) -> None:
+    """V2 실패 후 재시도에서 실재 주소로 고치면 단위가 포함된다."""
+    pkg = _pkg(tmp_path)
+    stub = StubClient([_SHEET_BAD_ADDR, _SHEET_OK, _WB_OK])
+    res = annotate_package(pkg, client=stub)
+    assert res["sheets"] == 1 and res["excluded"] == []
+    assert len(stub.calls) == 3
+    v2 = next(c for c in verify_package(pkg).checks if c.name == "V2")
+    assert v2.ok, v2.detail
 
 
 def test_annotator_import_does_not_load_anthropic() -> None:

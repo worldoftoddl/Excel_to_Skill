@@ -149,8 +149,8 @@ def _warn_unsupported(args: argparse.Namespace) -> None:
     """이번 범위 밖·아직 무의미한 플래그를 조용히 무시하지 않고 stderr로 밝힌다."""
     if not args.no_annotate:
         _eprint(
-            "[안내] 주석기(해석 계층) 미구현 — 결정론 계층만 생성됩니다"
-            "(현재 기본, =--no-annotate)."
+            "[안내] convert는 결정론 계층만 생성합니다. "
+            "해석 계층은 annotate 명령을 사용하세요."
         )
     if args.force_annotate:
         _eprint("[안내] --force-annotate: convert 범위 밖 — 무시(annotate는 별도 명령).")

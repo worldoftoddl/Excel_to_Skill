@@ -27,6 +27,7 @@ from pathlib import Path
 
 import jsonschema
 
+from .evidence import collect_evidence_problems
 from .meta import _now_iso
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -94,8 +95,30 @@ def _extract_json(text: str) -> dict:
     return json.loads(t.strip())
 
 
-def _call_unit(client, system: str, user: str, subschema: dict, *, label: str, eprint):
-    """단위 1개 호출→파싱→하위 스키마 검증. 실패 시 1회 재시도, 재실패면 None."""
+class _EvidenceError(Exception):
+    """스키마는 통과했으나 V2 실재성(주소가 used range 밖 등)에 실패한 응답."""
+
+    def __init__(self, problems: list[str]) -> None:
+        super().__init__("; ".join(problems))
+        self.problems = problems
+
+
+def _evidence_problems(partial: dict, meta: dict) -> list[str]:
+    """부분 semantics의 evidence 실재성 문제 목록(docx 등 미구현 형식은 생략)."""
+    try:
+        return collect_evidence_problems(partial, meta)
+    except NotImplementedError:
+        return []
+
+
+def _call_unit(
+    client, system: str, user: str, subschema: dict, *, label: str, eprint, validator=None
+):
+    """단위 1개 호출→파싱→하위 스키마 검증→(validator면) V2 실재성 검증.
+
+    JSON/스키마/실재성 중 어느 하나라도 실패하면 오류를 첨부해 1회 재시도하고,
+    재실패면 그 단위를 제외(None). validator(doc)는 실재성 문제 목록을 돌려준다.
+    """
     attempt_user = user
     last_err: Exception | None = None
     for attempt in range(_MAX_RETRY + 1):
@@ -103,15 +126,25 @@ def _call_unit(client, system: str, user: str, subschema: dict, *, label: str, e
         try:
             doc = _extract_json(text)
             jsonschema.validate(doc, subschema)
+            if validator is not None:
+                problems = validator(doc)
+                if problems:
+                    raise _EvidenceError(problems)
             return doc
-        except (json.JSONDecodeError, jsonschema.ValidationError) as e:
+        except (json.JSONDecodeError, jsonschema.ValidationError, _EvidenceError) as e:
             last_err = e
             if attempt < _MAX_RETRY:
+                hint = (
+                    "evidence 주소가 실존하지 않거나 used range 밖입니다"
+                    if isinstance(e, _EvidenceError)
+                    else "JSON/스키마 검증에 실패했습니다"
+                )
                 attempt_user = (
                     user
-                    + "\n\n[재시도] 직전 응답이 JSON/스키마 검증에 실패했습니다: "
+                    + f"\n\n[재시도] 직전 응답이 {hint}: "
                     + str(e)
-                    + "\n설명 없이 스키마에 맞는 JSON 객체 하나만 다시 출력하세요."
+                    + "\n설명 없이, 실재하는 주소만 근거로 스키마에 맞는 JSON 객체 "
+                    "하나만 다시 출력하세요."
                 )
     eprint(f"[annotate] 단위 제외: {label} — {type(last_err).__name__}: {last_err}")
     return None
@@ -227,6 +260,7 @@ def annotate_package(pkg, *, model: str | None = None, client=None, eprint=None)
         doc = _call_unit(
             client, prompt_text, user, sheet_subschema,
             label=f"sheet {name}", eprint=eprint,
+            validator=lambda d: _evidence_problems({"sheets": [d]}, meta),
         )
         if doc is None:
             excluded.append(name)
@@ -236,6 +270,9 @@ def annotate_package(pkg, *, model: str | None = None, client=None, eprint=None)
     wb_doc = _call_unit(
         client, prompt_text, _workbook_user_message(meta, sheets_out), wb_subschema,
         label="workbook_claims", eprint=eprint,
+        validator=lambda d: _evidence_problems(
+            {"workbook_claims": d.get("workbook_claims", [])}, meta
+        ),
     )
     if wb_doc is None:
         excluded.append("workbook_claims")
@@ -253,8 +290,12 @@ def annotate_package(pkg, *, model: str | None = None, client=None, eprint=None)
         "workbook_claims": workbook_claims,
         "sheets": sheets_out,
     }
-    # 최종 전체 스키마 sanity(하위 검증을 통과한 조각들의 조립이라 정상 통과 기대).
+    # 최종 sanity: 전체 스키마 + V2 실재성(단위 검증을 통과한 조각들의 조립이라 정상
+    # 통과 기대. 만에 하나 잔존하면 경고로 남긴다 — 산출은 이미 단위별로 V2-clean).
     jsonschema.validate(semantics, sem_schema)
+    sanity = _evidence_problems(semantics, meta)
+    if sanity:
+        eprint(f"[annotate] 경고: 최종 V2 잔존 {len(sanity)}건: {sanity[:5]}")
 
     out = pkg / "data" / "semantics.json"
     out.write_text(
