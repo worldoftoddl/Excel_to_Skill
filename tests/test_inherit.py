@@ -136,6 +136,23 @@ def test_no_inherit_when_package_marker_missing(tmp_path: Path) -> None:
     assert not (pkg2 / "data/semantics.json").is_file()  # marker 불일치 → 미승계
 
 
+def test_no_inherit_when_generator_tampered(tmp_path: Path) -> None:
+    """generator가 훼손돼 재계산 키가 안 맞으면 승계 거부(approve·verify와 같은 기준)."""
+    root = tmp_path / "out"
+    src = FX_DIR / "fx1_merge_formula.xlsx"
+    pkg = _approved_pkg(root, cv="cvA")
+
+    # semantics.generator.model 훼손 → meta.annotation_key(실제 model 기반)와 재계산 불일치
+    sem = json.loads((pkg / "data/semantics.json").read_text(encoding="utf-8"))
+    sem["generator"]["model"] = "tampered-model"
+    (pkg / "data/semantics.json").write_text(json.dumps(sem, ensure_ascii=False, indent=2), encoding="utf-8")
+    ann = next(c for c in verify_package(pkg).checks if c.name == "annotation")
+    assert not ann.ok  # verify가 이미 실패시킴
+
+    pkg2 = _convert_one(src, root, force=False, cv="cvB")
+    assert not (pkg2 / "data/semantics.json").is_file()  # 승계 거부
+
+
 def test_no_inherit_on_force(tmp_path: Path) -> None:
     """--force 재변환은 승계하지 않는다(§6: converter_version만 올랐을 때만)."""
     root = tmp_path / "out"

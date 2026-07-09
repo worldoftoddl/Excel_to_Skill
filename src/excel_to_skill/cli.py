@@ -79,14 +79,26 @@ def _should_inherit(
     if entry.get("sha256") != probe.sha256:  # 12자 접두 충돌 방어
         return False
     idx_key = entry.get("annotation_key")
-    if not idx_key or not (old_pkg / "data" / "semantics.json").is_file():
+    sem_path = old_pkg / "data" / "semantics.json"
+    if not idx_key or not sem_path.is_file():
         return False
     try:
         meta = json.loads((old_pkg / "meta.json").read_text(encoding="utf-8"))
+        sem = json.loads(sem_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
     meta_key = meta.get("annotation", {}).get("annotation_key")
-    return bool(meta_key) and meta_key == idx_key  # 패키지 marker ↔ 색인 일치
+    # 완료 판정을 approve·verify와 동일 기준으로: semantics.generator+meta.source.sha256
+    # 으로 재계산한 키까지 일치해야 한다(훼손된 generator/키 조합은 승계 거부 → verify가
+    # 이미 실패시키는 semantics를 새 패키지로 번지지 않게).
+    gen = sem.get("generator", {})
+    expected = cache.annotation_key(
+        meta.get("source", {}).get("sha256", ""),
+        gen.get("annotator_version", ""),
+        gen.get("model", ""),
+        gen.get("prompt_sha", ""),
+    )
+    return bool(meta_key) and meta_key == idx_key == expected
 
 
 def _inherit_semantics(
