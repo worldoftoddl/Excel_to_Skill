@@ -25,6 +25,7 @@ excel-to-skill verify <패키지> [--source <원본>]
 
 # 해석 계층(semantics.json draft) 생성 — 기존 패키지에 주석 추가
 excel-to-skill annotate <패키지> [--model <모델명>] [--force]
+excel-to-skill annotate <converted_root> --all   # 전 패키지 일괄 주석(집계·실패 격리)
 
 # 해석 계층 검토 — 승인(승인판 SKILL.md 재생성) / 반려(사유 필수)
 excel-to-skill review <패키지> --approve

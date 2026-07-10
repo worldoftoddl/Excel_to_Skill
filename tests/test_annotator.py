@@ -297,3 +297,110 @@ def test_build_client_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
         annotator.build_anthropic_client("m")
+
+
+# ── annotate --all 배치(오너 순서 2·3) ────────────────────────────
+def _fake_index_root(base: Path, dirnames: list[str]) -> Path:
+    """base/converted에 _index.json으로 dirnames를 등록한 root를 만든다(항목 필드 최소)."""
+    from excel_to_skill import cache
+
+    root = base / "converted"
+    cache.save_index(root, {"index_version": 1, "entries": {d: {} for d in dirnames}})
+    return root  # save_index가 parents=True로 폴더 생성
+
+
+def test_annotate_all_counts_and_isolates_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """배치: 색인 기준 4범주 집계 + 실패 격리 + 폴더/meta 누락도 failed + 색인 밖 폴더 무시."""
+    from excel_to_skill.cli import _annotate_all
+
+    behaviors: dict[str, object] = {
+        "pkg_ok": {"path": "x", "sheets": 1, "excluded": [], "cached": False},
+        "pkg_cached": {"path": "x", "sheets": 2, "excluded": [], "cached": True},
+        "pkg_excluded": {"path": "x", "sheets": 0, "excluded": ["Data"], "cached": False},
+        "pkg_fail": "raise",
+    }
+    # 색인엔 위 4개 + ghost(폴더 없음) + nometa(폴더는 있지만 meta.json 없음) = 6개 등록
+    root = _fake_index_root(
+        tmp_path, [*behaviors, "pkg_ghost", "pkg_nometa"]
+    )
+    for name in behaviors:  # 실물 폴더 + meta.json
+        (root / name).mkdir()
+        (root / name / "meta.json").write_text("{}", encoding="utf-8")
+    (root / "pkg_nometa").mkdir()  # 폴더만, meta.json 없음 → failed
+    # pkg_ghost: 폴더 자체가 없음 → failed
+    (root / "orphan_ondisk").mkdir()  # 색인 밖 폴더(+meta) → 무시(집계 안 됨)
+    (root / "orphan_ondisk" / "meta.json").write_text("{}", encoding="utf-8")
+
+    def fake(pkg, *, model=None, client=None, force=False, eprint=None):  # noqa: ANN001
+        b = behaviors[pkg.name]
+        if b == "raise":
+            raise RuntimeError("boom")
+        return b
+
+    monkeypatch.setattr(annotator, "annotate_package", fake)
+    s = _annotate_all(root, model=None, force=False, eprint=lambda *a: None)
+    # 성공1·캐시1·제외1·실패3(fail+ghost+nometa)·총 6(색인 등록). orphan_ondisk는 미포함.
+    assert s == {"ok": 1, "cached": 1, "excluded": 1, "failed": 3, "total": 6}
+
+
+def test_annotate_all_cli_exit_and_stdout_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """CLI 계약: 성공/캐시만→exit 0, 제외/실패→exit 1, 0건→exit 1, stdout=요약 1줄(패키지명 없음)."""
+    from excel_to_skill.cli import main
+
+    def patch(behaviors: dict) -> None:
+        def fake(pkg, *, model=None, client=None, force=False, eprint=None):  # noqa: ANN001
+            b = behaviors[pkg.name]
+            if b == "raise":
+                raise RuntimeError("boom")
+            return b
+        monkeypatch.setattr(annotator, "annotate_package", fake)
+
+    def build(label: str, names: list[str]) -> Path:
+        root = _fake_index_root(tmp_path / label, names)
+        for n in names:
+            (root / n).mkdir()
+            (root / n / "meta.json").write_text("{}", encoding="utf-8")
+        return root
+
+    # (A) 성공/캐시만 → exit 0, stdout 한 줄·패키지명 미포함
+    rootA = build("A", ["pkg_ok", "pkg_cached"])
+    patch({
+        "pkg_ok": {"sheets": 1, "excluded": [], "cached": False},
+        "pkg_cached": {"sheets": 1, "excluded": [], "cached": True},
+    })
+    rc = main(["annotate", str(rootA), "--all"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.strip().count("\n") == 0 and out.strip()  # 정확히 한 줄
+    assert "pkg_ok" not in out and "pkg_cached" not in out  # stdout에 패키지명 없음
+
+    # (B) 제외 존재 → exit 1
+    rootB = build("B", ["pkg_excluded"])
+    patch({"pkg_excluded": {"sheets": 0, "excluded": ["Data"], "cached": False}})
+    assert main(["annotate", str(rootB), "--all"]) == 1
+
+    # (C) 실패 존재 → exit 1
+    rootC = build("C", ["pkg_fail"])
+    patch({"pkg_fail": "raise"})
+    assert main(["annotate", str(rootC), "--all"]) == 1
+
+    # (D) 대상 0건(빈 색인) → exit 1
+    rootD = _fake_index_root(tmp_path / "D", [])
+    assert main(["annotate", str(rootD), "--all"]) == 1
+
+
+def test_annotate_all_all_cached_needs_no_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """전건 캐시면 클라이언트 생성 없이(무키) 배치가 성립한다(캐시 hit 생략)."""
+    from excel_to_skill.cli import _annotate_all
+
+    pkg = _pkg(tmp_path)  # converted root = tmp_path
+    annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]))  # 완료 주석
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)  # 무키
+    s = _annotate_all(tmp_path, model=None, force=False, eprint=lambda *a: None)
+    assert s == {"ok": 0, "cached": 1, "excluded": 0, "failed": 0, "total": 1}

@@ -198,10 +198,13 @@ M3 4단계 세 번째 하위 단계로, 어노테이터를 실 LLM 호출에 맞
 excel-to-skill convert <파일> [--out DIR] [--force] [--no-annotate]
                        [--force-annotate] [--full-names] [--max-rows N] [--model M]
 excel-to-skill convert --all <디렉터리> [동일 옵션]
-excel-to-skill annotate <파일 | 패키지경로> [--model M] [--force-annotate]
+excel-to-skill annotate <패키지경로> [--model M] [--force]
+excel-to-skill annotate <converted_root> --all [--model M] [--force]
 excel-to-skill review  <패키지경로> --approve | --reject [--note "..."]
 excel-to-skill verify  <패키지경로>
 ```
+
+- `annotate --all <converted_root>`: **`_index.json` 등록 항목을 기준 목록**으로 전 패키지를 일괄 주석한다(32종 시드 수단). 캐시 hit는 생략(LLM·클라이언트 미생성), **파일별 실패 격리**(한 패키지 예외가 배치를 멈추지 않음), **색인엔 있으나 폴더/meta.json이 누락된 항목은 failed로 집계**(조용히 빠지지 않음). 4범주 집계(성공·캐시·제외·실패)+총계를 낸다. **stdout=요약 카운트 한 줄(패키지명 미포함)**, per-package 상태·요약은 stderr. exit=`실패>0 또는 제외>0`이면 1(부분 주석은 완료 키가 없어 승인 불가이므로 성공으로 보지 않는다), 대상 0건도 1.
 
 - `convert`: 전체 파이프라인 실행. 성공 시 **패키지 경로를 stdout 마지막 줄로** 출력(스크립트 연계 계약). M4 이후 docx도 동일 명령으로 수용.
 - `--no-annotate`: 해석 계층 생략. **API 키가 없는 환경에서도 결정론 계층 패키지가 완결 성립**해야 한다.

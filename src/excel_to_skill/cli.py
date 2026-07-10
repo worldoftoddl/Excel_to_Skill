@@ -331,12 +331,87 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _annotate_all(
+    root: Path,
+    *,
+    model: str | None,
+    force: bool,
+    client_factory=None,
+    eprint=_eprint,
+) -> dict:
+    """converted_root 아래 모든 패키지(meta.json 보유 폴더)를 주석한다(배치).
+
+    - **기준 목록은 `_index.json` 등록 항목**: 폴더/meta.json이 훼손·누락된 패키지도
+      조용히 빠지지 않고 **failed로 집계**된다(색인에 있으나 실물이 없는 상태를 드러냄).
+    - **파일별 실패 격리**: 한 패키지의 예외가 배치를 멈추지 않는다(실패로 집계+stderr).
+    - **캐시 hit 생략**: annotate_package가 완료 주석이면 cached=True를 돌려주고
+      클라이언트도 만들지 않는다 — 배치는 세기만 한다.
+    - **집계 4범주**: 성공(신규·제외 없음)·캐시·제외(부분 실패)·실패(예외/누락) + 총계.
+
+    client_factory(pkg)를 주면 패키지마다 클라이언트를 만들어 넘긴다(테스트 주입용).
+    실 운영에선 None — annotate_package가 miss일 때만 지연 생성한다(전건 캐시면 무키로도 성립).
+    반환: {"ok","cached","excluded","failed","total"}. total은 색인 등록 항목 수.
+    """
+    from .annotator import annotate_package
+
+    dirnames = sorted(cache.load_index(root).get("entries", {}))
+    ok = cached = excluded = failed = 0
+    for dirname in dirnames:
+        pkg = root / dirname
+        if not pkg.is_dir() or not (pkg / "meta.json").is_file():
+            failed += 1  # 색인엔 있으나 폴더/meta.json 누락 — 조용히 빼지 않는다
+            eprint(f"[annotate 실패] {dirname}: 폴더/meta.json 누락(색인 등록됨)")
+            continue
+        try:
+            client = client_factory(pkg) if client_factory is not None else None
+            res = annotate_package(
+                pkg, model=model, client=client, force=force, eprint=eprint
+            )
+        except Exception as e:  # 파일별 실패 격리 — 다음 패키지 계속
+            failed += 1
+            eprint(f"[annotate 실패] {pkg.name}: {e!r}")
+            continue
+        if res.get("cached"):
+            cached += 1
+            eprint(f"[annotate] {pkg.name}: 캐시 hit(생략)")
+        elif res["excluded"]:
+            excluded += 1
+            eprint(f"[annotate] {pkg.name}: 제외 {len(res['excluded'])}건 → {res['excluded']}")
+        else:
+            ok += 1
+            eprint(f"[annotate] {pkg.name}: sheets {res['sheets']}건 주석(draft)")
+    return {
+        "ok": ok, "cached": cached, "excluded": excluded,
+        "failed": failed, "total": len(dirnames),
+    }
+
+
 def _cmd_annotate(args: argparse.Namespace) -> int:
     # annotator는 여기서만 지연 import — convert/verify 경로가 anthropic을 건드리지
     # 않게 하고(P1 경계), anthropic 미설치 환경에서도 다른 명령이 살아 있게 한다.
     from .annotator import annotate_package
 
     pkg = Path(args.path)
+    if args.all:
+        if not pkg.is_dir():
+            _eprint(f"[오류] --all 대상이 디렉터리(converted_root)가 아님: {pkg}")
+            return 1
+        summary = _annotate_all(pkg, model=args.model, force=args.force)
+        # stdout = 요약 카운트 한 줄(원문·경로 미노출). per-package 상태는 stderr.
+        print(
+            f"성공 {summary['ok']} · 캐시 {summary['cached']} · "
+            f"제외 {summary['excluded']} · 실패 {summary['failed']} (총 {summary['total']})"
+        )
+        if summary["total"] == 0:
+            _eprint(f"[오류] 주석 대상 패키지 없음(meta.json 보유 폴더): {pkg}")
+            return 1
+        _eprint(
+            f"[annotate --all] 성공 {summary['ok']} · 캐시 {summary['cached']} · "
+            f"제외 {summary['excluded']} · 실패 {summary['failed']} (총 {summary['total']})"
+        )
+        # 일부라도 실패/제외면 비영 exit(단일 annotate가 excluded에 exit 1 하는 것과 일관).
+        return 1 if (summary["failed"] or summary["excluded"]) else 0
+
     if not pkg.is_dir() or not (pkg / "meta.json").is_file():
         _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
         return 1
@@ -415,7 +490,11 @@ def _build_parser() -> argparse.ArgumentParser:
     v.add_argument("--source", default=None, help="원본 파일(주면 V3 재현성 검증)")
 
     a = sub.add_parser("annotate", help="패키지에 해석 계층(semantics.json draft) 생성")
-    a.add_argument("path", help="주석할 패키지 폴더")
+    a.add_argument("path", help="주석할 패키지 폴더(또는 --all 시 converted_root)")
+    a.add_argument(
+        "--all", action="store_true",
+        help="converted_root 아래 모든 패키지 일괄 주석(실패 격리·집계)",
+    )
     a.add_argument("--model", default=None, help="어노테이터 모델(기본은 코드 상수)")
     a.add_argument("--force", action="store_true", help="주석 캐시 무시하고 재주석")
 
