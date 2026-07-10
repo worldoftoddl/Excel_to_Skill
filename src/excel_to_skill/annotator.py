@@ -70,6 +70,8 @@ def build_anthropic_client(model: str):
     - **Structured output**: 응답 스키마를 도구 `input_schema`로 주고 `tool_choice`로
       강제해, 모델이 스키마-유효 JSON을 구조적으로 방출하게 한다(텍스트 파싱 실패 제거).
       반환은 tool_use 블록의 `input`(dict).
+    - **프롬프트 캐싱**: 상수인 system 프롬프트에 `cache_control(ephemeral)`을 걸어
+      tools+system 프리픽스를 호출 간 재사용한다(비용 절감, 5분 TTL). 산출 불변.
     - **LangSmith 트래킹(선택)**: `LANGCHAIN_API_KEY`/`LANGSMITH_API_KEY`가 있으면
       `wrap_anthropic`로 감싼다(없으면 무트래킹으로 정상 동작).
     - anthropic·langsmith는 **이 함수 안에서만 지연 import**(P1 경계 + optional extra).
@@ -96,7 +98,11 @@ def build_anthropic_client(model: str):
             model=model,
             max_tokens=_MAX_TOKENS,
             temperature=TEMPERATURE,
-            system=system,
+            # 프롬프트 캐싱: 상수인 system 프롬프트에 cache_control(ephemeral)을 걸어
+            # tools+system 프리픽스를 호출 간 재사용한다(5분 TTL). user(시트별 layout)는
+            # 매번 달라 캐시 불가. 모델이 보는 내용(토큰)은 동일하므로 산출·annotation_key
+            # 불변 — 버전 범프 불필요.
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             tools=[{
                 "name": _TOOL_NAME,
                 "description": "요청된 스키마에 정확히 맞는 결과 하나를 방출한다.",
