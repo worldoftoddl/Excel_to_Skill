@@ -24,11 +24,16 @@ excel-to-skill convert <디렉터리> --all
 excel-to-skill verify <패키지> [--source <원본>]
 
 # 해석 계층(semantics.json draft) 생성 — 기존 패키지에 주석 추가
-excel-to-skill annotate <패키지> [--model <모델명>]
+excel-to-skill annotate <패키지> [--model <모델명>] [--force]
+
+# 해석 계층 검토 — 승인(승인판 SKILL.md 재생성) / 반려(사유 필수)
+excel-to-skill review <패키지> --approve
+excel-to-skill review <패키지> --reject --note "<반려 사유>"
 ```
 
-`convert`의 stdout은 패키지 경로만, `annotate`의 stdout은 산출 `semantics.json` 경로만
-출력한다(진행·경고·오류는 stderr, 판정은 exit code).
+`convert`의 stdout은 패키지 경로만, `annotate`의 stdout은 산출 `semantics.json` 경로만,
+`review`의 stdout은 재생성된 `SKILL.md` 경로만 출력한다(진행·경고·오류는 stderr, 판정은
+exit code). `annotate --force`는 주석 캐시를 무시하고 재주석한다.
 
 ## 어노테이터(해석 계층)
 

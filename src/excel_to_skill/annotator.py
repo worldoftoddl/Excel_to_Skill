@@ -14,8 +14,9 @@
     하고 stderr로 보고한다(진단 파일에는 LLM 실패를 남기지 않는다).
   - 산출은 status="draft"인 semantics.json. 승인/재생성은 review 단계(별도).
 
-클라이언트 계약: `client(*, system: str, user: str) -> str` (모델·temperature는 팩토리가
-캡슐화). 반환 문자열이 곧 모델 응답 텍스트다.
+클라이언트 계약: `client(*, system: str, user: str, schema: dict) -> dict | str`
+(모델·temperature는 팩토리가 캡슐화). structured output 경로는 스키마-유효 dict를,
+텍스트 폴백/주입 스텁은 문자열을 돌려주며 `_call_unit`이 둘 다 받아 검증한다.
 """
 from __future__ import annotations
 
@@ -272,12 +273,39 @@ def annotate_package(
         meta["source"]["sha256"], ANNOTATOR_VERSION, model, prompt_sha
     )
     root, dirname = pkg.parent, pkg.name
+    sem_schema = _load_schema("semantics.schema.json")
 
-    # 주석 캐시 hit: 키 일치 + semantics 실재 → 재주석 생략(클라이언트도 안 만든다).
+    # 주석 캐시 hit: 완료 marker를 approve·verify·승계와 **같은 기준**으로 보고, 나아가
+    # 저장된 본문이 지금도 계약(스키마 V1 + V2 실재성)을 만족할 때만 재주석을 생략한다.
+    #  ① 키 3자 일치: _index.annotation_key == meta.annotation.annotation_key ==
+    #     semantics.generator 재계산 키 == 현재 실행 key.
+    #  ② 본문 유효: 저장된 semantics가 전체 스키마와 V2(주소 실재성)를 통과.
+    # 어느 하나라도 어긋나면(훼손·부분·stale·본문 위반) miss로 보고 재주석한다 —
+    # "annotate 산출물은 항상 verify를 통과한다"는 계약을 캐시 경로에서도 지킨다.
+    # 클라이언트는 hit이 아닐 때만 만든다.
     if not force and out.is_file():
         entry = cache.load_index(root)["entries"].get(dirname)
-        if entry and entry.get("annotation_key") == key:
+        idx_key = entry.get("annotation_key") if entry else None
+        meta_key = meta.get("annotation", {}).get("annotation_key")
+        try:
             existing = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        gen = (existing or {}).get("generator", {})
+        expected = cache.annotation_key(
+            meta.get("source", {}).get("sha256", ""),
+            gen.get("annotator_version", ""),
+            gen.get("model", ""),
+            gen.get("prompt_sha", ""),
+        )
+        body_ok = False
+        if existing is not None and key == idx_key == meta_key == expected:
+            try:  # ② 본문이 지금도 스키마 V1 + V2 실재성을 통과하는가
+                jsonschema.validate(existing, sem_schema)
+                body_ok = not _evidence_problems(existing, meta)
+            except jsonschema.ValidationError:
+                body_ok = False
+        if body_ok:
             eprint(f"[annotate cache hit] {pkg.name} → 재주석 생략")
             return {
                 "path": out,
@@ -290,7 +318,6 @@ def annotate_package(
         client = build_anthropic_client(model)
 
     refs = json.loads((pkg / "data/references.json").read_text(encoding="utf-8"))
-    sem_schema = _load_schema("semantics.schema.json")
     sheet_subschema = sem_schema["properties"]["sheets"]["items"]
     wb_subschema = {
         "type": "object",

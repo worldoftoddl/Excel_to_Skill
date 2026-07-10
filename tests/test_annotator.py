@@ -214,6 +214,76 @@ def test_force_partial_clears_existing_key(tmp_path: Path) -> None:
     assert cache.load_index(root)["entries"][dirname]["annotation_key"] is None
 
 
+def test_cache_hit_requires_marker_and_generator_agreement(tmp_path: Path) -> None:
+    """캐시 hit는 _index만이 아니라 패키지 marker·generator 재계산까지 일치해야 한다.
+
+    generator를 훼손하면(=verify가 실패시키는 상태) _index/meta 키는 그대로여도 재계산
+    키가 어긋나므로, 캐시 hit이 아니라 재주석해서 정상 복구되어야 한다(approve·승계와
+    같은 완료 기준)."""
+    pkg = _pkg(tmp_path)
+    annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]))  # 완료
+    sem_path = pkg / "data/semantics.json"
+    sem = json.loads(sem_path.read_text(encoding="utf-8"))
+    sem["generator"]["model"] = "tampered-model"  # 재계산 키만 어긋남
+    sem_path.write_text(json.dumps(sem, ensure_ascii=False, indent=2), encoding="utf-8")
+    ann = next(c for c in verify_package(pkg).checks if c.name == "annotation")
+    assert not ann.ok  # verify는 이미 실패 상태
+
+    stub = StubClient([_SHEET_OK, _WB_OK])  # no-force → hit이면 소비 안 됨
+    r = annotate_package(pkg, client=stub)
+    assert r.get("cached") is False and stub.responses == []  # 재주석함(hit 아님)
+    assert next(c for c in verify_package(pkg).checks if c.name == "annotation").ok
+
+
+def test_cache_miss_when_package_marker_cleared(tmp_path: Path) -> None:
+    """패키지 내부 marker가 지워지면(_index만 키 보유) 캐시 hit이 아니라 재주석."""
+    pkg = _pkg(tmp_path)
+    annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]))
+    meta_path = pkg / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["annotation"]["annotation_key"] = None  # 패키지 marker만 clear
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    stub = StubClient([_SHEET_OK, _WB_OK])
+    r = annotate_package(pkg, client=stub)
+    assert r.get("cached") is False and stub.responses == []
+
+
+def test_cache_miss_when_body_violates_v2(tmp_path: Path) -> None:
+    """generator·키가 멀쩡해도 본문이 V2(주소 실재성) 위반이면 캐시 hit이 아니라 재주석.
+
+    evidence 훼손은 annotation_key(generator+파일sha 기반)를 바꾸지 않으므로 예전엔
+    hit로 잡혔다. 이제 본문 계약(스키마+V2)을 캐시 경로에서도 확인해 재주석한다."""
+    pkg = _pkg(tmp_path)
+    annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]))
+    sem_path = pkg / "data/semantics.json"
+    sem = json.loads(sem_path.read_text(encoding="utf-8"))
+    sem["sheets"][0]["evidence"] = ["Data!ZZ999"]  # used range 밖 → V2 위반(키는 불변)
+    sem_path.write_text(json.dumps(sem, ensure_ascii=False, indent=2), encoding="utf-8")
+    assert not next(c for c in verify_package(pkg).checks if c.name == "V2").ok
+
+    stub = StubClient([_SHEET_OK, _WB_OK])  # hit이면 소비 안 됨
+    r = annotate_package(pkg, client=stub)
+    assert r.get("cached") is False and stub.responses == []  # 재주석함
+    assert next(c for c in verify_package(pkg).checks if c.name == "V2").ok  # 복구
+
+
+def test_cache_miss_when_body_violates_schema(tmp_path: Path) -> None:
+    """본문이 스키마(additionalProperties:false 등)를 위반하면 캐시 hit이 아니라 재주석."""
+    pkg = _pkg(tmp_path)
+    annotate_package(pkg, client=StubClient([_SHEET_OK, _WB_OK]))
+    sem_path = pkg / "data/semantics.json"
+    sem = json.loads(sem_path.read_text(encoding="utf-8"))
+    sem["sheets"][0]["unexpected_field"] = 1  # additionalProperties:false 위반(키는 불변)
+    sem_path.write_text(json.dumps(sem, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    stub = StubClient([_SHEET_OK, _WB_OK])
+    r = annotate_package(pkg, client=stub)
+    assert r.get("cached") is False and stub.responses == []
+    v1 = next(c for c in verify_package(pkg).checks if c.name == "V1:data/semantics.json")
+    assert v1.ok  # 재주석으로 스키마 유효 복구
+
+
 def test_annotator_import_does_not_load_anthropic() -> None:
     """P1 경계: annotator import는 anthropic을 top-level로 불러오면 안 된다."""
     src = Path(annotator.__file__).read_text(encoding="utf-8")
