@@ -47,5 +47,9 @@ exit code). `annotate --force`는 주석 캐시를 무시하고 재주석한다.
 - **LangSmith 트래킹(선택)**: `LANGCHAIN_API_KEY`(또는 `LANGSMITH_API_KEY`)가 있으면 각
   호출을 자동 트레이스한다(`LANGCHAIN_TRACING_V2`·`LANGCHAIN_PROJECT`로 제어). 없으면
   무트래킹으로 정상 동작. `langsmith`도 어노테이터 모듈 안에서만 지연 import(P1 경계).
+- **큰 시트 입력 예산**: 시트 단위 프롬프트의 layout HTML이 크면 **행 경계로 발췌**(앞+뒤
+  보존, 가운데 생략 표시)해 모델 컨텍스트를 넘지 않게 한다. 그래도 초과하면 예산을 줄여
+  1회 재시도하고, 최종 초과 시 그 시트만 제외한다(나머지 시트·워크북은 계속). 입력 정책이
+  바뀌면 `ANNOTATOR_VERSION`이 올라 기존 주석 캐시가 무효화된다.
 - 생성 직후 상태는 `draft`다. 승인·승인판 SKILL.md 재생성(`review`)은 `review --approve`.
   승인 전 `verify`로 V2(evidence 실재성) 통과를 확인하길 권장한다.

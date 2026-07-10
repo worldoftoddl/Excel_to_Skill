@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -297,6 +298,118 @@ def test_build_client_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
         annotator.build_anthropic_client("m")
+
+
+# ── layout 입력 예산 발췌 + 컨텍스트 초과 처리(오너 계약) ─────────────
+def test_excerpt_layout_row_boundary_marker_and_budget() -> None:
+    """예산 초과 layout은 행 경계로 발췌 — 마커·예산 준수·행 중간 미절단·head/tail 보존."""
+    from excel_to_skill.annotator import _excerpt_layout
+
+    prefix = [
+        "<!DOCTYPE html>", '<html lang="ko">', '<head><meta charset="utf-8">',
+        "<style>x</style>", "</head>", "<body>", '<table data-sheet="S">',
+    ]
+    rows = [f'<tr><td data-cell="A{i}">{i:04d}-' + "x" * 40 + "</td></tr>"
+            for i in range(1, 101)]
+    suffix = ["</table>", "</body>", "</html>", ""]
+    layout = "\n".join(prefix + rows + suffix)
+    budget = 2000
+
+    out, excerpted = _excerpt_layout(layout, budget)
+    assert excerpted is True
+    assert len(out) <= budget  # 예산 준수
+    outrows = [ln for ln in out.split("\n") if ln.startswith("<tr")]
+    marker = [ln for ln in outrows if "생략" in ln]
+    data_rows = [ln for ln in outrows if "생략" not in ln]
+    assert len(marker) == 1  # 생략 마커 정확히 1개
+    assert data_rows and all(ln in set(rows) for ln in data_rows)  # 행 중간 미절단
+    assert rows[0] in out and rows[-1] in out  # head+tail 보존
+    omitted = int(re.search(r"가운데 (\d+)행", out).group(1))
+    assert omitted == 100 - len(data_rows)  # 생략 행수 정확
+
+
+def test_excerpt_layout_no_truncation_under_budget() -> None:
+    """예산 이하 layout은 원본 그대로(발췌 아님)."""
+    from excel_to_skill.annotator import _excerpt_layout
+
+    layout = '<table data-sheet="S">\n<tr><td>a</td></tr>\n</table>\n'
+    out, excerpted = _excerpt_layout(layout, 10_000)
+    assert out == layout and excerpted is False
+
+
+_WB_EMPTY = json.dumps({"workbook_claims": []}, ensure_ascii=False)
+
+
+class SheetOverflowStub:
+    """시트 호출에서 컨텍스트 초과를 흉내내는 스텁.
+
+    always_overflow: 큰/작은 예산 모두 초과(→ 시트 제외). shrink_ok: 첫(큰) 예산엔
+    초과, 두 번째(축소) 예산엔 성공. 그 외 시트는 used range 안 주소로 유효 응답.
+    워크북은 빈 claims(항상 유효)로 계속 진행. 호출 횟수는 _seen에 시트별 누적.
+    """
+
+    _OVERFLOW = RuntimeError("prompt is too long: 9 tokens > 8 maximum")
+
+    def __init__(self, *, always_overflow=frozenset(), shrink_ok=frozenset()) -> None:
+        self.always = set(always_overflow)
+        self.shrink_ok = set(shrink_ok)
+        self._seen: dict[str, int] = {}
+
+    def __call__(self, *, system: str, user: str, schema=None):
+        if "워크북 단위" in user:
+            return _WB_EMPTY
+        name = re.search(r"시트명: (.+)", user).group(1).strip()
+        dims = re.search(r"used range: (.*)", user).group(1).strip()
+        cnt = self._seen.get(name, 0)
+        self._seen[name] = cnt + 1
+        if name in self.always:
+            raise self._OVERFLOW
+        if name in self.shrink_ok and cnt == 0:
+            raise self._OVERFLOW
+        topleft = (dims.split(":")[0] if dims else "A1") or "A1"
+        return json.dumps(
+            {"name": name, "purpose": "표", "evidence": [f"{name}!{topleft}"],
+             "confidence": 0.9},
+            ensure_ascii=False,
+        )
+
+
+def test_annotate_shrink_retry_then_success(tmp_path: Path) -> None:
+    """시트 프롬프트가 컨텍스트 초과면 layout 예산을 줄여 1회 재시도해 성공한다."""
+    pkg = _pkg(tmp_path)  # fx1 — 시트 Data 1개
+    stub = SheetOverflowStub(shrink_ok={"Data"})
+    res = annotate_package(pkg, client=stub)
+    assert res["sheets"] == 1 and res["excluded"] == []
+    assert stub._seen["Data"] == 2  # 첫 초과 → 축소 재시도 성공(2회 호출)
+    assert next(c for c in verify_package(pkg).checks if c.name == "V2").ok
+
+
+def test_annotate_excludes_oversized_sheet_others_continue(tmp_path: Path) -> None:
+    """축소 후에도 초과하는 시트는 제외하고, 나머지 시트·워크북은 계속 주석."""
+    pkg = _convert_one(FX_DIR / "fx2_refs.xlsx", tmp_path, force=True, cv=_converter_version())
+    stub = SheetOverflowStub(always_overflow={"S1"})  # S1은 계속 초과 → 제외, S2는 성공
+    res = annotate_package(pkg, client=stub)
+    assert res["excluded"] == ["S1"] and res["sheets"] == 1
+    assert stub._seen["S1"] == 2  # 큰+축소 두 예산 모두 시도 후 제외
+    sem = json.loads((pkg / "data/semantics.json").read_text(encoding="utf-8"))
+    assert [s["name"] for s in sem["sheets"]] == ["S2"]  # S2만 남음
+    # 부분 결과라도 산출물은 V2 통과(제외로 불량 evidence 없음)
+    assert next(c for c in verify_package(pkg).checks if c.name == "V2").ok
+    # partial → 완료 키 없음(승인 불가)
+    meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
+    assert meta["annotation"]["annotation_key"] is None
+
+
+def test_non_overflow_error_is_not_swallowed(tmp_path: Path) -> None:
+    """컨텍스트 초과가 아닌 오류는 제외로 삼키지 않고 그대로 전파한다."""
+    pkg = _pkg(tmp_path)
+
+    class BoomStub:
+        def __call__(self, *, system, user, schema=None):
+            raise RuntimeError("service unavailable (500)")  # 초과 아님
+
+    with pytest.raises(RuntimeError, match="service unavailable"):
+        annotate_package(pkg, client=BoomStub())
 
 
 # ── annotate --all 배치(오너 순서 2·3) ────────────────────────────

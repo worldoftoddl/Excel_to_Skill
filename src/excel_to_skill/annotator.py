@@ -9,6 +9,9 @@
   - 입력 = 패키지의 layout/*.html(구조) + data/cells.jsonl(주소 근거) + references(요약).
   - **시트 단위**로 호출해 sheets[] 항목을 만들고, 마지막에 **워크북 단위** 1회로
     workbook_claims를 만든다(호출 순서: meta.sheets 순 → workbook).
+  - **layout 입력 예산**: 시트 프롬프트의 layout HTML을 보수적 char 예산으로 **행 경계
+    발췌**(앞+뒤 보존·가운데 생략 마커·모델에 발췌 고지)해 컨텍스트를 넘지 않게 한다.
+    그래도 컨텍스트 초과면 더 작은 예산으로 1회 축소 재시도, 최종 초과면 그 시트만 제외.
   - temperature 0, 응답은 JSON만. 받은 JSON을 semantics.schema.json의 해당 하위 스키마로
     검증하고, 불일치면 오류를 첨부해 **1회 재시도**, 재실패면 그 단위를 결과에서 **제외**
     하고 stderr로 보고한다(진단 파일에는 LLM 실패를 남기지 않는다).
@@ -36,12 +39,16 @@ _ROOT = Path(__file__).resolve().parents[2]
 _PROMPT_PATH = _ROOT / "prompts" / "annotator_v1.md"
 _SCHEMA_DIR = _ROOT / "schemas"
 
-ANNOTATOR_VERSION = "0.1.0"
+ANNOTATOR_VERSION = "0.2.0"  # 0.2.0: 시트 layout 입력 예산 발췌·컨텍스트 초과 처리(캐시 무효화)
 DEFAULT_MODEL = "claude-sonnet-4-5"  # §7 기본 모델명 — 유일 출처(코드 상수 1곳 + README)
 TEMPERATURE = 0
 _MAX_RETRY = 1  # 스키마 불일치 시 오류 첨부 1회 재시도
 _MAX_TOKENS = 4096
 _CELL_CAP = 400  # 시트당 프롬프트에 넣는 원장 줄 상한(발췌 — 구현 재량)
+# 시트 단위 프롬프트의 layout HTML char 예산(보수적 상한). 초과 시 행 경계로 발췌하고,
+# 그래도 컨텍스트가 초과되면 더 작은 예산으로 1회 축소 재시도, 최종 초과면 그 시트만 제외.
+_LAYOUT_BUDGET = 150_000
+_LAYOUT_BUDGET_MIN = 50_000
 
 
 def _prompt_text_and_sha() -> tuple[str, str]:
@@ -130,6 +137,25 @@ class _EvidenceError(Exception):
         self.problems = problems
 
 
+class _ContextOverflow(Exception):
+    """프롬프트가 모델 컨텍스트를 초과(too long). 축소 재시도/시트 제외의 트리거."""
+
+
+def _is_context_overflow(e: Exception) -> bool:
+    """**컨텍스트 길이 초과(프롬프트 과대)만** True. 그 외 4xx/오류는 False(정상 실패).
+
+    anthropic 타입을 import하지 않고(P1 경계) 메시지로 판별한다 — 예: "prompt is too
+    long: N tokens > 200000 maximum". 다른 BadRequestError는 초과가 아니므로 그대로 터진다.
+    """
+    msg = str(e).lower()
+    return (
+        "prompt is too long" in msg
+        or "too many tokens" in msg
+        or "maximum context" in msg
+        or "context length" in msg
+    )
+
+
 def _evidence_problems(partial: dict, meta: dict) -> list[str]:
     """부분 semantics의 evidence 실재성 문제 목록(docx 등 미구현 형식은 생략)."""
     try:
@@ -150,7 +176,12 @@ def _call_unit(
     last_err: Exception | None = None
     for attempt in range(_MAX_RETRY + 1):
         # structured output이면 dict를 그대로, 텍스트 폴백/스텁 문자열이면 파싱한다.
-        raw = client(system=system, user=attempt_user, schema=subschema)
+        try:
+            raw = client(system=system, user=attempt_user, schema=subschema)
+        except Exception as e:  # 컨텍스트 초과만 구분해 상위로(축소 재시도용). 그 외는 그대로.
+            if _is_context_overflow(e):
+                raise _ContextOverflow(str(e)) from e
+            raise
         try:
             doc = raw if isinstance(raw, dict) else _extract_json(raw)
             jsonschema.validate(doc, subschema)
@@ -191,6 +222,45 @@ def _layout_for_sheet(pkg: Path, name: str) -> str:
     return ""
 
 
+_EXCERPT_MARKER = '<tr class="excerpt"><td>(가운데 {n}행 생략 — layout 일부 발췌)</td></tr>'
+
+
+def _excerpt_layout(layout: str, budget: int) -> tuple[str, bool]:
+    """layout HTML을 char 예산 이하로 **행 경계** 발췌한다. 반환 (html, excerpted).
+
+    §4.3 layout은 한 행 = 한 `<tr>…</tr>` 라인이다. 앞부분(head)+뒷부분(tail) 행을
+    살리고 가운데를 생략 마커 한 줄로 대체한다 — `<tr>` 라인 단위로만 자르므로 행 중간이
+    깨지지 않는다. 예산 이하면 원본 그대로(excerpted=False). head는 최소 1행 보장.
+    """
+    if len(layout) <= budget:
+        return layout, False
+    lines = layout.split("\n")
+    row_pos = [i for i, ln in enumerate(lines) if ln.startswith("<tr")]
+    if not row_pos:  # 이례적: 테이블 행 없음 — 하드 컷 폴백
+        return layout[:budget], True
+    first, last = row_pos[0], row_pos[-1]
+    prefix, rows, suffix = lines[:first], lines[first : last + 1], lines[last + 1 :]
+    overhead = len("\n".join(prefix)) + len("\n".join(suffix)) + 120  # 마커 여유
+    rows_budget = max(budget - overhead, 0)
+    head_budget = int(rows_budget * 0.7)
+    head, used = [], 0
+    for ln in rows:
+        if head and used + len(ln) + 1 > head_budget:
+            break  # head 비어 있으면 무조건 담아 최소 1행 보장
+        head.append(ln)
+        used += len(ln) + 1
+    tail, used_t = [], 0
+    for ln in reversed(rows[len(head) :]):
+        if used_t + len(ln) + 1 > rows_budget - used:
+            break
+        tail.append(ln)
+        used_t += len(ln) + 1
+    tail.reverse()
+    omitted = len(rows) - len(head) - len(tail)
+    marker = [_EXCERPT_MARKER.format(n=omitted)] if omitted > 0 else []
+    return "\n".join(prefix + head + marker + tail + suffix), True
+
+
 def _cells_for_sheet(pkg: Path, name: str) -> list[str]:
     """이 시트에 속한 원장 줄(원문 jsonl)을 상한까지 발췌."""
     out: list[str] = []
@@ -220,12 +290,20 @@ def _edges_for_sheet(refs: dict, name: str) -> list[dict]:
     ]
 
 
-def _sheet_user_message(name: str, dims: str, layout: str, cells: list[str], edges: list[dict]) -> str:
+def _sheet_user_message(
+    name: str, dims: str, layout: str, cells: list[str], edges: list[dict],
+    *, excerpted: bool = False,
+) -> str:
     edge_lines = "\n".join(f'  {e["from"]} → {e["to"]} ({e["ref_type"]})' for e in edges[:50])
+    layout_note = (
+        "\n※ 이 layout은 크기 제한으로 **일부 행만 발췌**됐습니다(가운데 생략, `(…행 생략)`"
+        " 마커). 발췌에 나타나지 않은 영역은 관찰한 것처럼 주장하지 마세요."
+        if excerpted else ""
+    )
     return (
         f"# 요청: 시트 단위 주석\n"
         f"시트명: {name}\nused range: {dims}\n\n"
-        f"## 레이아웃(HTML)\n{layout}\n\n"
+        f"## 레이아웃(HTML){layout_note}\n{layout}\n\n"
         f"## 원장(cells, jsonl {len(cells)}줄{' 이하 발췌' if len(cells) >= _CELL_CAP else ''})\n"
         + "\n".join(cells)
         + f"\n\n## 참조 엣지(이 시트 관련 {len(edges)}건)\n{edge_lines or '  (없음)'}\n\n"
@@ -247,6 +325,38 @@ def _workbook_user_message(meta: dict, sheets_out: list[dict]) -> str:
         f"워크북 전체를 관통하는 주장을 workbook_claims로 정리해 JSON 객체 하나만 "
         f"출력하세요. 각 evidence는 시트!주소 형식이며, 주장할 게 없으면 빈 배열로 두세요."
     )
+
+
+def _call_sheet_unit(
+    client, system: str, pkg: Path, meta: dict, refs: dict, s: dict, subschema: dict,
+    *, eprint,
+):
+    """시트 1개 주석 — layout 예산 발췌 + 컨텍스트 초과 시 축소 1회 재시도, 최종 초과면 None.
+
+    layout을 `_LAYOUT_BUDGET`으로 발췌해 호출하고, 그래도 프롬프트가 컨텍스트를 넘으면
+    `_LAYOUT_BUDGET_MIN`으로 한 번 더 줄여 재시도한다. 그래도 초과면 그 시트만 제외(None).
+    스키마/실재성 실패의 1회 재시도·제외는 `_call_unit`이 그대로 담당한다.
+    """
+    name = s["name"]
+    full_layout = _layout_for_sheet(pkg, name)
+    cells = _cells_for_sheet(pkg, name)
+    edges = _edges_for_sheet(refs, name)
+    for budget in (_LAYOUT_BUDGET, _LAYOUT_BUDGET_MIN):
+        layout, excerpted = _excerpt_layout(full_layout, budget)
+        user = _sheet_user_message(
+            name, s.get("dimensions", ""), layout, cells, edges, excerpted=excerpted
+        )
+        try:
+            return _call_unit(
+                client, system, user, subschema, label=f"sheet {name}", eprint=eprint,
+                validator=lambda d: _evidence_problems({"sheets": [d]}, meta),
+            )
+        except _ContextOverflow as e:
+            if budget != _LAYOUT_BUDGET_MIN:
+                eprint(f"[annotate] sheet {name}: 컨텍스트 초과 → layout 예산 축소 재시도")
+                continue
+            eprint(f"[annotate] 단위 제외: sheet {name} — 컨텍스트 초과(축소 후에도): {e}")
+            return None
 
 
 # ── 오케스트레이션 ────────────────────────────────────────────
@@ -329,21 +439,11 @@ def annotate_package(
     sheets_out: list[dict] = []
     excluded: list[str] = []
     for s in meta.get("sheets", []):
-        name = s["name"]
-        user = _sheet_user_message(
-            name,
-            s.get("dimensions", ""),
-            _layout_for_sheet(pkg, name),
-            _cells_for_sheet(pkg, name),
-            _edges_for_sheet(refs, name),
-        )
-        doc = _call_unit(
-            client, prompt_text, user, sheet_subschema,
-            label=f"sheet {name}", eprint=eprint,
-            validator=lambda d: _evidence_problems({"sheets": [d]}, meta),
+        doc = _call_sheet_unit(
+            client, prompt_text, pkg, meta, refs, s, sheet_subschema, eprint=eprint,
         )
         if doc is None:
-            excluded.append(name)
+            excluded.append(s["name"])
         else:
             sheets_out.append(doc)
 
