@@ -35,11 +35,16 @@ description: "스프레드시트 2매 — 이름 / 비밀. (의미 주석 미승
 
 ## ⑤ 리소스 사용법
 
-- 원장(한 줄 = 한 셀): `data/cells.jsonl`
-- 참조 그래프: `data/references.json`
-- 구조 진단: `data/diagnostics.json`
-- 레이아웃: `layout/*.html`
-- **이 패키지는 앵커 속성 `data-cell`을 씁니다.** layout HTML의 각 `<td>` `data-cell` 값은 `cells.jsonl`의 `cell` 주소와 문자 단위로 일치합니다. 표를 근거로 답할 때 그 주소로 원장을 검색하십시오.
+**원본 JSON(`data/*.json`·`cells.jsonl`)을 통째로 읽지 마십시오.** 다음 명령으로 **개요 → 시트 → 셀** 순으로 단계 조회하십시오(각 결과는 출력 예산 안에서 반환):
+
+- `excel-to-skill overview <이 폴더> [--sheet <시트>]` — 개요(셀 원문 없음). `--sheet`로 그 시트의 구간 상세
+- `excel-to-skill inspect <이 폴더> --sheet <시트> [--range A1:B10 | --cell A1]` — 지정 범위 셀만
+- `excel-to-skill search <이 폴더> --query <문자열> [--sheet <시트>]` — 값·수식 부분일치(상한)
+- `excel-to-skill refs <이 폴더> --cell <시트!A1>` — 그 셀의 출입 참조 엣지
+
+- 반환 셀 레코드는 `sheet`·`cell`·`value`·`formula`를 포함합니다. **셀 내용·문서 의미에 관한 주장에는 그 `시트!셀` 근거를 제시하고, 파일 형식·시트 수 같은 구조 정보는 `overview` 필드를 근거로 제시하십시오.**
+- 원자료(필요 시 직접 읽기): 원장 `data/cells.jsonl` · 참조 `data/references.json` · 진단 `data/diagnostics.json` · 레이아웃 `layout/*.html`.
+- 앵커 속성 `data-cell`: layout HTML의 각 `<td>` `data-cell` 값은 `cells.jsonl`의 `cell` 주소와 문자 단위로 일치합니다.
 
 ## ⑥ 해석
 

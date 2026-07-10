@@ -72,7 +72,10 @@ def test_approve_sets_status_and_renders_interpretation(tmp_path: Path) -> None:
     skill = _skill(pkg)
     assert "## ⑥ 해석 (승인됨)" in skill
     assert "단일 합계 표 워크북" in skill  # workbook_claim 렌더
-    assert "합계 표" in skill and "`Data!A1`" in skill  # 시트 purpose + evidence 주소
+    assert "`Data!A1:B5`" in skill  # 워크북 주장 근거(유지)
+    assert "합계 표" in skill and "구간 1개" in skill  # 시트 purpose + 구간 수(요약)
+    # 구간별 상세(의미유형·근거·필드)는 SKILL에 없고 소비 명령으로 내려감(단계 조회 유지)
+    assert "table_header" not in skill and "--sheet" in skill
     # frontmatter description이 승인판(claim)으로 교체됨
     assert "단일 합계 표 워크북" in skill.split("---")[1]
 

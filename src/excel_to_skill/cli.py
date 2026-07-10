@@ -461,6 +461,31 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_consume(args: argparse.Namespace) -> int:
+    """소비 인터페이스(overview/inspect/search/refs) — 결과 JSON을 stdout으로."""
+    from .consume import ConsumeError, inspect, overview, refs, search
+
+    pkg = Path(args.path)
+    if not pkg.is_dir() or not (pkg / "meta.json").is_file():
+        _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
+        return 1
+    lim = {} if getattr(args, "limit", None) is None else {"limit": args.limit}
+    try:
+        if args.cmd == "overview":
+            result = overview(pkg, sheet=getattr(args, "sheet", None), **lim)
+        elif args.cmd == "inspect":
+            result = inspect(pkg, sheet=args.sheet, range=args.range, cell=args.cell, **lim)
+        elif args.cmd == "search":
+            result = search(pkg, query=args.query, sheet=args.sheet, **lim)
+        else:  # refs
+            result = refs(pkg, cell=args.cell, **lim)
+    except ConsumeError as e:
+        _eprint(f"[{args.cmd} 실패] {e}")
+        return 1
+    print(json.dumps(result, ensure_ascii=False))  # stdout = 조회 결과 JSON 한 줄
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="excel-to-skill")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -503,6 +528,31 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--approve", action="store_true", help="승인(verify 통과 전제)")
     r.add_argument("--reject", action="store_true", help="반려(--note 필수)")
     r.add_argument("--note", default=None, help="반려 사유(--reject 시 필수)")
+
+    # 소비 인터페이스(§10) — Agent가 '개요→시트→셀'로 단계 조회(원본 JSON 통째 로드 금지)
+    o = sub.add_parser("overview", help="패키지 개요(셀 원문 없이 구조·해석 요약)")
+    o.add_argument("path", help="조회할 패키지 폴더")
+    o.add_argument("--sheet", default=None, help="지정 시트의 구간 상세(승인 시)")
+    o.add_argument("--limit", type=int, default=None, help="--sheet 구간 상한(기본 100)")
+
+    ins = sub.add_parser("inspect", help="지정 시트의 범위/셀 원장 조회")
+    ins.add_argument("path", help="조회할 패키지 폴더")
+    ins.add_argument("--sheet", required=True, help="시트명")
+    g = ins.add_mutually_exclusive_group()
+    g.add_argument("--range", default=None, help="범위(A1:B10). 생략 시 시트 전체")
+    g.add_argument("--cell", default=None, help="단일 셀(A1)")
+    ins.add_argument("--limit", type=int, default=None, help="반환 셀 상한(기본 200)")
+
+    s = sub.add_parser("search", help="값·수식 부분일치 조회")
+    s.add_argument("path", help="조회할 패키지 폴더")
+    s.add_argument("--query", required=True, help="찾을 문자열(대소문자 무시)")
+    s.add_argument("--sheet", default=None, help="특정 시트로 제한(선택)")
+    s.add_argument("--limit", type=int, default=None, help="매치 상한(기본 30)")
+
+    rf = sub.add_parser("refs", help="지정 셀의 출입 참조 엣지 조회")
+    rf.add_argument("path", help="조회할 패키지 폴더")
+    rf.add_argument("--cell", required=True, help="절대 주소(Sheet!A1)")
+    rf.add_argument("--limit", type=int, default=None, help="방향별 엣지 상한(기본 100)")
     return p
 
 
@@ -516,6 +566,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_annotate(args)
     if args.cmd == "review":
         return _cmd_review(args)
+    if args.cmd in ("overview", "inspect", "search", "refs"):
+        return _cmd_consume(args)
     _eprint(f"'{args.cmd}' 은(는) 알 수 없는 명령입니다.")
     return 2
 

@@ -6,3 +6,4 @@ converted/
 workingpaper_raw/
 tests/_output/
 .env
+_seed_local/
