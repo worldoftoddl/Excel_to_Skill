@@ -7,3 +7,4 @@ workingpaper_raw/
 tests/_output/
 .env
 _seed_local/
+.auditpaper_standards_cache/

@@ -181,6 +181,15 @@ def overview(pkg, *, sheet: str | None = None, limit=None) -> dict:
     """
     pkg = Path(pkg)
     meta = _load_required(pkg, "meta.json")
+    # Audit files are agent-visible only as one committed, validated bundle.  In particular,
+    # overview must not bypass the key gate used by brief/audit-search when a publish was
+    # interrupted or an artifact/meta field was changed later.
+    from .audit.consume import AuditConsumeError, load_validated_audit_bundle
+
+    try:
+        audit_bundle = load_validated_audit_bundle(pkg, allow_absent=True)
+    except AuditConsumeError as e:
+        raise ConsumeError(f"감사 prepare 상태가 손상되었습니다: {e}") from e
     if sheet is not None:
         return _sheet_overview(pkg, meta, sheet, limit)
 
@@ -206,6 +215,23 @@ def overview(pkg, *, sheet: str | None = None, limit=None) -> dict:
         "annotation": {"present": ann.get("present", False),
                        "review_status": ann.get("review_status")},
     }
+    if audit_bundle is not None:
+        _, facts_doc, standards_doc, brief_doc = audit_bundle
+        brief_review = brief_doc.get("review", {}).get("status")
+        readiness = brief_doc.get("readiness")
+        out["audit_preparation"] = {
+            "present": True,
+            "status": readiness.get("status") if isinstance(readiness, dict) else None,
+            "review_status": brief_review,
+            "unreviewed": brief_review != "approved",
+            "readiness": readiness,
+            "counts": {
+                "facts": len(facts_doc.get("facts", [])),
+                "relations": len(facts_doc.get("relations", [])),
+                "standards_citations": len(standards_doc.get("citations", [])),
+                "brief_statements": len(brief_doc.get("statements", [])),
+            },
+        }
     sem = _load_optional(pkg, "data/semantics.json")
     if isinstance(sem, dict):
         status = sem.get("review", {}).get("status")

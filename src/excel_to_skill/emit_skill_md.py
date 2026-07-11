@@ -140,6 +140,23 @@ def _render_interpretation(semantics: dict) -> list[str]:
     return out
 
 
+def _render_audit_brief(_brief: dict) -> list[str]:
+    """Render a stable bootstrap; dynamic brief content stays behind the commit gate."""
+    return [
+        "## ⑥ 감사조서 Brief (commit-gated)",
+        "",
+        "- 이 SKILL에는 가변 audit brief 본문을 직접 싣지 않습니다.",
+        "- 먼저 `excel-to-skill brief <이 폴더>`를 호출하십시오. 이 명령이 성공한 결과만 "
+        "commit marker·artifact digest·provenance 검증을 통과한 준비본입니다.",
+        "- 명령이 실패하면 준비된 감사 내용이 없는 것으로 취급하고 SKILL만으로 상태·요약을 "
+        "추정하지 마십시오.",
+        "- 반환된 `review_status`·`unreviewed`·`readiness`를 확인하십시오. 경영진 주장과 "
+        "감사절차의 명시적 대응은 `assertion-procedures`, 개별 근거는 `audit-get`과 "
+        "`trace --id <ID>`로 추적하십시오.",
+        "",
+    ]
+
+
 def _render_skill_md(
     *,
     meta: dict,
@@ -148,6 +165,7 @@ def _render_skill_md(
     layout_filenames: dict[str, str],
     heads: dict[str, tuple[str, str] | None],
     semantics: dict | None = None,
+    audit_brief: dict | None = None,
 ) -> str:
     """SKILL.md 문자열(결정론). review.status=="approved"면 승인판으로 렌더.
 
@@ -160,7 +178,12 @@ def _render_skill_md(
     approved = bool(semantics) and semantics.get("review", {}).get("status") == "approved"
 
     # ── frontmatter ───────────────────────────────────────────
-    if approved:
+    if audit_brief:
+        desc = (
+            f"회계감사조서 Excel {len(meta['sheets'])}매 — audit brief와 기준서 문맥은 "
+            "commit-gated excel-to-skill brief 명령으로 조회."
+        )
+    elif approved:
         desc = _approved_description(semantics, len(meta["sheets"]))
     else:
         head_join = " / ".join(
@@ -268,8 +291,23 @@ def _render_skill_md(
         "",
     ]
 
-    # ⑥ 해석 — 승인판이면 semantics 렌더, 아니면 미승인 한 줄
-    if approved:
+    if audit_brief:
+        lines[-1:-1] = [
+            "- `excel-to-skill brief <이 폴더>` — review_status/unreviewed 표시를 포함한 감사 brief",
+            "- `excel-to-skill audit-search <이 폴더> --query <문자열>` — 감사 사실·brief 검색",
+            "- `excel-to-skill audit-get <이 폴더> --id <ID>` — 감사 객체 단건 조회",
+            "- `excel-to-skill assertion-procedures <이 폴더> [--query <문자열>]` — "
+            "명시적으로 연결된 경영진 주장·감사절차와 결과 조회",
+            "- `excel-to-skill trace <이 폴더> --id <ID>` — workbook·기준서 근거 추적",
+            "",
+        ]
+
+    # Audit-prepared packages expose only a stable, commit-gated bootstrap here. Dynamic brief
+    # content stays behind the validated consumer commands. Legacy semantics remains the M3
+    # comparison baseline and is not duplicated in this entrypoint.
+    if audit_brief:
+        lines += _render_audit_brief(audit_brief)
+    elif approved:
         lines += _render_interpretation(semantics)
     else:
         lines += ["## ⑥ 해석", "", _UNAPPROVED, ""]
@@ -300,6 +338,7 @@ def build_skill_md(
         layout_filenames=layout_filenames,
         heads=heads,
         semantics=semantics,
+        audit_brief=None,
     )
 
 
@@ -351,10 +390,15 @@ def _layout_filenames_from_pkg(pkg: Path, meta: dict) -> dict[str, str]:
     return result
 
 
-def build_skill_md_from_package(pkg: Path) -> str:
+_AUTO_AUDIT_BRIEF = object()
+
+
+def build_skill_md_from_package(pkg: Path, *, audit_brief=_AUTO_AUDIT_BRIEF) -> str:
     """review 경로: 패키지 파일만으로 SKILL.md를 재구성한다(IR 없음).
 
     review.status가 approved면 승인판, 아니면 미승인(draft/rejected)으로 렌더한다.
+    prepare publish는 이미 검증한 staged brief를 명시적으로 주어 meta commit 전에 새
+    SKILL을 만들고, 일반 호출자는 commit gate를 통과한 bundle만 자동 로드한다.
     """
     pkg = Path(pkg)
     meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
@@ -364,6 +408,20 @@ def build_skill_md_from_package(pkg: Path) -> str:
     semantics = (
         json.loads(sem_path.read_text(encoding="utf-8")) if sem_path.is_file() else None
     )
+    # Audit artifacts are agent-visible only after the fixed three-file bundle is validated and
+    # meta.json advertises the exact committed keys.  Invalid/orphaned artifacts are ignored here
+    # so a legacy package remains renderable without accidentally exposing staging content;
+    # verify's audit/SKILL checks still report the damaged optional layer.
+    from .audit.consume import AuditConsumeError, load_validated_audit_bundle
+
+    if audit_brief is _AUTO_AUDIT_BRIEF:
+        try:
+            audit_bundle = load_validated_audit_bundle(pkg, allow_absent=True)
+        except AuditConsumeError:
+            audit_bundle = None
+        audit_brief = audit_bundle[3] if audit_bundle is not None else None
+    elif audit_brief is not None and not isinstance(audit_brief, dict):
+        raise TypeError("audit_brief override는 JSON 객체이거나 None이어야 합니다.")
     return _render_skill_md(
         meta=meta,
         references=references,
@@ -371,6 +429,7 @@ def build_skill_md_from_package(pkg: Path) -> str:
         layout_filenames=_layout_filenames_from_pkg(pkg, meta),
         heads=_heads_from_cells(pkg, meta),
         semantics=semantics,
+        audit_brief=audit_brief,
     )
 
 

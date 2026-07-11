@@ -1,0 +1,536 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "data/standards_context.json",
+  "description": "Authoritative audit/accounting standards passages retrieved for audit_facts.standard_queries. This artifact stores retrieval context only; it does not claim that the workbook complied with a requirement.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "input",
+    "retriever",
+    "queries",
+    "citations",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "standards_context.v1"
+    },
+    "input": {
+      "$ref": "#/definitions/input"
+    },
+    "retriever": {
+      "$ref": "#/definitions/retriever"
+    },
+    "queries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/queryResult"
+      },
+      "uniqueItems": true
+    },
+    "citations": {
+      "type": "array",
+      "description": "Typed standards passages. Brief statements refer to these records by standard_citation_ids.",
+      "items": {
+        "$ref": "#/definitions/standardCitation"
+      },
+      "uniqueItems": true
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/contextLimitation"
+      },
+      "uniqueItems": true
+    }
+  },
+  "definitions": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "date": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "timestampOrNull": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "identifierList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/identifier"
+      },
+      "uniqueItems": true
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audit_facts_sha256",
+        "workbook_sha256"
+      ],
+      "properties": {
+        "audit_facts_sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "workbook_sha256": {
+          "$ref": "#/definitions/sha256"
+        }
+      }
+    },
+    "retriever": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "mcp_server",
+        "tool",
+        "corpus_id",
+        "corpus_version",
+        "retrieved_at"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "mcp_server": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "corpus_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "corpus_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "config_sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "retrieved_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        }
+      }
+    },
+    "queryResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "query",
+        "domain",
+        "framework",
+        "effective_date",
+        "fact_ids",
+        "status",
+        "error",
+        "citation_ids",
+        "matches"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "query": {
+          "type": "string",
+          "minLength": 1
+        },
+        "domain": {
+          "enum": [
+            "audit",
+            "accounting"
+          ]
+        },
+        "framework": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "effective_date": {
+          "$ref": "#/definitions/date"
+        },
+        "standard_nos": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:[A-Z]{2,8}-?[0-9]+(?:-[0-9]+)?|[0-9]+(?:-[0-9]+)?)$"
+          }
+        },
+        "fact_ids": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/identifierList"
+            },
+            {
+              "minItems": 1
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "success",
+            "no_results",
+            "error"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "citation_ids": {
+          "$ref": "#/definitions/identifierList"
+        },
+        "matches": {
+          "type": "array",
+          "description": "Query-relative retrieval order and score. citation_ids must contain these citation_id values in exactly the same order.",
+          "items": {
+            "$ref": "#/definitions/queryMatch"
+          },
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "success"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "citation_ids": {
+                "minItems": 1
+              },
+              "matches": {
+                "minItems": 1
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "no_results"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "citation_ids": {
+                "maxItems": 0
+              },
+              "matches": {
+                "maxItems": 0
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "error"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "citation_ids": {
+                "maxItems": 0
+              },
+              "matches": {
+                "maxItems": 0
+              },
+              "error": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "queryMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "citation_id",
+        "rank",
+        "score",
+        "retrieval_role",
+        "search_text_sha256"
+      ],
+      "properties": {
+        "citation_id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "retrieval_role": {
+          "enum": [
+            "result",
+            "definition"
+          ],
+          "description": "이 query에서 citation이 일반 검색 결과인지 자동 주입 정의인지 구분한다."
+        },
+        "search_text_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "query 응답의 발췌 text digest. canonical citation 전문 digest와 다를 수 있다."
+        }
+      }
+    },
+    "standardCitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "domain",
+        "query_ids",
+        "framework",
+        "document_id",
+        "paragraph",
+        "title",
+        "snippet",
+        "snippet_sha256",
+        "effective_date",
+        "edition",
+        "source_uri",
+        "corpus_id",
+        "corpus_version",
+        "retriever_version",
+        "retrieved_at"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "kind": {
+          "enum": [
+            "audit_standard",
+            "accounting_standard"
+          ]
+        },
+        "domain": {
+          "enum": [
+            "audit",
+            "accounting"
+          ]
+        },
+        "query_ids": {
+          "allOf": [
+            { "$ref": "#/definitions/identifierList" },
+            { "minItems": 1 }
+          ]
+        },
+        "framework": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "paragraph": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "snippet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snippet_sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "effective_date": {
+          "$ref": "#/definitions/date"
+        },
+        "edition": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "source_uri": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "corpus_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "corpus_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retriever_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "retrieved_at": {
+          "$ref": "#/definitions/timestampOrNull"
+        },
+        "provider_metadata": {
+          "type": "object",
+          "description": "Provider-specific stable paragraph metadata; query-relative rank and score remain in query.matches.",
+          "additionalProperties": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "audit_standard"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "domain": {
+                "const": "audit"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "accounting_standard"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "domain": {
+                "const": "accounting"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "contextLimitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "code",
+        "description",
+        "severity",
+        "query_ids",
+        "citation_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "code": {
+          "enum": [
+            "query_failed",
+            "no_results",
+            "framework_unknown",
+            "effective_date_unknown",
+            "effective_date_unverified",
+            "effective_date_mismatch",
+            "retrieval_capped",
+            "corpus_version_unknown",
+            "ambiguous_passage",
+            "other"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "enum": [
+            "high",
+            "moderate",
+            "low"
+          ]
+        },
+        "query_ids": {
+          "$ref": "#/definitions/identifierList"
+        },
+        "citation_ids": {
+          "$ref": "#/definitions/identifierList"
+        }
+      }
+    }
+  }
+}

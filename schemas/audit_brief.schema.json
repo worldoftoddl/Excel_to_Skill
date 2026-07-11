@@ -1,0 +1,525 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "data/audit_brief.json",
+  "description": "Agent-ready synthesis of workbook facts and authoritative standards context. Every substantive statement keeps workbook fact IDs and standards citation IDs in separate fields so that documented facts, authoritative context, and synthesis cannot be confused.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "inputs",
+    "generator",
+    "review",
+    "readiness",
+    "workpaper",
+    "summary",
+    "statements",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "audit_brief.v1"
+    },
+    "inputs": {
+      "$ref": "#/definitions/inputs"
+    },
+    "generator": {
+      "$ref": "#/definitions/generator"
+    },
+    "review": {
+      "$ref": "#/definitions/review"
+    },
+    "readiness": {
+      "$ref": "#/definitions/readiness"
+    },
+    "workpaper": {
+      "$ref": "#/definitions/workpaperSummary"
+    },
+    "summary": {
+      "$ref": "#/definitions/summary"
+    },
+    "statements": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/briefStatement"
+      },
+      "uniqueItems": true
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/briefLimitation"
+      },
+      "uniqueItems": true
+    }
+  },
+  "definitions": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "date": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "identifierList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/identifier"
+      },
+      "uniqueItems": true
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audit_facts_sha256",
+        "standards_context_sha256",
+        "workbook_sha256"
+      ],
+      "properties": {
+        "audit_facts_sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "standards_context_sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "workbook_sha256": {
+          "$ref": "#/definitions/sha256"
+        }
+      }
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "model",
+        "prompt_sha256",
+        "generated_at"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "prompt_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generated_at": {
+          "$ref": "#/definitions/timestamp"
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reviewed_at",
+        "note"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "draft",
+            "approved",
+            "rejected"
+          ]
+        },
+        "reviewed_at": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reasons",
+        "open_item_fact_ids"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "ready",
+            "partial",
+            "not_ready"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "open_item_fact_ids": {
+          "$ref": "#/definitions/identifierList"
+        }
+      }
+    },
+    "workpaperSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "title",
+        "entity",
+        "period_start",
+        "period_end",
+        "audit_phase",
+        "document_state",
+        "purpose",
+        "fact_ids"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "entity": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "period_start": {
+          "$ref": "#/definitions/date"
+        },
+        "period_end": {
+          "$ref": "#/definitions/date"
+        },
+        "audit_phase": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document_state": {
+          "type": "string",
+          "minLength": 1
+        },
+        "purpose": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "fact_ids": {
+          "$ref": "#/definitions/identifierList"
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "statement_ids"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "statement_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/identifier"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "briefStatement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "section",
+        "type",
+        "text",
+        "status",
+        "confidence",
+        "fact_ids",
+        "standard_citation_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "section": {
+          "enum": [
+            "identity_scope",
+            "risks_assertions",
+            "controls",
+            "procedures",
+            "results",
+            "findings",
+            "conclusions",
+            "open_items",
+            "signoffs",
+            "standards"
+          ]
+        },
+        "type": {
+          "enum": [
+            "documented_fact",
+            "authoritative_context",
+            "synthesis",
+            "gap"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "documented",
+            "inferred",
+            "not_documented",
+            "conflicting",
+            "unresolved",
+            "not_applicable",
+            "unknown"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "fact_ids": {
+          "$ref": "#/definitions/identifierList"
+        },
+        "standard_citation_ids": {
+          "$ref": "#/definitions/identifierList"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "documented_fact"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "fact_ids": {
+                "minItems": 1
+              },
+              "standard_citation_ids": {
+                "maxItems": 0
+              },
+              "status": {
+                "const": "documented"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "authoritative_context"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "fact_ids": {
+                "maxItems": 0
+              },
+              "standard_citation_ids": {
+                "minItems": 1
+              },
+              "status": {
+                "const": "documented"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "synthesis"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "fact_ids": {
+                "minItems": 1
+              },
+              "standard_citation_ids": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "gap"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "not_documented",
+                  "conflicting",
+                  "unresolved",
+                  "unknown"
+                ]
+              }
+            },
+            "anyOf": [
+              {
+                "properties": {
+                  "fact_ids": {
+                    "minItems": 1
+                  },
+                  "standard_citation_ids": {
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "section": {
+                    "const": "open_items"
+                  },
+                  "status": {
+                    "enum": [
+                      "not_documented",
+                      "unknown"
+                    ]
+                  },
+                  "fact_ids": {
+                    "maxItems": 0
+                  },
+                  "standard_citation_ids": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "briefLimitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "severity",
+        "audit_facts_limitation_ids",
+        "standards_context_limitation_ids",
+        "affected_statement_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "enum": [
+            "high",
+            "moderate",
+            "low"
+          ]
+        },
+        "audit_facts_limitation_ids": {
+          "$ref": "#/definitions/identifierList"
+        },
+        "standards_context_limitation_ids": {
+          "$ref": "#/definitions/identifierList"
+        },
+        "affected_statement_ids": {
+          "$ref": "#/definitions/identifierList"
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "audit_facts_limitation_ids": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "standards_context_limitation_ids": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    }
+  }
+}

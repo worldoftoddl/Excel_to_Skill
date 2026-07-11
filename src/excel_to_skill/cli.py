@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -43,6 +44,16 @@ _EXTS = (".xlsx", ".xls")  # docx는 M4
 
 def _eprint(*args: object) -> None:
     print(*args, file=sys.stderr)
+
+
+def _load_local_env() -> None:
+    """Load an ignored project ``.env`` for API commands without overriding exports."""
+    env_path = Path(".env")
+    if not env_path.is_file():
+        return
+    from dotenv import load_dotenv
+
+    load_dotenv(dotenv_path=env_path, override=False)
 
 
 def _within_root(path: Path, root: Path) -> bool:
@@ -461,6 +472,105 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factory=None) -> int:
+    """Workbook facts → auditpaper standards MCP → agent-ready brief를 준비한다."""
+    from .annotator import DEFAULT_MODEL, build_anthropic_client
+    from .audit.auditpaper_mcp import (
+        AuditpaperStandardsRetriever,
+        FastMCPHTTPCaller,
+        RetrievalPolicy,
+        load_mcp_connection,
+    )
+    from .audit.model import AuditModelError
+    from .audit.prepare import AuditPrepareError, prepare_package
+    from .audit.standards import StandardsRetrievalFatalError
+
+    pkg = Path(args.path)
+    if not pkg.is_dir() or not (pkg / "meta.json").is_file():
+        _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
+        return 1
+    config_path = args.mcp_config
+    if (
+        config_path is None
+        and args.mcp_url is None
+        and not os.environ.get("AUDITPAPER_MCP_URL")
+        and Path(".mcp.json").is_file()
+    ):
+        config_path = ".mcp.json"
+    model = args.model or DEFAULT_MODEL
+    generated_at = _now_iso()
+    caller = None
+    try:
+        connection = load_mcp_connection(
+            config_path=config_path,
+            server_name=args.mcp_server,
+            url=args.mcp_url,
+            token_env=args.mcp_token_env,
+        )
+        policy = RetrievalPolicy(
+            top_k=args.standards_top_k,
+            max_definitions=args.standards_definitions,
+            include_examples=args.standards_include_examples,
+        )
+        make_client = client_factory or (
+            lambda selected_model: build_anthropic_client(
+                selected_model,
+                tool_name="emit_audit_artifact",
+                max_tokens=8192,
+            )
+        )
+        make_caller = caller_factory or (
+            lambda conn: FastMCPHTTPCaller(
+                conn,
+                init_timeout=args.mcp_init_timeout,
+                call_timeout=args.mcp_call_timeout,
+            )
+        )
+        caller = make_caller(connection)
+        retriever = AuditpaperStandardsRetriever(
+            caller,
+            policy=policy,
+            paragraph_cache_dir=pkg.parent / ".auditpaper_standards_cache",
+        )
+        collection = retriever.discover_collection()
+        _eprint(f"[prepare] standards collection 고정: {collection}")
+        result = prepare_package(
+            pkg,
+            client=None,
+            client_factory=lambda: make_client(model),
+            retriever=retriever,
+            retriever_descriptor=retriever.descriptor(retrieved_at=generated_at),
+            model=model,
+            force=args.force,
+            generated_at=generated_at,
+            eprint=_eprint,
+        )
+    except (
+        AuditModelError,
+        AuditPrepareError,
+        StandardsRetrievalFatalError,
+        RuntimeError,
+    ) as e:
+        _eprint(f"[prepare 실패] {e}")
+        return 1
+    except Exception as e:
+        _eprint(f"[prepare 실패] {pkg.name}: {type(e).__name__}: {e}")
+        return 1
+    finally:
+        if caller is not None and callable(getattr(caller, "close", None)):
+            try:
+                caller.close()
+            except Exception as e:
+                _eprint(f"[prepare] MCP session 종료 경고: {type(e).__name__}: {e}")
+
+    print(result.brief_path)
+    _eprint(
+        f"[prepare] {pkg.name}: status={result.status} · "
+        f"{'cache' if result.cached else 'generated'}"
+    )
+    return 0
+
+
 def _cmd_consume(args: argparse.Namespace) -> int:
     """소비 인터페이스(overview/inspect/search/refs) — 결과 JSON을 stdout으로."""
     from .consume import ConsumeError, inspect, overview, refs, search
@@ -483,6 +593,44 @@ def _cmd_consume(args: argparse.Namespace) -> int:
         _eprint(f"[{args.cmd} 실패] {e}")
         return 1
     print(json.dumps(result, ensure_ascii=False))  # stdout = 조회 결과 JSON 한 줄
+    return 0
+
+
+def _cmd_audit_consume(args: argparse.Namespace) -> int:
+    """Prepared audit bundle readers — draft content is exposed with an unreviewed marker."""
+    from .audit.consume import (
+        AuditConsumeError,
+        assertion_procedures,
+        audit_get,
+        audit_search,
+        brief,
+        trace,
+    )
+
+    pkg = Path(args.path)
+    if not pkg.is_dir() or not (pkg / "meta.json").is_file():
+        _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
+        return 1
+    lim = {} if getattr(args, "limit", None) is None else {"limit": args.limit}
+    try:
+        if args.cmd == "brief":
+            result = brief(pkg, **lim)
+        elif args.cmd == "audit-search":
+            result = audit_search(
+                pkg, query=args.query, kind=getattr(args, "kind", None), **lim
+            )
+        elif args.cmd == "audit-get":
+            result = audit_get(pkg, item_id=args.id)
+        elif args.cmd == "assertion-procedures":
+            result = assertion_procedures(
+                pkg, query=getattr(args, "query", None), **lim
+            )
+        else:  # trace
+            result = trace(pkg, item_id=args.id, **lim)
+    except AuditConsumeError as e:
+        _eprint(f"[{args.cmd} 실패] {e}")
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
@@ -523,6 +671,63 @@ def _build_parser() -> argparse.ArgumentParser:
     a.add_argument("--model", default=None, help="어노테이터 모델(기본은 코드 상수)")
     a.add_argument("--force", action="store_true", help="주석 캐시 무시하고 재주석")
 
+    ap = sub.add_parser(
+        "prepare",
+        help="감사조서 facts + auditpaper 기준서 MCP + agent-ready brief 생성",
+    )
+    ap.add_argument("path", help="convert가 만든 패키지 폴더")
+    ap.add_argument("--model", default=None, help="준비 모델(기본은 annotate 기본 모델)")
+    ap.add_argument("--force", action="store_true", help="단계별 cache를 무시하고 재생성")
+    ap.add_argument(
+        "--mcp-config",
+        default=None,
+        help="MCP 설정 JSON(생략 시 현재 디렉터리 .mcp.json 자동 사용)",
+    )
+    ap.add_argument(
+        "--mcp-server",
+        default="auditpaper-standards",
+        help=".mcp.json 서버명(기본 auditpaper-standards)",
+    )
+    ap.add_argument(
+        "--mcp-url",
+        default=None,
+        help="원격 /mcp URL(AUDITPAPER_MCP_URL·config보다 우선)",
+    )
+    ap.add_argument(
+        "--mcp-token-env",
+        default="MCP_AUTH_TOKEN",
+        help="Bearer token을 읽을 환경변수명(토큰 자체를 CLI에 쓰지 않음)",
+    )
+    ap.add_argument(
+        "--standards-top-k",
+        type=int,
+        default=5,
+        help="query별 검색 결과 수(1~8, 기본 5)",
+    )
+    ap.add_argument(
+        "--standards-definitions",
+        type=int,
+        default=2,
+        help="query별 검증해 포함할 자동 정의 수(0~5, 기본 2)",
+    )
+    ap.add_argument(
+        "--standards-include-examples",
+        action="store_true",
+        help="보고서 문안·예시 작업일 때만 기준서 부록 예시 포함",
+    )
+    ap.add_argument(
+        "--mcp-init-timeout",
+        type=float,
+        default=180.0,
+        help="MCP initialize timeout 초(기본 180)",
+    )
+    ap.add_argument(
+        "--mcp-call-timeout",
+        type=float,
+        default=360.0,
+        help="MCP tool timeout 초(검색 encoder 대기 포함, 기본 360)",
+    )
+
     r = sub.add_parser("review", help="해석 계층 승인(--approve)/반려(--reject)")
     r.add_argument("path", help="검토할 패키지 폴더")
     r.add_argument("--approve", action="store_true", help="승인(verify 통과 전제)")
@@ -553,21 +758,65 @@ def _build_parser() -> argparse.ArgumentParser:
     rf.add_argument("path", help="조회할 패키지 폴더")
     rf.add_argument("--cell", required=True, help="절대 주소(Sheet!A1)")
     rf.add_argument("--limit", type=int, default=None, help="방향별 엣지 상한(기본 100)")
+
+    b = sub.add_parser("brief", help="준비된 감사조서 brief 조회(draft는 미검토 표시)")
+    b.add_argument("path", help="prepare가 완료된 패키지 폴더")
+    b.add_argument("--limit", type=int, default=None, help="brief statement 상한(기본 100)")
+
+    aus = sub.add_parser("audit-search", help="감사 사실·brief 의미 검색")
+    aus.add_argument("path", help="prepare가 완료된 패키지 폴더")
+    aus.add_argument("--query", required=True, help="찾을 의미 문자열")
+    aus.add_argument(
+        "--kind", default=None,
+        help="fact/statement 또는 fact type/brief section으로 제한",
+    )
+    aus.add_argument("--limit", type=int, default=None, help="매치 상한(기본 100)")
+
+    aug = sub.add_parser("audit-get", help="감사 객체를 ID로 조회")
+    aug.add_argument("path", help="prepare가 완료된 패키지 폴더")
+    aug.add_argument("--id", required=True, help="fact/statement/citation 등의 ID")
+
+    asp = sub.add_parser(
+        "assertion-procedures",
+        help="명시적으로 연결된 경영진 주장·감사절차 조회",
+    )
+    asp.add_argument("path", help="prepare가 완료된 패키지 폴더")
+    asp.add_argument(
+        "--query", default=None,
+        help="주장·절차·명시적 결과의 부분일치 필터(선택)",
+    )
+    asp.add_argument(
+        "--limit", type=int, default=None,
+        help="쌍·미연결 주장·미연결 절차별 반환 상한(기본 100)",
+    )
+
+    tr = sub.add_parser("trace", help="감사 객체의 workbook·기준서 근거 추적")
+    tr.add_argument("path", help="prepare가 완료된 패키지 폴더")
+    tr.add_argument("--id", required=True, help="fact/statement/relation/citation ID")
+    tr.add_argument("--limit", type=int, default=None, help="반환 workbook 셀 상한")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.cmd in {"annotate", "prepare"}:
+        _load_local_env()
     if args.cmd == "convert":
         return _cmd_convert(args)
     if args.cmd == "verify":
         return _cmd_verify(args)
     if args.cmd == "annotate":
         return _cmd_annotate(args)
+    if args.cmd == "prepare":
+        return _cmd_prepare(args)
     if args.cmd == "review":
         return _cmd_review(args)
     if args.cmd in ("overview", "inspect", "search", "refs"):
         return _cmd_consume(args)
+    if args.cmd in (
+        "brief", "audit-search", "audit-get", "assertion-procedures", "trace"
+    ):
+        return _cmd_audit_consume(args)
     _eprint(f"'{args.cmd}' 은(는) 알 수 없는 명령입니다.")
     return 2
 

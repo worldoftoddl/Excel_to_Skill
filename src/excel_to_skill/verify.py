@@ -23,8 +23,9 @@ from pathlib import Path
 
 import jsonschema
 
-# 이 파일: src/excel_to_skill/verify.py → parents[2] = 리포지토리 루트
-_SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schemas"
+from .resources import SCHEMA_DIR
+
+_SCHEMA_DIR = SCHEMA_DIR
 
 # (패키지 상대경로 → 스키마 파일)
 _SCHEMA_MAP = {
@@ -53,6 +54,11 @@ _DETERMINISTIC = [
 _LAYOUT_DIR = "layout"
 # --full-names 시에만 존재하는 결정론 산출물. 있으면 V3 대조·V1 스키마에 포함한다.
 _FULL_NAMES_REL = "data/defined_names_full.json"
+_AUDIT_RELS = (
+    "data/audit_facts.json",
+    "data/standards_context.json",
+    "data/audit_brief.json",
+)
 
 
 @dataclass
@@ -164,6 +170,58 @@ def _check_full_names(pkg: Path) -> Check:
         loc = "/".join(str(p) for p in e.absolute_path) or "(root)"
         return Check("full_names", False, f"{loc}: {e.message}")
     return Check("full_names", True, "방출 — full_dump_present=true 일치·스키마 통과")
+
+
+def _check_audit_bundle(pkg: Path) -> Check | None:
+    """Validate the optional audit facts → standards → brief bundle as one graph."""
+    present = [rel for rel in _AUDIT_RELS if (pkg / rel).is_file()]
+    try:
+        meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        meta = {}
+    advertised = isinstance(meta.get("audit_preparation"), dict) and bool(
+        meta["audit_preparation"].get("present")
+    )
+    if not present and not advertised:
+        return None
+    if len(present) != len(_AUDIT_RELS):
+        missing = [rel for rel in _AUDIT_RELS if rel not in present]
+        return Check("audit", False, f"audit bundle 일부 누락: {missing}")
+    if not advertised:
+        return Check("audit", False, "audit artifact는 있으나 meta.audit_preparation 미기록")
+    try:
+        from .audit.contract import PREPARE_VERSION, bundle_keys
+        from .audit.validate import collect_package_audit_validation_problems
+
+        problems = collect_package_audit_validation_problems(pkg)
+        facts, context, brief = (
+            json.loads((pkg / rel).read_text(encoding="utf-8")) for rel in _AUDIT_RELS
+        )
+        keys = bundle_keys(facts, context, brief)
+        meta_keys = tuple(
+            meta["audit_preparation"].get(name)
+            for name in ("facts_key", "standards_key", "brief_key")
+        )
+        if meta_keys != keys:
+            problems.append("meta.audit_preparation artifact key 불일치")
+        audit_meta = meta["audit_preparation"]
+        if audit_meta.get("version") != PREPARE_VERSION:
+            problems.append("meta.audit_preparation.version 불일치")
+        if audit_meta.get("status") != brief.get("readiness", {}).get("status"):
+            problems.append("meta.audit_preparation.status가 audit_brief.readiness와 불일치")
+        if audit_meta.get("review_status") != brief.get("review", {}).get("status"):
+            problems.append("meta.audit_preparation.review_status가 audit_brief.review와 불일치")
+    except Exception as e:  # malformed optional layer must be a failed check, never a crash
+        return Check("audit", False, f"audit bundle 검사 실패: {e}")
+    return Check(
+        "audit",
+        not problems,
+        (
+            "facts·standards·brief 계약 통과"
+            if not problems
+            else f"문제 {len(problems)}건: {problems[:5]}"
+        ),
+    )
 
 
 def _layout_diffs(pkg: Path, fresh: Path) -> list[str]:
@@ -335,6 +393,7 @@ def _check_reproducibility(pkg: Path, source: Path) -> Check:
             d = json.loads((p / "meta.json").read_text(encoding="utf-8"))
             d.pop("generated_at", None)  # 매 변환 가변
             d.pop("annotation", None)  # 해석 계층 상태(annotate/review가 갱신) — 비결정론
+            d.pop("audit_preparation", None)  # audit facts/RAG/brief 상태 — 비결정론
             return d
 
         if _meta_norm(pkg) != _meta_norm(fresh):
@@ -387,6 +446,10 @@ def verify_package(pkg: Path, source: Path | None = None) -> VerifyResult:
             )
         else:
             checks.append(_check_evidence(pkg))
+
+    audit_check = _check_audit_bundle(pkg)
+    if audit_check is not None:
+        checks.append(audit_check)
 
     if source is None:
         checks.append(

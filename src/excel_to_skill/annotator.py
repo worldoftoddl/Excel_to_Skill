@@ -34,10 +34,10 @@ import jsonschema
 from . import cache
 from .evidence import collect_evidence_problems
 from .meta import _now_iso, set_annotation
+from .resources import PROMPT_DIR, SCHEMA_DIR
 
-_ROOT = Path(__file__).resolve().parents[2]
-_PROMPT_PATH = _ROOT / "prompts" / "annotator_v1.md"
-_SCHEMA_DIR = _ROOT / "schemas"
+_PROMPT_PATH = PROMPT_DIR / "annotator_v1.md"
+_SCHEMA_DIR = SCHEMA_DIR
 
 ANNOTATOR_VERSION = "0.2.0"  # 0.2.0: 시트 layout 입력 예산 발췌·컨텍스트 초과 처리(캐시 무효화)
 DEFAULT_MODEL = "claude-sonnet-4-5"  # §7 기본 모델명 — 유일 출처(코드 상수 1곳 + README)
@@ -64,7 +64,12 @@ def _load_schema(name: str) -> dict:
 _TOOL_NAME = "emit_semantics"  # structured output용 강제 도구 이름
 
 
-def build_anthropic_client(model: str):
+def build_anthropic_client(
+    model: str,
+    *,
+    tool_name: str = _TOOL_NAME,
+    max_tokens: int = _MAX_TOKENS,
+):
     """실 anthropic 클라이언트를 `(*, system, user, schema) -> dict` 콜러블로 감싼다.
 
     - **Structured output**: 응답 스키마를 도구 `input_schema`로 주고 `tool_choice`로
@@ -96,7 +101,7 @@ def build_anthropic_client(model: str):
     def _call(*, system: str, user: str, schema: dict) -> dict | str:
         resp = client.messages.create(
             model=model,
-            max_tokens=_MAX_TOKENS,
+            max_tokens=max_tokens,
             temperature=TEMPERATURE,
             # 프롬프트 캐싱: 상수인 system 프롬프트에 cache_control(ephemeral)을 걸어
             # tools+system 프리픽스를 호출 간 재사용한다(5분 TTL). user(시트별 layout)는
@@ -104,11 +109,11 @@ def build_anthropic_client(model: str):
             # 불변 — 버전 범프 불필요.
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             tools=[{
-                "name": _TOOL_NAME,
+                "name": tool_name,
                 "description": "요청된 스키마에 정확히 맞는 결과 하나를 방출한다.",
                 "input_schema": schema,
             }],
-            tool_choice={"type": "tool", "name": _TOOL_NAME},
+            tool_choice={"type": "tool", "name": tool_name},
             messages=[{"role": "user", "content": user}],
         )
         for b in resp.content:

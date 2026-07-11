@@ -145,6 +145,50 @@
           ]
         }
       }
+    },
+    "audit_preparation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "present",
+        "status",
+        "version",
+        "facts_key",
+        "standards_key",
+        "brief_key",
+        "prepared_at",
+        "review_status"
+      ],
+      "properties": {
+        "present": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": ["ready", "partial", "not_ready", null]
+        },
+        "version": {
+          "type": ["string", "null"]
+        },
+        "facts_key": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "standards_key": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "brief_key": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "prepared_at": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "review_status": {
+          "enum": ["draft", "approved", "rejected", null]
+        }
+      }
     }
   }
 }

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -106,6 +108,35 @@ def build_meta(
 _KEEP = object()  # set_annotation에서 "이 필드는 기존 값 유지"를 뜻하는 sentinel
 
 
+def _write_json_atomic(path: Path, doc: dict) -> None:
+    """fsync한 완성본을 교체해 meta가 commit marker로 반쪽 기록되지 않게 한다."""
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as file:
+            json.dump(doc, file, ensure_ascii=False, indent=2, allow_nan=False)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_path, path)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        try:
+            dir_fd = os.open(path.parent, flags)
+        except OSError:
+            return
+        try:
+            try:
+                os.fsync(dir_fd)
+            except OSError:
+                pass
+        finally:
+            os.close(dir_fd)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def set_annotation(
     pkg: Path,
     *,
@@ -133,9 +164,39 @@ def set_annotation(
         "review_status": review_status,
         "annotation_key": prev.get("annotation_key") if annotation_key is _KEEP else annotation_key,
     }
-    with p.open("w", encoding="utf-8", newline="\n") as f:
-        json.dump(doc, f, ensure_ascii=False, indent=2, allow_nan=False)
-        f.write("\n")
+    _write_json_atomic(p, doc)
+
+
+def set_audit_preparation(
+    pkg: Path,
+    *,
+    status: str,
+    version: str,
+    facts_key: str,
+    standards_key: str,
+    brief_key: str,
+    prepared_at: str | None = None,
+    review_status: str = "draft",
+) -> None:
+    """Record a successfully validated audit bundle in ``meta.json``.
+
+    This state is intentionally separate from the legacy ``annotation`` block.  Callers must
+    write and validate all three audit artifacts before invoking this function, so a failed
+    prepare attempt never advertises a half-built bundle as ready.
+    """
+    p = Path(pkg) / "meta.json"
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    doc["audit_preparation"] = {
+        "present": True,
+        "status": status,
+        "version": version,
+        "facts_key": facts_key,
+        "standards_key": standards_key,
+        "brief_key": brief_key,
+        "prepared_at": prepared_at or _now_iso(),
+        "review_status": review_status,
+    }
+    _write_json_atomic(p, doc)
 
 
 def write_meta(

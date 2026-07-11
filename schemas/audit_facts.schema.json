@@ -1,0 +1,666 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "data/audit_facts.json",
+  "description": "Workbook-only audit facts. This artifact records only what is documented in the source workbook, plus deterministic queries to request authoritative context later. It must not contain retrieved standards text or judgments that a requirement was satisfied.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source",
+    "generator",
+    "review",
+    "workpaper",
+    "sources",
+    "facts",
+    "relations",
+    "standard_queries",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "audit_facts.v1"
+    },
+    "source": {
+      "$ref": "#/definitions/sourceWorkbook"
+    },
+    "generator": {
+      "$ref": "#/definitions/generator"
+    },
+    "review": {
+      "$ref": "#/definitions/review"
+    },
+    "workpaper": {
+      "$ref": "#/definitions/workpaper"
+    },
+    "sources": {
+      "type": "array",
+      "description": "Registry of typed workbook locations. IDs are referenced by facts and relations.",
+      "items": {
+        "$ref": "#/definitions/workbookSource"
+      },
+      "uniqueItems": true
+    },
+    "facts": {
+      "type": "array",
+      "description": "Normalized audit objects supported by workbook sources. Relationships belong in relations, not in prose-only implied links.",
+      "items": {
+        "$ref": "#/definitions/auditFact"
+      },
+      "uniqueItems": true
+    },
+    "relations": {
+      "type": "array",
+      "description": "Directed links among fact IDs. Defined endpoint contracts include procedure -> assertion/control (tests), procedure -> risk (addresses), assertion -> account (asserts_over), and procedure -> result/finding (produces).",
+      "items": {
+        "$ref": "#/definitions/auditRelation"
+      },
+      "uniqueItems": true
+    },
+    "standard_queries": {
+      "type": "array",
+      "description": "Workbook-derived retrieval plan. These records drive the later MCP call but contain no retrieved answer.",
+      "maxItems": 12,
+      "items": {
+        "$ref": "#/definitions/standardQuery"
+      },
+      "uniqueItems": true
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/factLimitation"
+      },
+      "uniqueItems": true
+    }
+  },
+  "definitions": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "date": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "assertionCode": {
+      "description": "조서에 문서화된 경영진 주장의 정규화 코드. 원문 표기는 description과 source에 보존한다.",
+      "enum": [
+        "accuracy",
+        "existence",
+        "rights_and_obligations",
+        "completeness",
+        "occurrence",
+        "classification",
+        "cutoff",
+        "valuation",
+        "allocation",
+        "understandability",
+        "presentation",
+        "other"
+      ]
+    },
+    "sourceWorkbook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filename",
+        "sha256",
+        "format"
+      ],
+      "properties": {
+        "filename": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "format": {
+          "enum": [
+            "xlsx",
+            "xls"
+          ]
+        }
+      }
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "kind",
+        "model",
+        "prompt_sha256",
+        "generated_at"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "deterministic",
+            "llm",
+            "hybrid"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "prompt_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generated_at": {
+          "$ref": "#/definitions/timestamp"
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reviewed_at",
+        "note"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "draft",
+            "approved",
+            "rejected"
+          ]
+        },
+        "reviewed_at": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "workpaper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "title",
+        "entity",
+        "period_start",
+        "period_end",
+        "audit_phase",
+        "document_state",
+        "purpose",
+        "source_ids"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "planning",
+            "risk_assessment",
+            "materiality",
+            "control_design",
+            "control_operating_effectiveness",
+            "substantive_analytical_procedure",
+            "test_of_details",
+            "accounting_estimate",
+            "journal_entry",
+            "confirmation",
+            "inventory_observation",
+            "going_concern",
+            "completion",
+            "lead_schedule",
+            "supporting_schedule",
+            "other",
+            "unknown"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "entity": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "period_start": {
+          "$ref": "#/definitions/date"
+        },
+        "period_end": {
+          "$ref": "#/definitions/date"
+        },
+        "audit_phase": {
+          "enum": [
+            "planning",
+            "risk_assessment",
+            "interim",
+            "final",
+            "completion",
+            "other",
+            "unknown"
+          ]
+        },
+        "document_state": {
+          "enum": [
+            "blank_template",
+            "partially_completed",
+            "completed",
+            "unknown"
+          ]
+        },
+        "purpose": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "source_ids": {
+          "$ref": "#/definitions/sourceIdList"
+        }
+      }
+    },
+    "sourceIdList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/identifier"
+      },
+      "uniqueItems": true
+    },
+    "nonEmptySourceIdList": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/identifier"
+      },
+      "uniqueItems": true
+    },
+    "factIdList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/identifier"
+      },
+      "uniqueItems": true
+    },
+    "workbookSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "sheet",
+        "range",
+        "role",
+        "content_sha256"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "kind": {
+          "const": "workbook"
+        },
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "range": {
+          "type": "string",
+          "pattern": "^[A-Za-z]{1,3}[1-9][0-9]{0,6}(:[A-Za-z]{1,3}[1-9][0-9]{0,6})?$"
+        },
+        "role": {
+          "enum": [
+            "label",
+            "narrative",
+            "input_value",
+            "formula",
+            "calculated_value",
+            "procedure",
+            "result",
+            "conclusion",
+            "signoff",
+            "mixed",
+            "other"
+          ]
+        },
+        "content_sha256": {
+          "$ref": "#/definitions/sha256"
+        }
+      }
+    },
+    "auditFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "description",
+        "status",
+        "normalized_code",
+        "value",
+        "unit",
+        "severity",
+        "confidence",
+        "source_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "type": {
+          "enum": [
+            "workpaper_attribute",
+            "risk",
+            "assertion",
+            "account",
+            "control",
+            "procedure",
+            "result",
+            "finding",
+            "conclusion",
+            "open_item",
+            "signoff",
+            "amount",
+            "other"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "documented",
+            "identified",
+            "assessed",
+            "planned",
+            "performed",
+            "not_performed",
+            "passed",
+            "failed",
+            "exception",
+            "resolved",
+            "unresolved",
+            "concluded",
+            "signed",
+            "unsigned",
+            "not_applicable",
+            "unknown"
+          ]
+        },
+        "normalized_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "Assertion facts must use one of the canonical assertionCode values; other fact types may use a workbook-specific code or null."
+        },
+        "value": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "severity": {
+          "enum": [
+            "high",
+            "moderate",
+            "low",
+            "none",
+            "unknown",
+            null
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "source_ids": {
+          "$ref": "#/definitions/nonEmptySourceIdList"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "assertion"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "normalized_code": {
+                "$ref": "#/definitions/assertionCode"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "auditRelation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "from_fact_id",
+        "to_fact_id",
+        "status",
+        "confidence",
+        "source_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "type": {
+          "enum": [
+            "addresses",
+            "relates_to",
+            "asserts_over",
+            "mitigates",
+            "tests",
+            "performed_for",
+            "produces",
+            "supports",
+            "contradicts",
+            "identifies",
+            "resolves",
+            "concludes_on",
+            "reviewed_by",
+            "derived_from"
+          ]
+        },
+        "from_fact_id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "to_fact_id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "status": {
+          "enum": [
+            "documented",
+            "inferred",
+            "unknown"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "source_ids": {
+          "$ref": "#/definitions/nonEmptySourceIdList"
+        }
+      }
+    },
+    "standardQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "query",
+        "domain",
+        "framework",
+        "effective_date",
+        "fact_ids",
+        "rationale"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "domain": {
+          "enum": [
+            "audit",
+            "accounting"
+          ]
+        },
+        "framework": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "effective_date": {
+          "$ref": "#/definitions/date"
+        },
+        "standard_nos": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true,
+          "description": "조서에 명시된 기준서 번호만 구조화한다. 추정 번호는 넣지 않는다.",
+          "items": {
+            "type": "string",
+            "pattern": "^(?:[A-Z]{2,8}-?[0-9]+(?:-[0-9]+)?|[0-9]+(?:-[0-9]+)?)$"
+          }
+        },
+        "fact_ids": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/factIdList"
+            },
+            {
+              "minItems": 1
+            }
+          ]
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "factLimitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "code",
+        "description",
+        "severity",
+        "affected_fact_ids",
+        "source_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "code": {
+          "enum": [
+            "ambiguous_layout",
+            "unsupported_content",
+            "truncated_input",
+            "missing_context",
+            "conflicting_workbook_evidence",
+            "extraction_incomplete",
+            "other"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "enum": [
+            "high",
+            "moderate",
+            "low"
+          ]
+        },
+        "affected_fact_ids": {
+          "$ref": "#/definitions/factIdList"
+        },
+        "source_ids": {
+          "$ref": "#/definitions/sourceIdList"
+        }
+      }
+    }
+  }
+}
