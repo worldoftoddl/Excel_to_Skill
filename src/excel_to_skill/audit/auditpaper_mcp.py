@@ -43,6 +43,27 @@ DEFAULT_REMOTE_URL = "https://toddl-auditpaper-mcp.hf.space/mcp"
 
 _COLLECTION_PROBE_TERM = "__excel_to_skill_collection_probe__"
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def build_retriever_descriptor(
+    *,
+    collection: str,
+    policy: "RetrievalPolicy",
+    retrieved_at: str,
+) -> dict:
+    """Build the adapter recipe identity without opening an MCP connection."""
+    return {
+        "name": SERVER_NAME,
+        "version": ADAPTER_VERSION,
+        "mcp_server": SERVER_NAME,
+        "tool": f"{SEARCH_TOOL}+{GET_TOOL}",
+        "corpus_id": SERVER_NAME,
+        "corpus_version": require_non_empty(collection, field="collection"),
+        "config_sha256": json_sha256(policy.to_dict()),
+        "retrieved_at": retrieved_at,
+    }
+
+
 _CID_RE = re.compile(r"^(KSA|KIFRS|GUIDE)::([^:]+)::(.+)$")
 _STANDARD_NO_PATTERN = r"(?:[A-Z]{2,8}-?\d+(?:-\d+)?|\d+(?:-\d+)?)"
 _STANDARD_NO_RE = re.compile(rf"^{_STANDARD_NO_PATTERN}$", re.I)
@@ -331,16 +352,11 @@ class AuditpaperStandardsRetriever:
 
     def descriptor(self, *, retrieved_at: str) -> dict:
         collection = self._collection or self.discover_collection()
-        return {
-            "name": SERVER_NAME,
-            "version": ADAPTER_VERSION,
-            "mcp_server": SERVER_NAME,
-            "tool": f"{SEARCH_TOOL}+{GET_TOOL}",
-            "corpus_id": SERVER_NAME,
-            "corpus_version": collection,
-            "config_sha256": json_sha256(self.policy.to_dict()),
-            "retrieved_at": retrieved_at,
-        }
+        return build_retriever_descriptor(
+            collection=collection,
+            policy=self.policy,
+            retrieved_at=retrieved_at,
+        )
 
     def search(
         self,

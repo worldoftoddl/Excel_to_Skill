@@ -69,6 +69,7 @@ def build_anthropic_client(
     *,
     tool_name: str = _TOOL_NAME,
     max_tokens: int = _MAX_TOKENS,
+    purpose: str = "annotate",
 ):
     """실 anthropic 클라이언트를 `(*, system, user, schema) -> dict` 콜러블로 감싼다.
 
@@ -85,7 +86,7 @@ def build_anthropic_client(
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY 미설정 — annotate에는 API 키가 필요합니다."
+            f"ANTHROPIC_API_KEY 미설정 — {purpose}에는 API 키가 필요합니다."
         )
     import anthropic  # 지연 import
 
@@ -96,7 +97,7 @@ def build_anthropic_client(
 
             client = wrap_anthropic(client)
         except Exception as e:  # noqa: BLE001
-            print(f"[annotate] LangSmith 래핑 실패(무트래킹 진행): {e}", file=sys.stderr)
+            print(f"[{purpose}] LangSmith 래핑 실패(무트래킹 진행): {e}", file=sys.stderr)
 
     def _call(*, system: str, user: str, schema: dict) -> dict | str:
         resp = client.messages.create(
@@ -371,7 +372,7 @@ def _call_sheet_unit(
 
 
 # ── 오케스트레이션 ────────────────────────────────────────────
-def annotate_package(
+def _annotate_package_unlocked(
     pkg, *, model: str | None = None, client=None, eprint=None, force: bool = False
 ) -> dict:
     """패키지에 data/semantics.json(draft)을 생성한다.
@@ -507,3 +508,18 @@ def annotate_package(
     ) is None:
         eprint(f"[annotate] 경고: _index.json에 {dirname} 항목 없음 — 주석 캐시 미기록")
     return {"path": out, "sheets": len(sheets_out), "excluded": excluded, "cached": False}
+
+
+def annotate_package(
+    pkg, *, model: str | None = None, client=None, eprint=None, force: bool = False
+) -> dict:
+    """Generate semantics while serializing every writer of this package."""
+    path = Path(pkg)
+    if not path.is_dir():
+        return _annotate_package_unlocked(
+            path, model=model, client=client, eprint=eprint, force=force
+        )
+    with cache.package_lock(path):
+        return _annotate_package_unlocked(
+            path, model=model, client=client, eprint=eprint, force=force
+        )

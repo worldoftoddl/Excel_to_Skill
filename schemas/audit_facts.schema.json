@@ -213,9 +213,53 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 2000
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "draft"}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "reviewed_at": {"type": "null"},
+              "note": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"status": {"const": "approved"}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "reviewed_at": {"$ref": "#/definitions/timestamp"},
+              "note": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"status": {"const": "rejected"}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "reviewed_at": {"$ref": "#/definitions/timestamp"},
+              "note": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000,
+                "pattern": "\\S"
+              }
+            }
+          }
+        }
+      ]
     },
     "workpaper": {
       "type": "object",

@@ -150,9 +150,16 @@ def _render_audit_brief(_brief: dict) -> list[str]:
         "commit marker·artifact digest·provenance 검증을 통과한 준비본입니다.",
         "- 명령이 실패하면 준비된 감사 내용이 없는 것으로 취급하고 SKILL만으로 상태·요약을 "
         "추정하지 마십시오.",
-        "- 반환된 `review_status`·`unreviewed`·`readiness`를 확인하십시오. 경영진 주장과 "
+        "- 반환된 `facts_review_status`·`review_status`·`unreviewed`·`readiness`를 "
+        "확인하십시오. 경영진 주장과 "
         "감사절차의 명시적 대응은 `assertion-procedures`, 개별 근거는 `audit-get`과 "
         "`trace --id <ID>`로 추적하십시오.",
+        "- 자연어 브리핑은 `excel-to-skill audit-agent <이 폴더>`, 질의응답은 "
+        "`audit-agent <이 폴더> --question <질문>`을 사용하십시오. 이 명령은 검증된 ID만 "
+        "선택하고 문장·셀·기준서 위치를 코드로 재구성하지만, 새 답변 자체는 항상 "
+        "`unreviewed`입니다.",
+        "- 사람 검토 후 facts와 brief를 함께 승인/반려하려면 `excel-to-skill audit-review "
+        "<이 폴더> --approve` 또는 `--reject --note <사유>`를 사용하십시오.",
         "",
     ]
 
@@ -181,7 +188,7 @@ def _render_skill_md(
     if audit_brief:
         desc = (
             f"회계감사조서 Excel {len(meta['sheets'])}매 — audit brief와 기준서 문맥은 "
-            "commit-gated excel-to-skill brief 명령으로 조회."
+            "commit-gated excel-to-skill brief/audit-agent 명령으로 조회."
         )
     elif approved:
         desc = _approved_description(semantics, len(meta["sheets"]))
@@ -299,6 +306,8 @@ def _render_skill_md(
             "- `excel-to-skill assertion-procedures <이 폴더> [--query <문자열>]` — "
             "명시적으로 연결된 경영진 주장·감사절차와 결과 조회",
             "- `excel-to-skill trace <이 폴더> --id <ID>` — workbook·기준서 근거 추적",
+            "- `excel-to-skill audit-review <이 폴더> --approve|--reject --note <사유>` — "
+            "감사 facts+brief 공동 검토",
             "",
         ]
 

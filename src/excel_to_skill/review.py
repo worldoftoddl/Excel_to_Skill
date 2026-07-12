@@ -42,11 +42,10 @@ def _write_semantics(path: Path, semantics: dict) -> None:
     )
 
 
-def approve(pkg) -> dict:
+def _approve_unlocked(pkg: Path) -> dict:
     """패키지를 승인한다. verify 전체 통과가 전제. 반환: {"status","skill"}."""
     from .verify import verify_package  # 지연 import(순환 회피)
 
-    pkg = Path(pkg)
     path = _semantics_path(pkg)
 
     # 승인 게이트 ①: 원본 없이 verify(→V3 skip). V1·V2·필수파일 등 전부 통과해야.
@@ -83,9 +82,8 @@ def approve(pkg) -> dict:
     return {"status": "approved", "skill": str(pkg / "SKILL.md")}
 
 
-def reject(pkg, *, note: str | None) -> dict:
+def _reject_unlocked(pkg: Path, *, note: str | None) -> dict:
     """패키지를 반려한다. note 필수. SKILL.md는 미승인 형태로 재생성."""
-    pkg = Path(pkg)
     path = _semantics_path(pkg)
     if not (note and note.strip()):
         raise ReviewError("--reject에는 --note(반려 사유)가 필수입니다.")
@@ -100,6 +98,20 @@ def reject(pkg, *, note: str | None) -> dict:
     _sync_meta(pkg, semantics, "rejected")
     _regen_skill(pkg)  # rejected → 미승인 SKILL.md
     return {"status": "rejected", "skill": str(pkg / "SKILL.md")}
+
+
+def approve(pkg) -> dict:
+    """Approve legacy semantics while serializing every writer of this package."""
+    path = Path(pkg)
+    with cache.package_lock(path):
+        return _approve_unlocked(path)
+
+
+def reject(pkg, *, note: str | None) -> dict:
+    """Reject legacy semantics while serializing every writer of this package."""
+    path = Path(pkg)
+    with cache.package_lock(path):
+        return _reject_unlocked(path, note=note)
 
 
 def _sync_meta(pkg: Path, semantics: dict, status: str) -> None:

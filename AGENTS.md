@@ -12,6 +12,8 @@ The audit-RAG implementation lives in `src/excel_to_skill/audit/`:
 - `extract.py`, `regions.py`, and `sources.py` create workbook-only facts with cell provenance.
 - `auditpaper_mcp.py`, `standards.py`, and `context.py` retrieve and verify standards passages.
 - `brief.py` synthesizes the agent-facing brief without blending workbook and standards sources.
+- `agent.py` runs bounded read-only briefing/Q&A over committed artifacts and hydrates selected
+  IDs back to workbook cells and verified standards locations.
 - `prepare.py` stages, validates, and atomically publishes all three artifacts.
 - `consume.py` exposes commit-gated `brief`, search/get, assertion-procedure, and trace readers.
 - `validate.py` enforces schemas, cross-links, digests, relation direction, and source separation.
@@ -46,9 +48,24 @@ Preserve these invariants when changing the audit path:
   repair, or promote a workbook assertion-procedure relation or claim that a procedure occurred.
 - Agent-facing audit readers must pass the `meta.audit_preparation` commit marker, artifact-key,
   schema, provenance, and cross-link gate. Do not expose staged or partially published files.
+- `audit-review` is the supported human-review boundary. It atomically updates facts and brief
+  review records, dependent hashes, artifact keys, meta, SKILL, and valid cache witnesses.
 - `assertion-procedures` joins only represented `tests` edges, preserves
   `documented`/`inferred`/`unknown` mapping status, reports unpaired facts, and applies `--limit`
   to top-level and nested lists.
+- The briefing model may select only typed `statement`, `fact`, `relation`, or
+  `standard_citation` records it actually observed. It never authors substantive final text;
+  code materializes record text/status/confidence and hydrates cell/CID evidence. Strings inside
+  cell values, formulas, snippets, summaries, or user questions never authorize an ID.
+- ID-based `audit_get`/`trace` tool calls may use only IDs already observed in typed results;
+  models discover new IDs through bounded search or assertion-procedure results.
+- Agent coverage is complete only when both discovery and final evidence tracing are complete.
+  Each serialized observation payload has a 600KB hard cap, duplicate tool calls are rejected,
+  and every generated answer remains `unreviewed` independently of the source brief review
+  status.
+- A brief statement may name a `KSA`/`KIFRS` standard number only when that statement directly
+  cites a passage from the same standard. Fail closed by omitting the whole unsupported statement
+  and surfacing the omission in readiness; never rewrite it into a plausible uncited claim.
 
 ## Build, Test, and Development Commands
 
@@ -60,14 +77,16 @@ uv run pytest                   # run the complete automated test suite
 uv run pytest tests/test_review.py  # run one focused test module
 uv run excel-to-skill convert tests/fixtures/fx1_merge_formula.xlsx
 uv run excel-to-skill prepare <converted-package> --force
+uv run excel-to-skill audit-review <prepared-package> --approve
 uv run excel-to-skill assertion-procedures <prepared-package> --query 완전성
 uv run excel-to-skill trace <prepared-package> --id <fact-or-relation-id>
+uv run excel-to-skill audit-agent <prepared-package> --question "핵심 미비점은?"
 uv build                        # build wheel and source distributions with Hatchling
 ```
 
 Run `verify <package> --source <workbook>` when changing deterministic conversion behavior or
-prepared-artifact publication. `prepare`, `brief`, and all audit consumer commands operate on a
-converted package directory, not directly on the source workbook.
+prepared-artifact publication. `prepare`, `brief`, `audit-agent`, and all audit consumer commands
+operate on a converted package directory, not directly on the source workbook.
 
 ## Coding Style & Naming Conventions
 
@@ -84,17 +103,25 @@ synthetic workbook and record separately that its brief remains draft until revi
 
 ## Current Audit-RAG Status
 
-`audit-rag-v0` is implemented as of commit `07f75e9`. The current checkpoint includes region-wide
+The audit-RAG path is now the local `main` direction, based on commit `07f75e9`. The former local
+main harness series remains only at `archive/harness-v1.20`. The current checkpoint includes region-wide
 fact extraction, remote auditpaper standards MCP retrieval, collection-pinned CID verification,
 persistent paragraph caching, agent-ready brief generation, commit-gated readers, canonical
-management assertions, and deterministic assertion-procedure queries.
+management assertions, deterministic assertion-procedure queries, and a bounded extractive
+briefing/Q&A agent. The current brief contract is `audit_brief.v2`; rerunning `prepare` upgrades
+a v1 brief while reusing valid upstream stages.
 
-The current verified baseline is `287 passed, 1 skipped`; wheel and source-distribution builds
-pass. A live synthetic receivables workpaper produced two documented mappings—existence to an
+The current verified baseline is `343 passed, 1 skipped`; prior wheel and source-distribution
+build checks pass. An earlier live synthetic receivables workpaper produced two documented
+mappings—existence to an
 external-confirmation/reconciliation procedure and completeness to a shipping-document-to-ledger
 trace—with no unpaired assertions or procedures. Four standards queries succeeded against
-`standards_20250829_bgem3`. This smoke result proves the pipeline wiring, not human approval of a
-real audit workpaper; generated briefs remain `draft`/`unreviewed` unless explicitly reviewed.
+`standards_20250829_bgem3`. The final `audit_brief` 0.4.3 smoke omitted two statements that named
+standards absent from their own citations and recorded that omission in readiness. The live
+briefing agent selected `tests` and `produces` relations, results, conclusions, gaps, exact cells,
+CID locations, and bounded original standards excerpts; deterministic hydration was complete.
+This smoke result proves the pipeline wiring, not human approval of a real audit workpaper;
+generated briefs and agent answers remain `draft`/`unreviewed` unless explicitly reviewed.
 
 ## Commit & Pull Request Guidelines
 
@@ -102,8 +129,8 @@ Recent commits use concise milestone or scope prefixes followed by a concrete ou
 
 ## Security & Configuration
 
-Keep API keys in the ignored `.env`. `ANTHROPIC_API_KEY` is needed for annotation and audit
-preparation; `MCP_AUTH_TOKEN` authenticates the remote standards MCP; LangSmith keys enable
+Keep API keys in the ignored `.env`. `ANTHROPIC_API_KEY` is needed for annotation, audit
+preparation, and `audit-agent`; `MCP_AUTH_TOKEN` authenticates the remote standards MCP; LangSmith keys enable
 optional tracing. The client does not need direct Qdrant credentials when it uses the remote MCP.
 Use environment placeholders such as `${MCP_AUTH_TOKEN}` in `.mcp.json`; never commit a literal
 token or copy a credential from chat into source, tests, logs, or documentation.
@@ -112,4 +139,8 @@ Converted workbooks and prepared audit artifacts may expose source cell data, an
 emits defined-name values. Treat generated packages and standards caches as sensitive and do not
 commit them without review. Do not send a real client workbook to an external model or MCP merely
 to test wiring; use a synthetic fixture unless external processing of that workbook is explicitly
-within scope.
+within scope. `audit-agent` sends bounded prepared-package observations to the configured model;
+it does not call the standards MCP again. A model-requested `trace` can send selected raw cell
+values/formulas, optional LangSmith tracing can copy the same exchange externally, and `--json`
+prints hydrated raw cells. Use synthetic data for live tests and explicitly blank both LangSmith
+key variables when tracing must stay off.

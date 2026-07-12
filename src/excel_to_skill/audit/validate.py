@@ -67,12 +67,14 @@ __all__ = [
     "AuditValidationError",
     "collect_audit_validation_problems",
     "collect_audit_facts_validation_problems",
+    "collect_audit_upstream_validation_problems",
     "collect_package_audit_validation_problems",
     "load_audit_schema",
     "raise_for_audit_validation",
     "validate_audit_bundle",
     "validate_audit_facts",
     "validate_audit_package",
+    "validate_audit_upstream",
 ]
 
 
@@ -187,6 +189,38 @@ def _check_id(
         problems.append(f"{path}: unknown {target} id {value!r}")
 
 
+def _check_review_state(
+    doc: Mapping[str, object],
+    *,
+    path: str,
+    problems: list[str],
+) -> None:
+    """Keep review lifecycle semantics identical across writers and consumers."""
+    review = doc.get("review")
+    if not isinstance(review, Mapping):
+        return
+    status = review.get("status")
+    reviewed_at = review.get("reviewed_at")
+    note = review.get("note")
+    if status == "draft":
+        if reviewed_at is not None or note is not None:
+            problems.append(
+                f"{path}: draft requires reviewed_at=null and note=null"
+            )
+    elif status == "approved":
+        if not isinstance(reviewed_at, str) or not reviewed_at:
+            problems.append(f"{path}: approved requires reviewed_at")
+        if note is not None:
+            problems.append(f"{path}: approved requires note=null")
+    elif status == "rejected":
+        if not isinstance(reviewed_at, str) or not reviewed_at:
+            problems.append(f"{path}: rejected requires reviewed_at")
+        if not isinstance(note, str) or not note.strip():
+            problems.append(f"{path}: rejected requires a nonblank note")
+        elif len(note) > 2000:
+            problems.append(f"{path}: rejected note exceeds 2,000 characters")
+
+
 def _check_audit_relation_semantics(
     facts_by_id: Mapping[str, Mapping[str, object]],
     relations: list[tuple[int, Mapping[str, object]]],
@@ -229,6 +263,7 @@ def _check_audit_facts(
     facts: Mapping[str, object],
     problems: list[str],
 ) -> dict[str, object]:
+    _check_review_state(facts, path="audit_facts.review", problems=problems)
     sources = _objects(facts, "sources")
     fact_records = _objects(facts, "facts")
     relations = _objects(facts, "relations")
@@ -343,6 +378,10 @@ def _check_audit_facts(
         "queries": {record.get("id"): record for _, record in queries
                     if isinstance(record.get("id"), str)},
         "facts": facts_by_id,
+        "relations": {
+            record.get("id"): record for _, record in relations
+            if isinstance(record.get("id"), str)
+        },
         "workpaper": workpaper if isinstance(workpaper, Mapping) else {},
         "limitations": {record.get("id"): record for _, record in limitations
                         if isinstance(record.get("id"), str)},
@@ -590,8 +629,10 @@ def _statement_source_separation(
 ) -> None:
     statement_type = statement.get("type")
     fact_ids = statement.get("fact_ids")
+    relation_ids = statement.get("relation_ids")
     citation_ids = statement.get("standard_citation_ids")
     fact_count = len(fact_ids) if _is_sequence(fact_ids) else 0
+    relation_count = len(relation_ids) if _is_sequence(relation_ids) else 0
     citation_count = len(citation_ids) if _is_sequence(citation_ids) else 0
     status = statement.get("status")
 
@@ -599,7 +640,10 @@ def _statement_source_separation(
         valid = fact_count > 0 and citation_count == 0 and status == "documented"
         rule = "documented_fact requires workbook facts only and status=documented"
     elif statement_type == "authoritative_context":
-        valid = fact_count == 0 and citation_count > 0 and status == "documented"
+        valid = (
+            fact_count == 0 and relation_count == 0
+            and citation_count > 0 and status == "documented"
+        )
         rule = "authoritative_context requires standards citations only and status=documented"
     elif statement_type == "synthesis":
         valid = fact_count > 0 and citation_count > 0
@@ -615,12 +659,63 @@ def _statement_source_separation(
         problems.append(f"{path}: source separation violation: {rule}")
 
 
+def _check_statement_relations(
+    statement: Mapping[str, object],
+    *,
+    path: str,
+    facts_by_id: Mapping[str, Mapping[str, object]],
+    relations_by_id: Mapping[str, Mapping[str, object]],
+    problems: list[str],
+) -> None:
+    fact_ids = {
+        item for item in statement.get("fact_ids", [])
+        if isinstance(item, str) and item in facts_by_id
+    }
+    selected_ids = {
+        item for item in statement.get("relation_ids", [])
+        if isinstance(item, str) and item in relations_by_id
+    }
+    selected_relations = [relations_by_id[item] for item in selected_ids]
+    selected_statuses = {relation.get("status") for relation in selected_relations}
+    if statement.get("status") == "documented" and any(
+        status != "documented" for status in selected_statuses
+    ):
+        problems.append(
+            f"{path}.status: documented statement cannot promote relation status "
+            f"{sorted(str(status) for status in selected_statuses)}"
+        )
+    for relation_id, relation in (
+        (item, relations_by_id[item]) for item in selected_ids
+    ):
+        endpoints = {relation.get("from_fact_id"), relation.get("to_fact_id")}
+        if not endpoints <= fact_ids:
+            problems.append(
+                f"{path}.relation_ids: relation {relation_id!r} endpoints must both "
+                "appear in statement.fact_ids"
+            )
+
+    expected_ids = {
+        relation_id
+        for relation_id, relation in relations_by_id.items()
+        if relation.get("type") in _RELATION_ENDPOINT_TYPES
+        and relation.get("from_fact_id") in fact_ids
+        and relation.get("to_fact_id") in fact_ids
+    }
+    missing_ids = sorted(expected_ids - selected_ids)
+    if missing_ids:
+        problems.append(
+            f"{path}.relation_ids: exact semantic relations between selected facts are "
+            f"missing: {missing_ids}"
+        )
+
+
 def _check_audit_brief(
     brief: Mapping[str, object],
     facts_state: Mapping[str, object],
     standards_state: Mapping[str, object],
     problems: list[str],
 ) -> dict[str, object]:
+    _check_review_state(brief, path="audit_brief.review", problems=problems)
     statements = _objects(brief, "statements")
     limitations = _objects(brief, "limitations")
     statement_ids = _unique_ids(
@@ -630,7 +725,14 @@ def _check_audit_brief(
         limitations, path="audit_brief.limitations", problems=problems
     )
     fact_ids = set(facts_state.get("fact_ids", set()))
+    relation_ids = set(facts_state.get("relation_ids", set()))
     citation_ids = set(standards_state.get("citation_ids", set()))
+    facts_by_id = facts_state.get("facts", {})
+    if not isinstance(facts_by_id, Mapping):
+        facts_by_id = {}
+    relations_by_id = facts_state.get("relations", {})
+    if not isinstance(relations_by_id, Mapping):
+        relations_by_id = {}
     facts_limitation_ids = set(facts_state.get("limitation_ids", set()))
     standards_limitation_ids = set(standards_state.get("limitation_ids", set()))
     facts_limitations = facts_state.get("limitations", {})
@@ -759,12 +861,24 @@ def _check_audit_brief(
             problems=problems,
         )
         _check_id_list(
+            statement.get("relation_ids"), relation_ids,
+            path=f"audit_brief.statements[{index}].relation_ids", target="relation",
+            problems=problems,
+        )
+        _check_id_list(
             statement.get("standard_citation_ids"), citation_ids,
             path=f"audit_brief.statements[{index}].standard_citation_ids",
             target="citation", problems=problems,
         )
         _statement_source_separation(
             statement, path=f"audit_brief.statements[{index}]", problems=problems
+        )
+        _check_statement_relations(
+            statement,
+            path=f"audit_brief.statements[{index}]",
+            facts_by_id=facts_by_id,
+            relations_by_id=relations_by_id,
+            problems=problems,
         )
         if (
             statement.get("type") == "gap"
@@ -855,12 +969,40 @@ def _check_audit_brief(
     return {"statement_ids": statement_ids, "limitation_ids": limitation_ids}
 
 
+def _check_upstream_inputs(
+    facts: Mapping[str, object],
+    context: Mapping[str, object],
+    problems: list[str],
+) -> None:
+    facts_source = facts.get("source")
+    context_input = context.get("input")
+    if not all(isinstance(value, Mapping) for value in (facts_source, context_input)):
+        return
+    workbook_values = {
+        "audit_facts.source.sha256": facts_source.get("sha256"),
+        "standards_context.input.workbook_sha256": context_input.get("workbook_sha256"),
+    }
+    valid_workbook_values = {value for value in workbook_values.values() if isinstance(value, str)}
+    if len(valid_workbook_values) > 1:
+        problems.append(
+            "audit_bundle.workbook_sha256: workbook digest differs across artifacts: "
+            + repr(workbook_values)
+        )
+    context_facts_sha = context_input.get("audit_facts_sha256")
+    actual_facts_sha = json_sha256(dict(facts))
+    if isinstance(context_facts_sha, str) and context_facts_sha != actual_facts_sha:
+        problems.append(
+            "standards_context.input.audit_facts_sha256: does not match audit_facts content"
+        )
+
+
 def _check_cross_document_inputs(
     facts: Mapping[str, object],
     context: Mapping[str, object],
     brief: Mapping[str, object],
     problems: list[str],
 ) -> None:
+    _check_upstream_inputs(facts, context, problems)
     facts_source = facts.get("source")
     context_input = context.get("input")
     brief_inputs = brief.get("inputs")
@@ -881,10 +1023,6 @@ def _check_cross_document_inputs(
     brief_facts_sha = brief_inputs.get("audit_facts_sha256")
     actual_facts_sha = json_sha256(dict(facts))
     actual_context_sha = json_sha256(dict(context))
-    if isinstance(context_facts_sha, str) and context_facts_sha != actual_facts_sha:
-        problems.append(
-            "standards_context.input.audit_facts_sha256: does not match audit_facts content"
-        )
     if isinstance(brief_facts_sha, str) and brief_facts_sha != actual_facts_sha:
         problems.append(
             "audit_brief.inputs.audit_facts_sha256: does not match audit_facts content"
@@ -957,10 +1095,46 @@ def collect_audit_facts_validation_problems(
     return list(dict.fromkeys(problems))
 
 
+def collect_audit_upstream_validation_problems(
+    pkg: Path | str,
+    audit_facts: object,
+    standards_context: object,
+) -> list[str]:
+    """Return defects in the reusable facts + standards stages, excluding any brief."""
+    pkg = Path(pkg)
+    problems: list[str] = []
+    problems.extend(_schema_problems("audit_facts", audit_facts))
+    problems.extend(_schema_problems("standards_context", standards_context))
+
+    facts_state: dict[str, object] = {
+        "fact_ids": set(), "limitation_ids": set(), "queries": {}, "facts": {},
+        "workpaper": {}, "limitations": {}, "unresolved_open_item_ids": set(),
+    }
+    if isinstance(audit_facts, Mapping):
+        facts_state = _check_audit_facts(pkg, audit_facts, problems)
+    if isinstance(standards_context, Mapping):
+        _check_standards_context(standards_context, facts_state, problems)
+    if isinstance(audit_facts, Mapping) and isinstance(standards_context, Mapping):
+        _check_upstream_inputs(audit_facts, standards_context, problems)
+        _check_global_id_namespace(audit_facts, standards_context, {}, problems)
+    return list(dict.fromkeys(problems))
+
+
 def validate_audit_facts(pkg: Path | str, audit_facts: object) -> None:
     """Strict validation boundary used before standalone extraction writes an artifact."""
     raise_for_audit_validation(
         collect_audit_facts_validation_problems(pkg, audit_facts)
+    )
+
+
+def validate_audit_upstream(
+    pkg: Path | str,
+    audit_facts: object,
+    standards_context: object,
+) -> None:
+    """Strict boundary for reusing facts and standards while regenerating a stale brief."""
+    raise_for_audit_validation(
+        collect_audit_upstream_validation_problems(pkg, audit_facts, standards_context)
     )
 
 

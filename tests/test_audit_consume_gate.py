@@ -169,12 +169,20 @@ def test_query_lookup_and_trace_expose_review_marker_and_relation_sources(
 
     searched = audit_search(pkg, query="매출")
     assert searched["review_status"] == "draft" and searched["unreviewed"] is True
+    with pytest.raises(AuditConsumeError, match="지원하지 않는 audit-search kind"):
+        audit_search(pkg, query="매출", kind="procedurre")
     traced = trace(pkg, item_id="relation:1", limit=1)
     assert traced["review_status"] == "draft" and traced["unreviewed"] is True
     assert traced["total_facts"] == 2 and traced["returned_facts"] == 1
     assert traced["total_sources"] == 2 and traced["returned_sources"] == 1
     assert traced["sources"][0]["id"] == "source:relation"
     assert traced["total_cells"] == 2 and traced["returned_cells"] == 1
+    assert traced["total_relation_direct_sources"] == 1
+    assert traced["relation_direct_sources"][0]["id"] == "source:relation"
+    assert traced["total_relation_direct_cells"] == 1
+    assert traced["relation_direct_cells"][0]["cell"] == "A1"
+    assert traced["total_endpoint_sources"] == 1
+    assert traced["total_endpoint_cells"] == 2
 
 
 def test_orphan_audit_file_does_not_change_legacy_skill_rendering(tmp_path: Path) -> None:

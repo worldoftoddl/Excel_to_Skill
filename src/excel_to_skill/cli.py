@@ -42,6 +42,10 @@ from .meta import _converter_version, _now_iso, write_meta
 _EXTS = (".xlsx", ".xls")  # docx는 M4
 
 
+class _SourceChangedDuringConversion(RuntimeError):
+    """The source digest changed after the final package probe."""
+
+
 def _eprint(*args: object) -> None:
     print(*args, file=sys.stderr)
 
@@ -157,7 +161,7 @@ def _inherit_semantics(
     return annotation_key, status
 
 
-def _convert_one(
+def _convert_one_unlocked(
     src: Path,
     root: Path,
     *,
@@ -165,6 +169,7 @@ def _convert_one(
     cv: str,
     max_rows: int = DEFAULT_MAX_ROWS,
     full_names: bool = False,
+    _probe: cache.CacheProbe | None = None,
 ) -> Path:
     """파일 하나를 패키지로 변환하고 최종 폴더 경로를 돌려준다.
 
@@ -178,7 +183,7 @@ def _convert_one(
     # 변환 파라미터도 캐시 키의 일부다(옵션이 바뀌면 산출이 달라짐). meta의 것과
     # 같은 형태·키 순서로 만들어 probe 대조·색인 기록에 함께 쓴다.
     conv_params = {"max_rows": max_rows, "full_names": full_names}
-    probe = cache.probe(
+    probe = _probe or cache.probe(
         root, src, converter_version=cv, conversion_params=conv_params, force=force
     )
     if probe.hit:
@@ -206,6 +211,10 @@ def _convert_one(
             max_rows=max_rows,
             full_names=full_names,
         )
+        if meta_doc.get("source", {}).get("sha256") != probe.sha256:
+            raise _SourceChangedDuringConversion(
+                "변환 중 원본 파일 digest가 변경되었습니다."
+            )
         write_cells_jsonl(ir, data / "cells.jsonl")
         refs = write_references(ir, data / "references.json")
         # --full-names면 정의이름 전량 덤프(전건 + 값 전문, 이메일만 P7 마스킹).
@@ -252,6 +261,52 @@ def _convert_one(
         annotation_key=carried_key, review_status=carried_status,
     )
     return final
+
+
+def _convert_one(
+    src: Path,
+    root: Path,
+    *,
+    force: bool,
+    cv: str,
+    max_rows: int = DEFAULT_MAX_ROWS,
+    full_names: bool = False,
+) -> Path:
+    """Convert one workbook while serializing every writer of its final package."""
+    conv_params = {"max_rows": max_rows, "full_names": full_names}
+    for _attempt in range(3):
+        initial = cache.probe(
+            root,
+            src,
+            converter_version=cv,
+            conversion_params=conv_params,
+            force=force,
+        )
+        with cache.package_lock(initial.package_path):
+            # The source may have changed while this caller waited.  Never publish a newly
+            # derived package while holding the prior package's lock.
+            current = cache.probe(
+                root,
+                src,
+                converter_version=cv,
+                conversion_params=conv_params,
+                force=force,
+            )
+            if current.package_path != initial.package_path:
+                continue
+            try:
+                return _convert_one_unlocked(
+                    src,
+                    root,
+                    force=force,
+                    cv=cv,
+                    max_rows=max_rows,
+                    full_names=full_names,
+                    _probe=current,
+                )
+            except _SourceChangedDuringConversion:
+                continue
+    raise RuntimeError("변환 중 원본 파일이 계속 변경되어 안정된 package lock을 얻지 못했습니다.")
 
 
 def _warn_unsupported(args: argparse.Namespace) -> None:
@@ -472,6 +527,35 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_audit_review(args: argparse.Namespace) -> int:
+    """Approve/reject one committed facts+standards+brief bundle atomically."""
+    from .audit.review import (
+        AuditReviewError,
+        approve_audit_package,
+        reject_audit_package,
+    )
+
+    pkg = Path(args.path)
+    if not pkg.is_dir() or not (pkg / "meta.json").is_file():
+        _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
+        return 1
+    if args.approve == args.reject:
+        _eprint("[오류] --approve 또는 --reject 중 정확히 하나를 지정하세요.")
+        return 1
+    try:
+        result = (
+            approve_audit_package(pkg, eprint=_eprint)
+            if args.approve
+            else reject_audit_package(pkg, note=args.note, eprint=_eprint)
+        )
+    except (AuditReviewError, RuntimeError) as e:
+        _eprint(f"[audit-review 실패] {e}")
+        return 1
+    print(result["skill"])
+    _eprint(f"[audit-review] {pkg.name}: status={result['status']}")
+    return 0
+
+
 def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factory=None) -> int:
     """Workbook facts → auditpaper standards MCP → agent-ready brief를 준비한다."""
     from .annotator import DEFAULT_MODEL, build_anthropic_client
@@ -479,10 +563,15 @@ def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factor
         AuditpaperStandardsRetriever,
         FastMCPHTTPCaller,
         RetrievalPolicy,
+        build_retriever_descriptor,
         load_mcp_connection,
     )
     from .audit.model import AuditModelError
-    from .audit.prepare import AuditPrepareError, prepare_package
+    from .audit.prepare import (
+        AuditPrepareError,
+        StandardsStageCacheMiss,
+        prepare_package,
+    )
     from .audit.standards import StandardsRetrievalFatalError
 
     pkg = Path(args.path)
@@ -500,13 +589,8 @@ def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factor
     model = args.model or DEFAULT_MODEL
     generated_at = _now_iso()
     caller = None
+    result = None
     try:
-        connection = load_mcp_connection(
-            config_path=config_path,
-            server_name=args.mcp_server,
-            url=args.mcp_url,
-            token_env=args.mcp_token_env,
-        )
         policy = RetrievalPolicy(
             top_k=args.standards_top_k,
             max_definitions=args.standards_definitions,
@@ -519,32 +603,67 @@ def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factor
                 max_tokens=8192,
             )
         )
-        make_caller = caller_factory or (
-            lambda conn: FastMCPHTTPCaller(
-                conn,
-                init_timeout=args.mcp_init_timeout,
-                call_timeout=args.mcp_call_timeout,
+        if not args.force:
+            try:
+                cached_context = json.loads(
+                    (pkg / "data/standards_context.json").read_text(encoding="utf-8")
+                )
+                cached_collection = cached_context["retriever"]["corpus_version"]
+            except (OSError, json.JSONDecodeError, KeyError, TypeError):
+                cached_collection = None
+            if isinstance(cached_collection, str) and cached_collection.strip():
+                cached_descriptor = build_retriever_descriptor(
+                    collection=cached_collection,
+                    policy=policy,
+                    retrieved_at=generated_at,
+                )
+                try:
+                    result = prepare_package(
+                        pkg,
+                        client=None,
+                        client_factory=lambda: make_client(model),
+                        retriever=None,
+                        retriever_descriptor=cached_descriptor,
+                        model=model,
+                        generated_at=generated_at,
+                        eprint=_eprint,
+                    )
+                except StandardsStageCacheMiss:
+                    pass
+
+        if result is None:
+            connection = load_mcp_connection(
+                config_path=config_path,
+                server_name=args.mcp_server,
+                url=args.mcp_url,
+                token_env=args.mcp_token_env,
             )
-        )
-        caller = make_caller(connection)
-        retriever = AuditpaperStandardsRetriever(
-            caller,
-            policy=policy,
-            paragraph_cache_dir=pkg.parent / ".auditpaper_standards_cache",
-        )
-        collection = retriever.discover_collection()
-        _eprint(f"[prepare] standards collection 고정: {collection}")
-        result = prepare_package(
-            pkg,
-            client=None,
-            client_factory=lambda: make_client(model),
-            retriever=retriever,
-            retriever_descriptor=retriever.descriptor(retrieved_at=generated_at),
-            model=model,
-            force=args.force,
-            generated_at=generated_at,
-            eprint=_eprint,
-        )
+            make_caller = caller_factory or (
+                lambda conn: FastMCPHTTPCaller(
+                    conn,
+                    init_timeout=args.mcp_init_timeout,
+                    call_timeout=args.mcp_call_timeout,
+                )
+            )
+            caller = make_caller(connection)
+            retriever = AuditpaperStandardsRetriever(
+                caller,
+                policy=policy,
+                paragraph_cache_dir=pkg.parent / ".auditpaper_standards_cache",
+            )
+            collection = retriever.discover_collection()
+            _eprint(f"[prepare] standards collection 고정: {collection}")
+            result = prepare_package(
+                pkg,
+                client=None,
+                client_factory=lambda: make_client(model),
+                retriever=retriever,
+                retriever_descriptor=retriever.descriptor(retrieved_at=generated_at),
+                model=model,
+                force=args.force,
+                generated_at=generated_at,
+                eprint=_eprint,
+            )
     except (
         AuditModelError,
         AuditPrepareError,
@@ -563,6 +682,7 @@ def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factor
             except Exception as e:
                 _eprint(f"[prepare] MCP session 종료 경고: {type(e).__name__}: {e}")
 
+    assert result is not None
     print(result.brief_path)
     _eprint(
         f"[prepare] {pkg.name}: status={result.status} · "
@@ -634,7 +754,52 @@ def _cmd_audit_consume(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_audit_agent(args: argparse.Namespace, *, client_factory=None) -> int:
+    """Run a grounded read-only briefing/Q&A turn over a prepared audit package."""
+    from .annotator import DEFAULT_MODEL, build_anthropic_client
+    from .audit.agent import (
+        AuditAgentError,
+        render_audit_agent_markdown,
+        run_audit_agent,
+    )
+    from .audit.consume import AuditConsumeError
+
+    pkg = Path(args.path)
+    if not pkg.is_dir() or not (pkg / "meta.json").is_file():
+        _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
+        return 1
+    model = args.model or DEFAULT_MODEL
+    make_client = client_factory or (
+        lambda: build_anthropic_client(
+            model,
+            tool_name="emit_audit_agent_turn",
+            max_tokens=8192,
+            purpose="audit-agent",
+        )
+    )
+    try:
+        result = run_audit_agent(
+            pkg,
+            model=model,
+            client_factory=make_client,
+            question=args.question,
+            limit=args.limit,
+            max_steps=args.max_steps,
+            eprint=_eprint,
+        )
+    except (AuditAgentError, AuditConsumeError, RuntimeError) as e:
+        _eprint(f"[audit-agent 실패] {e}")
+        return 1
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(render_audit_agent_markdown(result), end="")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
+    from .audit.consume import AUDIT_SEARCH_KINDS
+
     p = argparse.ArgumentParser(prog="excel-to-skill")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -763,11 +928,12 @@ def _build_parser() -> argparse.ArgumentParser:
     b.add_argument("path", help="prepare가 완료된 패키지 폴더")
     b.add_argument("--limit", type=int, default=None, help="brief statement 상한(기본 100)")
 
-    aus = sub.add_parser("audit-search", help="감사 사실·brief 의미 검색")
+    aus = sub.add_parser("audit-search", help="감사 사실·brief 텍스트 부분일치 검색")
     aus.add_argument("path", help="prepare가 완료된 패키지 폴더")
-    aus.add_argument("--query", required=True, help="찾을 의미 문자열")
+    aus.add_argument("--query", required=True, help="찾을 텍스트 부분문자열")
     aus.add_argument(
         "--kind", default=None,
+        choices=sorted(AUDIT_SEARCH_KINDS),
         help="fact/statement 또는 fact type/brief section으로 제한",
     )
     aus.add_argument("--limit", type=int, default=None, help="매치 상한(기본 100)")
@@ -794,12 +960,51 @@ def _build_parser() -> argparse.ArgumentParser:
     tr.add_argument("path", help="prepare가 완료된 패키지 폴더")
     tr.add_argument("--id", required=True, help="fact/statement/relation/citation ID")
     tr.add_argument("--limit", type=int, default=None, help="반환 workbook 셀 상한")
+
+    aa = sub.add_parser(
+        "audit-agent",
+        help="준비된 감사조서를 근거 기반으로 브리핑하거나 질의응답",
+    )
+    aa.add_argument("path", help="prepare가 완료된 패키지 폴더")
+    aa.add_argument(
+        "--question",
+        default=None,
+        help="질문(생략하면 조서 전체 브리핑)",
+    )
+    aa.add_argument("--model", default=None, help="에이전트 모델(기본 annotate 기본 모델)")
+    aa.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="도구별 근거 반환 상한(1~200, 기본 100)",
+    )
+    aa.add_argument(
+        "--max-steps",
+        type=int,
+        default=6,
+        help="모델의 도구 선택·최종화 최대 회수(1~12, 기본 6)",
+    )
+    aa.add_argument(
+        "--json",
+        action="store_true",
+        help="Markdown 대신 근거가 보강된 JSON 출력",
+    )
+
+    ar = sub.add_parser(
+        "audit-review",
+        help="준비된 감사 facts+brief를 함께 승인 또는 반려",
+    )
+    ar.add_argument("path", help="prepare가 완료된 패키지 폴더")
+    decision = ar.add_mutually_exclusive_group(required=True)
+    decision.add_argument("--approve", action="store_true", help="감사 bundle 승인")
+    decision.add_argument("--reject", action="store_true", help="감사 bundle 반려")
+    ar.add_argument("--note", default=None, help="반려 사유(--reject 시 필수)")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.cmd in {"annotate", "prepare"}:
+    if args.cmd in {"annotate", "prepare", "audit-agent"}:
         _load_local_env()
     if args.cmd == "convert":
         return _cmd_convert(args)
@@ -811,12 +1016,16 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_prepare(args)
     if args.cmd == "review":
         return _cmd_review(args)
+    if args.cmd == "audit-review":
+        return _cmd_audit_review(args)
     if args.cmd in ("overview", "inspect", "search", "refs"):
         return _cmd_consume(args)
     if args.cmd in (
         "brief", "audit-search", "audit-get", "assertion-procedures", "trace"
     ):
         return _cmd_audit_consume(args)
+    if args.cmd == "audit-agent":
+        return _cmd_audit_agent(args)
     _eprint(f"'{args.cmd}' 은(는) 알 수 없는 명령입니다.")
     return 2
 

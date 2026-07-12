@@ -1,0 +1,348 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "audit_agent_response.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mode",
+    "question",
+    "package",
+    "bundle",
+    "generator",
+    "trust",
+    "answer",
+    "evidence",
+    "coverage",
+    "notices",
+    "package_limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_agent_response.v1"},
+    "mode": {"enum": ["briefing", "answer"]},
+    "question": {"type": ["string", "null"]},
+    "package": {"type": "string", "minLength": 1},
+    "bundle": {"$ref": "#/definitions/bundle"},
+    "generator": {"$ref": "#/definitions/generator"},
+    "trust": {"$ref": "#/definitions/trust"},
+    "answer": {"$ref": "#/definitions/answer"},
+    "evidence": {"$ref": "#/definitions/evidence"},
+    "coverage": {"$ref": "#/definitions/coverage"},
+    "notices": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/notice"}
+    },
+    "package_limitations": {
+      "type": "array",
+      "items": {"type": "object"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "briefing"}}},
+      "then": {"properties": {"question": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"mode": {"const": "answer"}}},
+      "then": {"properties": {"question": {"type": "string", "minLength": 1}}}
+    }
+  ],
+  "definitions": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "identifierList": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/identifier"},
+      "uniqueItems": true
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workbook_sha256",
+        "prepare_version",
+        "facts_key",
+        "standards_key",
+        "brief_key",
+        "prepared_at",
+        "standards_corpus_version"
+      ],
+      "properties": {
+        "workbook_sha256": {"$ref": "#/definitions/sha256"},
+        "prepare_version": {"type": "string", "minLength": 1},
+        "facts_key": {"$ref": "#/definitions/sha256"},
+        "standards_key": {"$ref": "#/definitions/sha256"},
+        "brief_key": {"$ref": "#/definitions/sha256"},
+        "prepared_at": {"type": "string", "minLength": 1},
+        "standards_corpus_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "version", "model", "prompt_sha256", "turns", "tools_used"
+      ],
+      "properties": {
+        "name": {"const": "excel_to_skill.audit.agent"},
+        "version": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "prompt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "turns": {"type": "integer", "minimum": 0, "maximum": 12},
+        "tools_used": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasons", "open_item_fact_ids"],
+      "properties": {
+        "status": {"enum": ["ready", "partial", "not_ready"]},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "open_item_fact_ids": {"$ref": "#/definitions/identifierList"}
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_facts_review_status",
+        "source_facts_reviewed_at",
+        "source_facts_review_note",
+        "source_facts_review_note_truncated",
+        "source_brief_review_status",
+        "source_brief_reviewed_at",
+        "source_brief_review_note",
+        "source_brief_review_note_truncated",
+        "source_unreviewed",
+        "answer_review_status",
+        "readiness"
+      ],
+      "properties": {
+        "source_facts_review_status": {"enum": ["draft", "approved", "rejected"]},
+        "source_facts_reviewed_at": {"type": ["string", "null"]},
+        "source_facts_review_note": {"type": ["string", "null"], "maxLength": 1000},
+        "source_facts_review_note_truncated": {"type": "boolean"},
+        "source_brief_review_status": {"enum": ["draft", "approved", "rejected"]},
+        "source_brief_reviewed_at": {"type": ["string", "null"]},
+        "source_brief_review_note": {"type": ["string", "null"], "maxLength": 1000},
+        "source_brief_review_note_truncated": {"type": "boolean"},
+        "source_unreviewed": {"type": "boolean"},
+        "answer_review_status": {"const": "unreviewed"},
+        "readiness": {"$ref": "#/definitions/readiness"}
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section",
+        "text",
+        "basis",
+        "status",
+        "confidence",
+        "fact_ids",
+        "relation_ids",
+        "standard_citation_ids",
+        "statement_ids"
+      ],
+      "properties": {
+        "section": {"type": "string", "minLength": 1},
+        "text": {"type": "string", "minLength": 1},
+        "basis": {
+          "enum": [
+            "documented_fact", "authoritative_context", "synthesis", "gap"
+          ]
+        },
+        "status": {"type": "string", "minLength": 1},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "fact_ids": {"$ref": "#/definitions/identifierList"},
+        "relation_ids": {"$ref": "#/definitions/identifierList"},
+        "standard_citation_ids": {"$ref": "#/definitions/identifierList"},
+        "statement_ids": {"$ref": "#/definitions/identifierList"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"basis": {"const": "documented_fact"}}},
+          "then": {
+            "anyOf": [
+              {"properties": {"fact_ids": {"minItems": 1}}},
+              {"properties": {"relation_ids": {"minItems": 1}}}
+            ],
+            "properties": {"standard_citation_ids": {"maxItems": 0}}
+          }
+        },
+        {
+          "if": {"properties": {"basis": {"const": "authoritative_context"}}},
+          "then": {
+            "properties": {
+              "fact_ids": {"maxItems": 0},
+              "relation_ids": {"maxItems": 0},
+              "standard_citation_ids": {"minItems": 1}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"basis": {"enum": ["synthesis", "gap"]}}},
+          "then": {
+            "properties": {
+              "fact_ids": {"minItems": 1},
+              "standard_citation_ids": {"minItems": 1}
+            }
+          }
+        }
+      ]
+    },
+    "answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title", "abstained", "abstention_reason", "claims", "suggested_questions"
+      ],
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "abstained": {"type": "boolean"},
+        "abstention_reason": {"type": ["string", "null"]},
+        "claims": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/claim"}
+        },
+        "suggested_questions": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true,
+          "maxItems": 5
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"abstained": {"const": true}}},
+          "then": {
+            "properties": {
+              "abstention_reason": {"type": "string", "minLength": 1},
+              "claims": {"maxItems": 0}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"abstained": {"const": false}}},
+          "then": {
+            "properties": {
+              "abstention_reason": {"type": "null"},
+              "claims": {"minItems": 1}
+            }
+          }
+        }
+      ]
+    },
+    "factEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fact_id", "fact", "sources", "cells", "trace_complete"],
+      "properties": {
+        "fact_id": {"$ref": "#/definitions/identifier"},
+        "fact": {"type": "object"},
+        "sources": {"type": "array", "items": {"type": "object"}},
+        "cells": {"type": "array", "items": {"type": "object"}},
+        "trace_complete": {"type": "boolean"}
+      }
+    },
+    "relationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relation_id", "relation", "facts", "sources", "cells",
+        "relation_direct_sources", "relation_direct_cells",
+        "endpoint_sources", "endpoint_cells", "trace_complete"
+      ],
+      "properties": {
+        "relation_id": {"$ref": "#/definitions/identifier"},
+        "relation": {"type": "object"},
+        "facts": {"type": "array", "items": {"type": "object"}},
+        "sources": {"type": "array", "items": {"type": "object"}},
+        "cells": {"type": "array", "items": {"type": "object"}},
+        "relation_direct_sources": {"type": "array", "items": {"type": "object"}},
+        "relation_direct_cells": {"type": "array", "items": {"type": "object"}},
+        "endpoint_sources": {"type": "array", "items": {"type": "object"}},
+        "endpoint_cells": {"type": "array", "items": {"type": "object"}},
+        "trace_complete": {"type": "boolean"}
+      }
+    },
+    "standardEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["citation_id", "citation", "trace_complete"],
+      "properties": {
+        "citation_id": {"$ref": "#/definitions/identifier"},
+        "citation": {"type": "object"},
+        "trace_complete": {"type": "boolean"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["facts", "relations", "standards"],
+      "properties": {
+        "facts": {"type": "array", "items": {"$ref": "#/definitions/factEvidence"}},
+        "relations": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/relationEvidence"}
+        },
+        "standards": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/standardEvidence"}
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "discovery_complete",
+        "evidence_complete",
+        "fact_count",
+        "relation_count",
+        "standards_citation_count"
+      ],
+      "properties": {
+        "complete": {"type": "boolean"},
+        "discovery_complete": {"type": "boolean"},
+        "evidence_complete": {"type": "boolean"},
+        "fact_count": {"type": "integer", "minimum": 0},
+        "relation_count": {"type": "integer", "minimum": 0},
+        "standards_citation_count": {"type": "integer", "minimum": 0}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"complete": {"const": true}}},
+          "then": {
+            "properties": {
+              "discovery_complete": {"const": true},
+              "evidence_complete": {"const": true}
+            }
+          }
+        }
+      ]
+    },
+    "notice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "text"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"enum": ["high", "moderate", "low"]},
+        "text": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

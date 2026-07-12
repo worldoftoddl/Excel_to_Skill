@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +17,7 @@ from .extract import EXTRACTOR_VERSION, _prompt_bundle, extract_audit_facts
 from .llm import load_prompt, load_schema
 from .model import json_sha256
 from .standards import StandardsRetriever
-from .validate import validate_audit_bundle, validate_audit_package
+from .validate import validate_audit_bundle, validate_audit_upstream
 
 
 CONTEXT_VERSION = "0.2.0"
@@ -31,6 +30,10 @@ _ARTIFACTS = (
 
 class AuditPrepareError(RuntimeError):
     """The audit bundle could not be prepared without damaging the prior ready bundle."""
+
+
+class StandardsStageCacheMiss(AuditPrepareError):
+    """The standards stage must be refreshed with a live retriever."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,8 +50,10 @@ class PrepareResult:
 class _CachedBundle:
     facts: dict
     context: dict
-    brief: dict
-    keys: tuple[str, str, str]
+    brief: dict | None
+    facts_key: str
+    standards_key: str
+    brief_key: str | None
     recipes: dict
 
 
@@ -196,31 +201,62 @@ def _context_has_errors(context: dict) -> bool:
 
 
 def _load_cached_bundle(pkg: Path) -> _CachedBundle | None:
-    """Load a fully valid prior bundle; stage recipes decide how much may be reused."""
-    paths = [pkg / "data" / name for name in _ARTIFACTS]
-    if not all(path.is_file() for path in paths):
+    """Load valid upstream stages and, when possible, the complete prior bundle.
+
+    A brief schema/prompt upgrade must not force workbook extraction or standards retrieval to
+    run again.  The facts and standards artifacts therefore have their own strict validation
+    boundary; an invalid or stale brief is represented as ``None`` and regenerated below.
+    """
+    facts_path, context_path, brief_path = [pkg / "data" / name for name in _ARTIFACTS]
+    if not facts_path.is_file() or not context_path.is_file():
         return None
     try:
-        validate_audit_package(pkg)
-        facts, context, brief = (_read_json(path) for path in paths)
-    except Exception:  # damaged/stale bundle is a cache miss and will be replaced transactionally
+        facts = _read_json(facts_path)
+        context = _read_json(context_path)
+        validate_audit_upstream(pkg, facts, context)
+    except Exception:  # damaged upstream is a cache miss and will be replaced transactionally
         return None
 
-    keys = bundle_keys(facts, context, brief)
     audit_meta = _read_json(pkg / "meta.json").get("audit_preparation", {})
-    if not isinstance(audit_meta, dict) or audit_meta.get("version") != PREPARE_VERSION or (
-        audit_meta.get("facts_key"),
-        audit_meta.get("standards_key"),
-        audit_meta.get("brief_key"),
-    ) != keys:
-        return None
+    upstream_keys = bundle_keys(facts, context, {})[:2]
     if (
-        audit_meta.get("status") != brief.get("readiness", {}).get("status")
-        or audit_meta.get("review_status") != brief.get("review", {}).get("status")
+        not isinstance(audit_meta, dict)
+        or audit_meta.get("present") is not True
+        or audit_meta.get("version") != PREPARE_VERSION
+        or (audit_meta.get("facts_key"), audit_meta.get("standards_key"))
+        != upstream_keys
     ):
         return None
+
+    brief: dict | None = None
+    brief_key: str | None = None
+    if brief_path.is_file():
+        try:
+            candidate = _read_json(brief_path)
+            validate_audit_bundle(pkg, facts, context, candidate)
+            keys = bundle_keys(facts, context, candidate)
+            if (
+                audit_meta.get("brief_key") == keys[2]
+                and audit_meta.get("status")
+                == candidate.get("readiness", {}).get("status")
+                and audit_meta.get("review_status")
+                == candidate.get("review", {}).get("status")
+            ):
+                brief = candidate
+                brief_key = keys[2]
+        except Exception:
+            # Only the downstream stage is stale.  Validated upstream artifacts remain reusable.
+            pass
     recipes = cache.get_audit(pkg.parent, pkg.name) or {}
-    return _CachedBundle(facts, context, brief, keys, recipes)
+    return _CachedBundle(
+        facts,
+        context,
+        brief,
+        upstream_keys[0],
+        upstream_keys[1],
+        brief_key,
+        recipes,
+    )
 
 
 def _prepare_package_unlocked(
@@ -246,7 +282,9 @@ def _prepare_package_unlocked(
         facts_recipe = _facts_recipe(pkg, meta, model=model)
         cached = None if force else _load_cached_bundle(pkg)
         recipe_state_ok = bool(
-            cached and cached.recipes.get("prepare_version") == PREPARE_VERSION
+            cached
+            and cached.recipes.get("prepare_version") == PREPARE_VERSION
+            and cached.recipes.get("facts_key") == cached.facts_key
         )
         reuse_facts = bool(
             recipe_state_ok
@@ -261,13 +299,25 @@ def _prepare_package_unlocked(
             standards_recipe = _standards_recipe(cached.facts, retriever_descriptor)
             reuse_context = bool(
                 cached.recipes.get("standards_recipe_key") == standards_recipe
+                and cached.recipes.get("standards_key") == cached.standards_key
                 and not _context_has_errors(cached.context)
             )
             if reuse_context:
                 brief_recipe = _brief_recipe(cached.facts, cached.context, model=model)
-                reuse_brief = cached.recipes.get("brief_recipe_key") == brief_recipe
+                reuse_brief = bool(
+                    cached.brief is not None
+                    and cached.brief_key is not None
+                    and cached.recipes.get("brief_recipe_key") == brief_recipe
+                    and cached.recipes.get("brief_key") == cached.brief_key
+                )
 
-        if reuse_facts and reuse_context and reuse_brief and cached is not None:
+        if (
+            reuse_facts
+            and reuse_context
+            and reuse_brief
+            and cached is not None
+            and cached.brief is not None
+        ):
             status = cached.brief.get("readiness", {}).get("status", "not_ready")
             # SKILL is a deterministic view over the current package. Repair deletion/tampering
             # without paying model/RAG cost when the authoritative audit bundle is a cache hit.
@@ -285,16 +335,16 @@ def _prepare_package_unlocked(
                 cached=True,
             )
 
+        if not reuse_context and retriever is None:
+            raise StandardsStageCacheMiss(
+                "standards stage cache miss에는 StandardsRetriever가 필요합니다."
+            )
         if client is None:
             if client_factory is None:
                 raise AuditPrepareError(
                     "cache miss인 audit prepare에는 client 또는 client_factory가 필요합니다."
                 )
             client = client_factory()
-        if not reuse_context and retriever is None:
-            raise AuditPrepareError(
-                "standards stage cache miss에는 StandardsRetriever가 필요합니다."
-            )
 
         generated_at = generated_at or _now_iso()
         data_dir = pkg / "data"
@@ -405,28 +455,6 @@ def _prepare_package_unlocked(
         raise AuditPrepareError(f"audit prepare 실패: {e}") from e
 
 
-@contextmanager
-def _package_lock(pkg: Path):
-    """동일 package의 동시 prepare가 publish/rollback을 교차시키지 못하게 한다."""
-    try:
-        import fcntl
-    except ImportError as e:  # pragma: no cover - 현재 지원 런타임은 POSIX
-        raise AuditPrepareError("이 플랫폼에서는 audit prepare file lock을 지원하지 않습니다.") from e
-    lock_path = pkg / ".audit_prepare.lock"
-    try:
-        lock_file = lock_path.open("a+b")
-    except OSError as e:
-        raise AuditPrepareError(f"audit prepare lock 열기 실패: {e}") from e
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        finally:
-            lock_file.close()
-
-
 def prepare_package(
     pkg: Path | str,
     *,
@@ -454,7 +482,7 @@ def prepare_package(
             generated_at=generated_at,
             eprint=eprint,
         )
-    with _package_lock(path):
+    with cache.package_lock(path):
         return _prepare_package_unlocked(
             path,
             client=client,

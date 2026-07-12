@@ -8,6 +8,7 @@ from .model import (
     json_sha256,
 )
 from .auditpaper_mcp import AuditpaperStandardsRetriever, RetrievalPolicy
+from .agent import AuditAgentError, render_audit_agent_markdown, run_audit_agent
 from .standards import (
     StandardHit,
     StandardsQueryError,
@@ -15,11 +16,19 @@ from .standards import (
     StandardsRetriever,
 )
 from .prepare import AuditPrepareError, PrepareResult, prepare_package
+from .review import (
+    AuditReviewError,
+    approve_audit_package,
+    reject_audit_package,
+    review_audit_package,
+)
 
 __all__ = [
     "AuditModelError",
+    "AuditAgentError",
     "AuditpaperStandardsRetriever",
     "AuditPrepareError",
+    "AuditReviewError",
     "PrepareResult",
     "RetrievalPolicy",
     "SourceKind",
@@ -31,4 +40,9 @@ __all__ = [
     "canonical_json",
     "json_sha256",
     "prepare_package",
+    "approve_audit_package",
+    "reject_audit_package",
+    "review_audit_package",
+    "render_audit_agent_markdown",
+    "run_audit_agent",
 ]

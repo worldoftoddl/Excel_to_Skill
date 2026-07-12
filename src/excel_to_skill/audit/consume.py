@@ -12,6 +12,14 @@ from .validate import AuditValidationError, validate_audit_bundle
 
 DEFAULT_LIMIT = 100
 HARD_LIMIT = 2000
+AUDIT_SEARCH_KINDS = frozenset({
+    "fact", "statement",
+    "workpaper_attribute", "account", "risk", "assertion", "control",
+    "procedure", "result", "finding", "conclusion", "open_item", "signoff",
+    "documented_fact", "authoritative_context", "synthesis", "gap",
+    "identity_scope", "risks_assertions", "controls", "procedures", "results",
+    "findings", "conclusions", "open_items", "signoffs", "standards",
+})
 _ARTIFACT_RELS = (
     "data/audit_facts.json",
     "data/standards_context.json",
@@ -133,22 +141,43 @@ def _bundle(pkg: Path | str) -> tuple[Path, dict, dict, dict]:
     return loaded
 
 
-def _trust_marker(brief_doc: dict) -> dict:
-    review_status = brief_doc.get("review", {}).get("status")
+def _trust_marker(brief_doc: dict, facts: dict) -> dict:
+    brief_review = brief_doc.get("review", {})
+    facts_review = facts.get("review", {})
+    review_status = brief_review.get("status")
+    facts_review_status = facts_review.get("status")
+
+    def bounded_note(review: dict) -> tuple[str | None, bool]:
+        note = review.get("note")
+        if not isinstance(note, str):
+            return None, False
+        return note[:1000], len(note) > 1000
+
+    facts_note, facts_note_truncated = bounded_note(facts_review)
+    brief_note, brief_note_truncated = bounded_note(brief_review)
     return {
+        "facts_review_status": facts_review_status,
+        "facts_reviewed_at": facts_review.get("reviewed_at"),
+        "facts_review_note": facts_note,
+        "facts_review_note_truncated": facts_note_truncated,
+        "facts_unreviewed": facts_review_status != "approved",
         "review_status": review_status,
-        "unreviewed": review_status != "approved",
+        "reviewed_at": brief_review.get("reviewed_at"),
+        "review_note": brief_note,
+        "review_note_truncated": brief_note_truncated,
+        "unreviewed": (
+            review_status != "approved" or facts_review_status != "approved"
+        ),
     }
 
 
-def brief(pkg: Path | str, *, limit=None) -> dict:
-    """Return the prepared brief, including draft content with an explicit trust marker."""
-    _, facts, context, doc = _bundle(pkg)
+def _brief_loaded(facts: dict, context: dict, doc: dict, *, limit=None) -> dict:
+    """Return a brief view from an already validated in-memory snapshot."""
     lim = _limit(limit)
     statements = doc.get("statements", [])
     return {
         "schema_version": doc.get("schema_version"),
-        **_trust_marker(doc),
+        **_trust_marker(doc, facts),
         "readiness": doc.get("readiness"),
         "workpaper": doc.get("workpaper"),
         "summary": doc.get("summary"),
@@ -165,8 +194,15 @@ def brief(pkg: Path | str, *, limit=None) -> dict:
     }
 
 
-def audit_search(
-    pkg: Path | str,
+def brief(pkg: Path | str, *, limit=None) -> dict:
+    """Return the prepared brief, including draft content with an explicit trust marker."""
+    _, facts, context, doc = _bundle(pkg)
+    return _brief_loaded(facts, context, doc, limit=limit)
+
+
+def _audit_search_loaded(
+    facts: dict,
+    brief_doc: dict,
     *,
     query: str,
     kind: str | None = None,
@@ -175,7 +211,8 @@ def audit_search(
     """Search normalized facts and brief statements, not the raw cell ledger."""
     if not isinstance(query, str) or not query.strip():
         raise AuditConsumeError("query가 비어 있습니다.")
-    _, facts, _, brief_doc = _bundle(pkg)
+    if kind is not None and kind not in AUDIT_SEARCH_KINDS:
+        raise AuditConsumeError(f"지원하지 않는 audit-search kind입니다: {kind!r}")
     q = query.casefold()
     matches: list[dict] = []
     for fact in facts.get("facts", []):
@@ -199,7 +236,7 @@ def audit_search(
             matches.append({"kind": "statement", "item": statement})
     lim = _limit(limit)
     return {
-        **_trust_marker(brief_doc),
+        **_trust_marker(brief_doc, facts),
         "query": query,
         "kind": kind,
         "returned": min(len(matches), lim),
@@ -207,6 +244,20 @@ def audit_search(
         "truncated": len(matches) > lim,
         "matches": matches[:lim],
     }
+
+
+def audit_search(
+    pkg: Path | str,
+    *,
+    query: str,
+    kind: str | None = None,
+    limit=None,
+) -> dict:
+    """Search normalized facts and brief statements, not the raw cell ledger."""
+    _, facts, _, brief_doc = _bundle(pkg)
+    return _audit_search_loaded(
+        facts, brief_doc, query=query, kind=kind, limit=limit
+    )
 
 
 def _fact_matches(fact: dict, query: str | None) -> bool:
@@ -271,8 +322,9 @@ def _bounded_assertion_pair(pair: dict, limit: int) -> dict:
     }
 
 
-def assertion_procedures(
-    pkg: Path | str,
+def _assertion_procedures_loaded(
+    facts: dict,
+    brief_doc: dict,
     *,
     query: str | None = None,
     limit=None,
@@ -285,7 +337,6 @@ def assertion_procedures(
     source is that procedure.  Artifact relations marked inferred remain visible, but each pair
     exposes a documented/inferred/unknown ``mapping_status`` instead of silently promoting them.
     """
-    _, facts, _, brief_doc = _bundle(pkg)
     if query is not None:
         if not isinstance(query, str) or not query.strip():
             raise AuditConsumeError("query가 비어 있습니다.")
@@ -410,7 +461,7 @@ def assertion_procedures(
         any(pair["truncated"] for pair in returned_pairs),
     ))
     return {
-        **_trust_marker(brief_doc),
+        **_trust_marker(brief_doc, facts),
         "query": query_text,
         "returned_pairs": len(returned_pairs),
         "total_pairs": len(pairs),
@@ -436,6 +487,19 @@ def assertion_procedures(
         "unpaired_procedures": returned_procedures,
         "trace_ids": trace_ids,
     }
+
+
+def assertion_procedures(
+    pkg: Path | str,
+    *,
+    query: str | None = None,
+    limit=None,
+) -> dict:
+    """Return represented procedure-to-assertion mappings from a committed package."""
+    _, facts, _, brief_doc = _bundle(pkg)
+    return _assertion_procedures_loaded(
+        facts, brief_doc, query=query, limit=limit
+    )
 
 
 def _registries(facts: dict, context: dict, brief_doc: dict) -> list[tuple[str, dict]]:
@@ -481,15 +545,28 @@ def _get_from_bundle(
     return {"id": item_id, "kind": kind, "item": item}
 
 
-def audit_get(pkg: Path | str, *, item_id: str) -> dict:
-    """Return one typed audit object by ID."""
+def _audit_get_loaded(
+    facts: dict,
+    context: dict,
+    brief_doc: dict,
+    *,
+    item_id: str,
+) -> dict:
+    """Return one typed object from an already validated in-memory snapshot."""
     if not isinstance(item_id, str) or not item_id.strip():
         raise AuditConsumeError("item_id가 비어 있습니다.")
-    _, facts, context, brief_doc = _bundle(pkg)
     return {
-        **_trust_marker(brief_doc),
+        **_trust_marker(brief_doc, facts),
         **_get_from_bundle(facts, context, brief_doc, item_id=item_id),
     }
+
+
+def audit_get(pkg: Path | str, *, item_id: str) -> dict:
+    """Return one typed audit object by ID."""
+    _, facts, context, brief_doc = _bundle(pkg)
+    return _audit_get_loaded(
+        facts, context, brief_doc, item_id=item_id
+    )
 
 
 def _cell_view(cell: dict) -> dict:
@@ -505,22 +582,33 @@ def _cell_view(cell: dict) -> dict:
     return out
 
 
-def trace(pkg: Path | str, *, item_id: str, limit=None) -> dict:
-    """Resolve a fact/statement/relation to workbook cells and cached standards passages."""
-    path, facts, context, brief_doc = _bundle(pkg)
+def _trace_loaded(
+    path: Path,
+    facts: dict,
+    context: dict,
+    brief_doc: dict,
+    *,
+    item_id: str,
+    limit=None,
+    resolver: WorkbookSourceResolver | None = None,
+) -> dict:
+    """Resolve one item after the caller has already passed the committed-bundle gate."""
     if not isinstance(item_id, str) or not item_id.strip():
         raise AuditConsumeError("item_id가 비어 있습니다.")
     located = _get_from_bundle(facts, context, brief_doc, item_id=item_id)
     item, kind = located["item"], located["kind"]
     fact_ids: list[str] = []
+    relation_ids: list[str] = []
     citation_ids: list[str] = []
     direct_source_ids: list[str] = []
     if kind == "fact":
         fact_ids = [item_id]
     elif kind == "statement":
         fact_ids = list(item.get("fact_ids", []))
+        relation_ids = list(item.get("relation_ids", []))
         citation_ids = list(item.get("standard_citation_ids", []))
     elif kind == "relation":
+        relation_ids = [item_id]
         fact_ids = [item.get("from_fact_id"), item.get("to_fact_id")]
         direct_source_ids = list(item.get("source_ids", []))
     elif kind == "standard_citation":
@@ -531,23 +619,40 @@ def trace(pkg: Path | str, *, item_id: str, limit=None) -> dict:
         )
     fact_ids = [value for value in fact_ids if isinstance(value, str)]
     fact_map = {fact["id"]: fact for fact in facts.get("facts", [])}
+    relation_map = {
+        relation["id"]: relation for relation in facts.get("relations", [])
+    }
     source_map = {source["id"]: source for source in facts.get("sources", [])}
     citation_map = {citation["id"]: citation for citation in context.get("citations", [])}
     missing_facts = [fid for fid in fact_ids if fid not in fact_map]
+    missing_relations = [rid for rid in relation_ids if rid not in relation_map]
     missing_citations = [cid for cid in citation_ids if cid not in citation_map]
-    if missing_facts or missing_citations:
+    if missing_facts or missing_relations or missing_citations:
         raise AuditConsumeError(
             "trace 참조가 손상되었습니다: "
-            f"facts={missing_facts[:10]}, citations={missing_citations[:10]}"
+            f"facts={missing_facts[:10]}, relations={missing_relations[:10]}, "
+            f"citations={missing_citations[:10]}"
         )
+    linked_relations = [
+        relation_map[rid] for rid in dict.fromkeys(relation_ids)
+    ]
+    fact_ids = list(dict.fromkeys((
+        *fact_ids,
+        *(relation.get("from_fact_id") for relation in linked_relations),
+        *(relation.get("to_fact_id") for relation in linked_relations),
+    )))
     linked_facts = [fact_map[fid] for fid in dict.fromkeys(fact_ids)]
-    source_ids = list(dict.fromkeys(
-        [*direct_source_ids, *(
-            source_id
-            for fact in linked_facts
-            for source_id in fact.get("source_ids", [])
-        )]
+    relation_source_ids = list(dict.fromkeys([
+        *direct_source_ids,
+        *(source_id for relation in linked_relations
+          for source_id in relation.get("source_ids", [])),
+    ]))
+    endpoint_source_ids = list(dict.fromkeys(
+        source_id
+        for fact in linked_facts
+        for source_id in fact.get("source_ids", [])
     ))
+    source_ids = list(dict.fromkeys([*relation_source_ids, *endpoint_source_ids]))
     missing_sources = [source_id for source_id in source_ids if source_id not in source_map]
     if missing_sources:
         raise AuditConsumeError(
@@ -557,14 +662,17 @@ def trace(pkg: Path | str, *, item_id: str, limit=None) -> dict:
     citations = [citation_map[cid] for cid in dict.fromkeys(citation_ids)]
 
     try:
-        resolver = WorkbookSourceResolver(path)
+        resolver = resolver or WorkbookSourceResolver(path)
         cells: list[dict] = []
+        cells_by_source: dict[str, list[dict]] = {}
         for source in sources:
             ref = f"{source['sheet']}!{source['range']}"
             resolved = resolver.resolve(ref)
             if resolved.content_sha256 != source.get("content_sha256"):
                 raise AuditConsumeError(f"workbook source digest 불일치: {ref}")
-            cells.extend(_cell_view(cell) for cell in resolver.cells_for(ref))
+            source_cells = [_cell_view(cell) for cell in resolver.cells_for(ref)]
+            cells_by_source[source["id"]] = source_cells
+            cells.extend(source_cells)
     except AuditModelError as e:
         raise AuditConsumeError(str(e)) from e
     # Preserve first occurrence when overlapping cited ranges resolve the same cell.
@@ -575,23 +683,77 @@ def trace(pkg: Path | str, *, item_id: str, limit=None) -> dict:
         if key not in seen:
             seen.add(key)
             deduped.append(cell)
+
+    def cells_for_sources(selected_ids: list[str]) -> list[dict]:
+        selected: list[dict] = []
+        selected_seen: set[tuple[object, object]] = set()
+        for source_id in selected_ids:
+            for cell in cells_by_source.get(source_id, []):
+                key = (cell.get("sheet"), cell.get("cell"))
+                if key not in selected_seen:
+                    selected_seen.add(key)
+                    selected.append(cell)
+        return selected
+
+    relation_sources = [source_map[source_id] for source_id in relation_source_ids]
+    endpoint_sources = [source_map[source_id] for source_id in endpoint_source_ids]
+    relation_cells = cells_for_sources(relation_source_ids)
+    endpoint_cells = cells_for_sources(endpoint_source_ids)
     lim = _limit(limit)
     return {
-        **_trust_marker(brief_doc),
+        **_trust_marker(brief_doc, facts),
         "id": item_id,
         "kind": kind,
         "item": item,
         "returned_facts": min(len(linked_facts), lim),
         "total_facts": len(linked_facts),
         "facts": linked_facts[:lim],
+        "returned_relations": min(len(linked_relations), lim),
+        "total_relations": len(linked_relations),
+        "relations": linked_relations[:lim],
         "returned_sources": min(len(sources), lim),
         "total_sources": len(sources),
         "sources": sources[:lim],
+        "returned_relation_direct_sources": min(len(relation_sources), lim),
+        "total_relation_direct_sources": len(relation_sources),
+        "relation_direct_sources": relation_sources[:lim],
+        "returned_relation_direct_cells": min(len(relation_cells), lim),
+        "total_relation_direct_cells": len(relation_cells),
+        "relation_direct_cells": relation_cells[:lim],
+        "returned_endpoint_sources": min(len(endpoint_sources), lim),
+        "total_endpoint_sources": len(endpoint_sources),
+        "endpoint_sources": endpoint_sources[:lim],
+        "returned_endpoint_cells": min(len(endpoint_cells), lim),
+        "total_endpoint_cells": len(endpoint_cells),
+        "endpoint_cells": endpoint_cells[:lim],
         "returned_standards_citations": min(len(citations), lim),
         "total_standards_citations": len(citations),
         "standards_citations": citations[:lim],
         "returned_cells": min(len(deduped), lim),
         "total_cells": len(deduped),
-        "truncated": len(deduped) > lim,
+        "truncated": any((
+            len(linked_facts) > lim,
+            len(linked_relations) > lim,
+            len(sources) > lim,
+            len(relation_sources) > lim,
+            len(relation_cells) > lim,
+            len(endpoint_sources) > lim,
+            len(endpoint_cells) > lim,
+            len(citations) > lim,
+            len(deduped) > lim,
+        )),
         "cells": deduped[:lim],
     }
+
+
+def trace(pkg: Path | str, *, item_id: str, limit=None) -> dict:
+    """Resolve a fact/statement/relation to workbook cells and cached standards passages."""
+    path, facts, context, brief_doc = _bundle(pkg)
+    return _trace_loaded(
+        path,
+        facts,
+        context,
+        brief_doc,
+        item_id=item_id,
+        limit=limit,
+    )

@@ -25,6 +25,7 @@ from excel_to_skill.audit.standards import (
     StandardsQueryError,
     StandardsRetrievalFatalError,
 )
+from excel_to_skill.audit.validate import validate_audit_package
 from excel_to_skill.cli import _build_parser, _cmd_prepare, _load_local_env
 
 from test_audit_prepare import PipelineClient, _package
@@ -712,6 +713,54 @@ def test_prepare_cli_wires_fake_mcp_without_network(
         item["code"] == "effective_date_unverified"
         for item in context["limitations"]
     )
+
+
+def test_prepare_cli_regenerates_only_stale_brief_without_mcp_credentials(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    pkg = _package(tmp_path)
+    caller = _success_caller()
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "initial-only-token")
+    args = _build_parser().parse_args([
+        "prepare",
+        str(pkg),
+        "--mcp-url",
+        "https://example.test/mcp",
+        "--model",
+        "stub-model",
+        "--standards-top-k",
+        "3",
+        "--standards-definitions",
+        "1",
+    ])
+    assert _cmd_prepare(
+        args,
+        client_factory=lambda _model: PipelineClient(),
+        caller_factory=lambda _connection: caller,
+    ) == 0
+    capsys.readouterr()
+
+    brief_path = pkg / "data/audit_brief.json"
+    stale_brief = json.loads(brief_path.read_text(encoding="utf-8"))
+    for statement in stale_brief["statements"]:
+        statement.pop("relation_ids")
+    brief_path.write_text(
+        json.dumps(stale_brief, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MCP_AUTH_TOKEN")
+
+    def no_mcp(_connection):
+        raise AssertionError("valid standards cache must not open MCP")
+
+    assert _cmd_prepare(
+        args,
+        client_factory=lambda _model: PipelineClient(),
+        caller_factory=no_mcp,
+    ) == 0
+    captured = capsys.readouterr()
+    assert "standards reuse" in captured.err
+    validate_audit_package(pkg)
 
 
 def test_fatal_retrieval_contract_error_aborts_context_instead_of_publishing_partial() -> None:

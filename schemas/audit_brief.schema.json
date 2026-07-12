@@ -17,7 +17,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "audit_brief.v1"
+      "const": "audit_brief.v2"
     },
     "inputs": {
       "$ref": "#/definitions/inputs"
@@ -170,9 +170,53 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 2000
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "draft"}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "reviewed_at": {"type": "null"},
+              "note": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"status": {"const": "approved"}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "reviewed_at": {"$ref": "#/definitions/timestamp"},
+              "note": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"status": {"const": "rejected"}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "reviewed_at": {"$ref": "#/definitions/timestamp"},
+              "note": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000,
+                "pattern": "\\S"
+              }
+            }
+          }
+        }
+      ]
     },
     "readiness": {
       "type": "object",
@@ -295,6 +339,7 @@
         "status",
         "confidence",
         "fact_ids",
+        "relation_ids",
         "standard_citation_ids"
       ],
       "properties": {
@@ -346,6 +391,9 @@
         "fact_ids": {
           "$ref": "#/definitions/identifierList"
         },
+        "relation_ids": {
+          "$ref": "#/definitions/identifierList"
+        },
         "standard_citation_ids": {
           "$ref": "#/definitions/identifierList"
         }
@@ -384,6 +432,9 @@
           "then": {
             "properties": {
               "fact_ids": {
+                "maxItems": 0
+              },
+              "relation_ids": {
                 "maxItems": 0
               },
               "standard_citation_ids": {

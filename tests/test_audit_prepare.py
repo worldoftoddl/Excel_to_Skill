@@ -158,6 +158,7 @@ class PipelineClient:
                 "status": "documented",
                 "confidence": 0.9,
                 "fact_ids": [self.fact_id],
+                "relation_ids": [],
                 "standard_citation_ids": [],
             }]
             statement_ids = ["statement:fact"]
@@ -170,6 +171,7 @@ class PipelineClient:
                     "status": "documented",
                     "confidence": 0.9,
                     "fact_ids": [],
+                    "relation_ids": [],
                     "standard_citation_ids": [citation_ids[0]],
                 })
                 statement_ids.append("statement:standard")
@@ -501,8 +503,8 @@ def test_brief_version_change_reuses_facts_and_standards(
     )
     facts_before = (pkg / "data/audit_facts.json").read_bytes()
     context_before = (pkg / "data/standards_context.json").read_bytes()
-    monkeypatch.setattr(brief_module, "BRIEF_VERSION", "0.4.0")
-    monkeypatch.setattr(prepare_module, "BRIEF_VERSION", "0.4.0")
+    monkeypatch.setattr(brief_module, "BRIEF_VERSION", "0.5.0")
+    monkeypatch.setattr(prepare_module, "BRIEF_VERSION", "0.5.0")
     client = PipelineClient()
 
     class ExplodingRetriever:
@@ -523,7 +525,112 @@ def test_brief_version_change_reuses_facts_and_standards(
     assert (pkg / "data/audit_facts.json").read_bytes() == facts_before
     assert (pkg / "data/standards_context.json").read_bytes() == context_before
     brief_doc = json.loads(result.brief_path.read_text(encoding="utf-8"))
-    assert brief_doc["generator"]["version"] == "0.4.0"
+    assert brief_doc["generator"]["version"] == "0.5.0"
+
+
+def test_schema_stale_brief_reuses_valid_facts_and_standards(tmp_path: Path) -> None:
+    pkg = _package(tmp_path)
+    prepare_package(
+        pkg,
+        client=PipelineClient(),
+        retriever=StubRetriever(),
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at=_WHEN,
+    )
+    facts_before = (pkg / "data/audit_facts.json").read_bytes()
+    context_before = (pkg / "data/standards_context.json").read_bytes()
+    brief_path = pkg / "data/audit_brief.json"
+    stale_brief = json.loads(brief_path.read_text(encoding="utf-8"))
+    for statement in stale_brief["statements"]:
+        statement.pop("relation_ids")
+    brief_path.write_text(
+        json.dumps(stale_brief, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    client = PipelineClient()
+
+    result = prepare_package(
+        pkg,
+        client=client,
+        retriever=None,
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at="2026-07-12T00:00:00Z",
+    )
+
+    assert result.cached is False
+    assert client.calls == ["brief"]
+    assert result.status == "ready"
+    assert (pkg / "data/audit_facts.json").read_bytes() == facts_before
+    assert (pkg / "data/standards_context.json").read_bytes() == context_before
+    validate_audit_package(pkg)
+
+
+@pytest.mark.parametrize("present", [False, None])
+def test_upstream_cache_requires_present_commit_marker(
+    tmp_path: Path,
+    present: bool | None,
+) -> None:
+    pkg = _package(tmp_path)
+    prepare_package(
+        pkg,
+        client=PipelineClient(),
+        retriever=StubRetriever(),
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at=_WHEN,
+    )
+    meta_path = pkg / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if present is None:
+        meta["audit_preparation"].pop("present")
+    else:
+        meta["audit_preparation"]["present"] = present
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    client = PipelineClient()
+    retriever = StubRetriever()
+
+    result = prepare_package(
+        pkg,
+        client=client,
+        retriever=retriever,
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at="2026-07-12T00:00:00Z",
+    )
+
+    assert result.cached is False
+    assert client.calls == ["region", "consolidate", "brief"]
+    assert len(retriever.calls) == 1
+
+
+def test_recipe_cache_mirror_must_match_current_artifact_keys(tmp_path: Path) -> None:
+    pkg = _package(tmp_path)
+    prepare_package(
+        pkg,
+        client=PipelineClient(),
+        retriever=StubRetriever(),
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at=_WHEN,
+    )
+    cache.update_audit(pkg.parent, pkg.name, facts_key="0" * 64)
+    client = PipelineClient()
+    retriever = StubRetriever()
+
+    result = prepare_package(
+        pkg,
+        client=client,
+        retriever=retriever,
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at="2026-07-12T00:00:00Z",
+    )
+
+    assert result.cached is False
+    assert client.calls == ["region", "consolidate", "brief"]
+    assert len(retriever.calls) == 1
 
 
 def test_error_context_is_retried_while_facts_are_reused(tmp_path: Path) -> None:

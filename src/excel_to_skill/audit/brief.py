@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Mapping
 
 import jsonschema
@@ -12,7 +13,7 @@ from .llm import AuditLLMError, call_json, load_prompt, load_schema
 from .model import json_sha256
 
 
-BRIEF_VERSION = "0.3.0"
+BRIEF_VERSION = "0.4.3"  # 0.4.3: omit statements naming standards absent from their citations
 BRIEF_PROMPT = "audit_brief_v1.md"
 
 _WORKPAPER_FIELDS = (
@@ -31,6 +32,27 @@ _READINESS_CONTEXT_LIMITATION_CODES = {
     "effective_date_unknown",
     "effective_date_unverified",
 }
+_STANDARD_REFERENCE_RE = re.compile(
+    r"\b(KSA|K-?IFRS)\s*(?:(?:::\s*|[- ]+)\s*(?:제\s*)?|제\s*)"
+    r"([0-9]+(?:-[0-9]+)?)(?:\s*호)?(?=$|[^0-9A-Za-z-])",
+    re.IGNORECASE,
+)
+_KOREAN_STANDARD_REFERENCE_PATTERNS = (
+    (
+        "KSA",
+        re.compile(
+            r"(?:감사기준서?|감사기준)\s*(?:제\s*)?"
+            r"([0-9]+(?:-[0-9]+)?)(?:\s*호)?(?=$|[^0-9A-Za-z-])"
+        ),
+    ),
+    (
+        "KIFRS",
+        re.compile(
+            r"(?:기업회계기준서?|회계기준서|한국채택국제회계기준서?)\s*(?:제\s*)?"
+            r"([0-9]+(?:-[0-9]+)?)(?:\s*호)?(?=$|[^0-9A-Za-z-])"
+        ),
+    ),
+)
 
 
 def _output_schema(full_schema: dict) -> dict:
@@ -51,6 +73,120 @@ def _records(doc: Mapping[str, object], key: str) -> list[dict]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+def _standard_references(text: object) -> set[tuple[str, str]]:
+    if not isinstance(text, str):
+        return set()
+    references = {
+        (framework.upper().replace("-", ""), standard_no)
+        for framework, standard_no in _STANDARD_REFERENCE_RE.findall(text)
+    }
+    for framework, pattern in _KOREAN_STANDARD_REFERENCE_PATTERNS:
+        references.update((framework, number) for number in pattern.findall(text))
+    return references
+
+
+def _citation_standard_references(citation: Mapping[str, object]) -> set[tuple[str, str]]:
+    references: set[tuple[str, str]] = set()
+    for value in (
+        citation.get("document_id"),
+        (
+            citation.get("provider_metadata", {}).get("source_cid")
+            if isinstance(citation.get("provider_metadata"), Mapping)
+            else None
+        ),
+    ):
+        references.update(_standard_references(value))
+    provider = citation.get("provider_metadata")
+    framework = citation.get("framework")
+    if isinstance(provider, Mapping) and isinstance(framework, str):
+        standard_no = provider.get("standard_no")
+        if isinstance(standard_no, str) and standard_no:
+            references.add((framework.upper().replace("-", ""), standard_no))
+    return references
+
+
+def _validate_authored_standard_references(
+    authored: dict,
+    standards_context: Mapping[str, object],
+) -> None:
+    """Reject a named standard number unless that statement directly cites the standard."""
+    citations = {
+        citation["id"]: citation
+        for citation in _records(standards_context, "citations")
+        if isinstance(citation.get("id"), str)
+    }
+    for statement in authored.get("statements", []):
+        if not isinstance(statement, Mapping):
+            continue
+        mentioned = _standard_references(statement.get("text"))
+        if not mentioned:
+            continue
+        allowed: set[tuple[str, str]] = set()
+        for citation_id in statement.get("standard_citation_ids", []):
+            citation = citations.get(citation_id)
+            if citation is not None:
+                allowed.update(_citation_standard_references(citation))
+        unsupported = sorted(mentioned - allowed)
+        if unsupported:
+            labels = [f"{framework} {number}" for framework, number in unsupported]
+            raise AuditLLMError(
+                f"statement {statement.get('id')!r}가 직접 인용하지 않은 기준서 번호를 "
+                f"언급했습니다: {labels}"
+            )
+
+
+def _drop_unsupported_standard_reference_statements(
+    authored: dict,
+    standards_context: Mapping[str, object],
+) -> list[str]:
+    """Fail closed by removing whole statements that name an uncited standard."""
+    dropped: list[str] = []
+    for statement in authored["statements"]:
+        try:
+            _validate_authored_standard_references(
+                {"statements": [statement]}, standards_context
+            )
+        except AuditLLMError:
+            statement_id = statement.get("id")
+            if isinstance(statement_id, str):
+                dropped.append(statement_id)
+    if not dropped:
+        return []
+    dropped_ids = set(dropped)
+    authored["statements"] = [
+        statement
+        for statement in authored["statements"]
+        if statement.get("id") not in dropped_ids
+    ]
+    if not authored["statements"]:
+        raise AuditLLMError(
+            "직접 인용하지 않은 기준서 번호를 제거한 뒤 statement가 남지 않았습니다."
+        )
+    statement_by_id = {
+        statement["id"]: statement for statement in authored["statements"]
+    }
+    summary_ids = [
+        statement_id
+        for statement_id in authored["summary"]["statement_ids"]
+        if statement_id in statement_by_id
+    ]
+    if not summary_ids:
+        summary_ids = list(statement_by_id)
+    authored["summary"] = {
+        "text": " ".join(
+            statement_by_id[statement_id]["text"] for statement_id in summary_ids[:3]
+        ),
+        "statement_ids": summary_ids,
+    }
+    for limitation in authored["limitations"]:
+        limitation["affected_statement_ids"] = [
+            statement_id
+            for statement_id in limitation.get("affected_statement_ids", [])
+            if statement_id not in dropped_ids
+        ]
+    return dropped
 
 
 def _unresolved_open_item_ids(audit_facts: Mapping[str, object]) -> list[str]:
@@ -228,6 +364,30 @@ def _drop_source_free_model_gaps(authored: dict) -> None:
         ]
 
 
+def _complete_relation_endpoints(
+    authored: dict,
+    audit_facts: Mapping[str, object],
+) -> None:
+    """Make every selected relationship self-contained in its statement evidence list."""
+    relations = {
+        relation["id"]: relation
+        for relation in _records(audit_facts, "relations")
+        if isinstance(relation.get("id"), str)
+    }
+    for statement in authored["statements"]:
+        fact_ids = statement["fact_ids"]
+        seen = set(fact_ids)
+        for relation_id in statement["relation_ids"]:
+            relation = relations.get(relation_id)
+            if relation is None:
+                continue
+            for field in ("from_fact_id", "to_fact_id"):
+                fact_id = relation.get(field)
+                if isinstance(fact_id, str) and fact_id not in seen:
+                    fact_ids.append(fact_id)
+                    seen.add(fact_id)
+
+
 def _enforce_integrity(
     authored: dict,
     audit_facts: Mapping[str, object],
@@ -235,6 +395,9 @@ def _enforce_integrity(
 ) -> dict:
     """Deterministically retain upstream identity, blockers, gaps, and limitations."""
     result = copy.deepcopy(authored)
+    dropped_standard_statements = _drop_unsupported_standard_reference_statements(
+        result, standards_context
+    )
     source_workpaper = audit_facts.get("workpaper")
     if isinstance(source_workpaper, Mapping):
         for field in _WORKPAPER_FIELDS:
@@ -247,11 +410,21 @@ def _enforce_integrity(
     )
     if no_facts:
         result["readiness"]["status"] = "not_ready"
-    elif blocker_reasons and result["readiness"]["status"] == "ready":
+    elif (
+        (blocker_reasons or dropped_standard_statements)
+        and result["readiness"]["status"] == "ready"
+    ):
         result["readiness"]["status"] = "partial"
     result["readiness"]["reasons"] = list(dict.fromkeys([
         *result["readiness"]["reasons"],
         *blocker_reasons,
+        *(
+            [
+                "Statements naming standards not directly cited by their evidence were "
+                "omitted: " + ", ".join(dropped_standard_statements)
+            ]
+            if dropped_standard_statements else []
+        ),
     ]))
 
     if no_facts:
@@ -268,6 +441,7 @@ def _enforce_integrity(
             "status": "unknown",
             "confidence": 1.0,
             "fact_ids": [],
+            "relation_ids": [],
             "standard_citation_ids": [],
         }]
         result["summary"] = {
@@ -280,6 +454,7 @@ def _enforce_integrity(
     else:
         _drop_source_free_model_gaps(result)
 
+    _complete_relation_endpoints(result, audit_facts)
     _surface_input_limitations(result, audit_facts, standards_context)
     return result
 
@@ -320,7 +495,7 @@ def build_audit_brief(
     authored = _enforce_integrity(authored, audit_facts, standards_context)
     generated_at = generated_at or _now_iso()
     brief = {
-        "schema_version": "audit_brief.v1",
+        "schema_version": "audit_brief.v2",
         "inputs": {
             "audit_facts_sha256": json_sha256(audit_facts),
             "standards_context_sha256": json_sha256(standards_context),

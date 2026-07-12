@@ -1,0 +1,145 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "audit briefing agent turn",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action", "tool", "final"],
+  "properties": {
+    "action": {
+      "enum": ["tool", "final"]
+    },
+    "tool": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/definitions/toolRequest"}
+      ]
+    },
+    "final": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/definitions/finalResponse"}
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"action": {"const": "tool"}}},
+      "then": {
+        "properties": {
+          "tool": {"$ref": "#/definitions/toolRequest"},
+          "final": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"action": {"const": "final"}}},
+      "then": {
+        "properties": {
+          "tool": {"type": "null"},
+          "final": {"$ref": "#/definitions/finalResponse"}
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "identifierList": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/identifier"},
+      "uniqueItems": true,
+      "maxItems": 100
+    },
+    "toolRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "query", "kind", "item_id", "limit"],
+      "properties": {
+        "name": {
+          "enum": [
+            "audit_search",
+            "audit_get",
+            "assertion_procedures",
+            "trace"
+          ]
+        },
+        "query": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "kind": {
+          "enum": [
+            null,
+            "fact", "statement",
+            "workpaper_attribute", "account", "risk", "assertion", "control",
+            "procedure", "result", "finding", "conclusion", "open_item", "signoff",
+            "documented_fact", "authoritative_context", "synthesis", "gap",
+            "identity_scope", "risks_assertions", "controls", "procedures", "results",
+            "findings", "conclusions", "open_items", "signoffs", "standards"
+          ]
+        },
+        "item_id": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/definitions/identifier"}
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ids"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "statement",
+            "fact",
+            "relation",
+            "standard_citation"
+          ]
+        },
+        "ids": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/identifier"},
+          "minItems": 1,
+          "maxItems": 30,
+          "uniqueItems": true
+        }
+      }
+    },
+    "finalResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "abstained",
+        "abstention_code",
+        "selections"
+      ],
+      "properties": {
+        "abstained": {"type": "boolean"},
+        "abstention_code": {
+          "enum": [
+            "insufficient_evidence",
+            "ambiguous_question",
+            "retrieval_incomplete",
+            null
+          ]
+        },
+        "selections": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/selection"},
+          "maxItems": 30
+        }
+      }
+    }
+  }
+}

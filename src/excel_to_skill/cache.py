@@ -37,6 +37,7 @@ from .meta import _converter_version, _now_iso, _source_sha256
 
 _INDEX_NAME = "_index.json"
 _INDEX_LOCK_NAME = ".index.lock"
+_PACKAGE_LOCK_DIR = ".package_locks"
 _INDEX_VERSION = 1
 _SHA_PREFIX = 12  # 폴더명에 박는 sha256 접두 길이
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')  # 경로 위험 문자
@@ -131,6 +132,38 @@ def _index_lock(root: Path):
     root.mkdir(parents=True, exist_ok=True)
     with _thread_lock(root):
         lock_file = (root / _INDEX_LOCK_NAME).open("a+b")
+        locked = False
+        try:
+            _lock_file(lock_file)
+            locked = True
+            yield
+        finally:
+            try:
+                if locked:
+                    _unlock_file(lock_file)
+            finally:
+                lock_file.close()
+
+
+@contextmanager
+def package_lock(pkg: Path | str):
+    """Serialize every writer for one package using a lock outside the package.
+
+    The lock inode lives under the converted root so a force conversion may replace the whole
+    package directory without unlinking the active lock.  The resolved package path is hashed to
+    keep arbitrary package names out of the lock filename while preserving one stable identity.
+    """
+    path = Path(pkg)
+    root = path.parent
+    root.mkdir(parents=True, exist_ok=True)
+    lock_root = root / _PACKAGE_LOCK_DIR
+    lock_root.mkdir(parents=True, exist_ok=True)
+    identity = hashlib.sha256(
+        str(path.resolve()).encode("utf-8")
+    ).hexdigest()
+    lock_path = lock_root / f"{identity}.lock"
+    with _thread_lock(lock_path):
+        lock_file = lock_path.open("a+b")
         locked = False
         try:
             _lock_file(lock_file)

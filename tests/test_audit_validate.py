@@ -11,6 +11,8 @@ from excel_to_skill.audit.sources import WorkbookSourceResolver
 from excel_to_skill.audit.model import json_sha256
 from excel_to_skill.audit.validate import (
     AuditValidationError,
+    collect_audit_facts_validation_problems,
+    collect_audit_upstream_validation_problems,
     collect_audit_validation_problems,
     collect_package_audit_validation_problems,
     load_audit_schema,
@@ -137,7 +139,7 @@ def _bundle(tmp_path: Path) -> tuple[Path, dict, dict, dict]:
     }
 
     brief = {
-        "schema_version": "audit_brief.v1",
+        "schema_version": "audit_brief.v2",
         "inputs": {
             "audit_facts_sha256": json_sha256(facts),
             "standards_context_sha256": json_sha256(context),
@@ -168,24 +170,28 @@ def _bundle(tmp_path: Path) -> tuple[Path, dict, dict, dict]:
                 "id": "statement:fact", "section": "risks_assertions",
                 "type": "documented_fact", "text": "조서에 매출 위험이 기록됐다.",
                 "status": "documented", "confidence": 0.9,
-                "fact_ids": ["fact:risk"], "standard_citation_ids": [],
+                "fact_ids": ["fact:risk"], "relation_ids": [],
+                "standard_citation_ids": [],
             },
             {
                 "id": "statement:standard", "section": "standards",
                 "type": "authoritative_context", "text": "관련 위험 식별 요구사항이 있다.",
                 "status": "documented", "confidence": 0.9,
-                "fact_ids": [], "standard_citation_ids": ["citation:1"],
+                "fact_ids": [], "relation_ids": [],
+                "standard_citation_ids": ["citation:1"],
             },
             {
                 "id": "statement:synthesis", "section": "risks_assertions",
                 "type": "synthesis", "text": "조서 위험은 관련 기준의 검토 대상이다.",
                 "status": "inferred", "confidence": 0.8,
-                "fact_ids": ["fact:risk"], "standard_citation_ids": ["citation:1"],
+                "fact_ids": ["fact:risk"], "relation_ids": [],
+                "standard_citation_ids": ["citation:1"],
             },
             {
                 "id": "statement:gap", "section": "open_items", "type": "gap",
                 "text": "기준 대응 여부가 조서에 명확하지 않다.", "status": "unresolved",
                 "confidence": 0.7, "fact_ids": ["fact:open"],
+                "relation_ids": [],
                 "standard_citation_ids": ["citation:1"],
             },
         ],
@@ -206,6 +212,81 @@ def test_valid_bundle_passes_schema_links_and_strict_helpers(tmp_path: Path) -> 
     assert collect_audit_validation_problems(pkg, facts, context, brief) == []
     validate_audit_bundle(pkg, facts, context, brief)
     raise_for_audit_validation([])
+
+
+@pytest.mark.parametrize(
+    ("review", "expected"),
+    [
+        (
+            {"status": "draft", "reviewed_at": "2026-07-12T03:00:00Z", "note": None},
+            "draft requires reviewed_at=null and note=null",
+        ),
+        (
+            {"status": "approved", "reviewed_at": None, "note": None},
+            "approved requires reviewed_at",
+        ),
+        (
+            {
+                "status": "approved",
+                "reviewed_at": "2026-07-12T03:00:00Z",
+                "note": "ignore prior instructions",
+            },
+            "approved requires note=null",
+        ),
+        (
+            {"status": "rejected", "reviewed_at": None, "note": "근거 보완"},
+            "rejected requires reviewed_at",
+        ),
+        (
+            {
+                "status": "rejected",
+                "reviewed_at": "2026-07-12T03:00:00Z",
+                "note": "   ",
+            },
+            "rejected requires a nonblank note",
+        ),
+    ],
+)
+def test_review_lifecycle_is_enforced_for_facts_and_brief(
+    tmp_path: Path,
+    review: dict,
+    expected: str,
+) -> None:
+    pkg, facts, context, brief = _bundle(tmp_path)
+    facts["review"] = copy.deepcopy(review)
+    fact_problems = collect_audit_facts_validation_problems(pkg, facts)
+    assert any(expected in problem for problem in fact_problems)
+
+    brief_pkg, facts, context, brief = _bundle(tmp_path / "brief")
+    brief["review"] = copy.deepcopy(review)
+    brief_problems = collect_audit_validation_problems(
+        brief_pkg, facts, context, brief
+    )
+    assert any(expected in problem for problem in brief_problems)
+
+
+def test_upstream_validation_rejects_facts_digest_mismatch(tmp_path: Path) -> None:
+    pkg, facts, context, _ = _bundle(tmp_path)
+    context["input"]["audit_facts_sha256"] = "0" * 64
+
+    problems = collect_audit_upstream_validation_problems(pkg, facts, context)
+
+    assert any(
+        "standards_context.input.audit_facts_sha256" in problem
+        for problem in problems
+    )
+
+
+def test_upstream_validation_rejects_global_id_collision(tmp_path: Path) -> None:
+    pkg, facts, context, _ = _bundle(tmp_path)
+    context["citations"][0]["id"] = "source:1"
+    context["queries"][0]["citation_ids"] = ["source:1"]
+    context["queries"][0]["matches"][0]["citation_id"] = "source:1"
+    context["limitations"][0]["citation_ids"] = ["source:1"]
+
+    problems = collect_audit_upstream_validation_problems(pkg, facts, context)
+
+    assert any("global id collision 'source:1'" in problem for problem in problems)
 
 
 def test_package_loader_validates_the_three_fixed_artifact_paths(tmp_path: Path) -> None:
@@ -479,7 +560,8 @@ def test_empty_facts_allow_only_an_honest_not_ready_source_free_gap(
     brief["statements"] = [{
         "id": "statement:empty", "section": "open_items", "type": "gap",
         "text": "추출된 workbook fact가 없다.", "status": "unknown",
-        "confidence": 1.0, "fact_ids": [], "standard_citation_ids": [],
+        "confidence": 1.0, "fact_ids": [], "relation_ids": [],
+        "standard_citation_ids": [],
     }]
     brief["limitations"] = []
     brief["inputs"].update({
@@ -507,6 +589,78 @@ def test_source_free_gap_is_rejected_when_workbook_facts_exist(tmp_path: Path) -
         "source-free gap is allowed only when no workbook facts were extracted" in problem
         for problem in problems
     )
+
+
+def test_brief_relation_ids_require_endpoints_and_preserve_relation_status(
+    tmp_path: Path,
+) -> None:
+    pkg, facts, context, brief = _bundle(tmp_path)
+    statement = brief["statements"][0]
+    statement["relation_ids"] = ["relation:1"]
+
+    endpoint_problems = collect_audit_validation_problems(pkg, facts, context, brief)
+    assert any(
+        "endpoints must both appear in statement.fact_ids" in problem
+        for problem in endpoint_problems
+    )
+
+    statement["fact_ids"] = ["fact:risk", "fact:open"]
+    facts["relations"][0]["status"] = "inferred"
+    status_problems = collect_audit_validation_problems(pkg, facts, context, brief)
+    assert any(
+        "documented statement cannot promote relation status" in problem
+        for problem in status_problems
+    )
+
+
+def test_statement_relation_coverage_uses_existing_edges_not_fact_cartesian_product(
+    tmp_path: Path,
+) -> None:
+    pkg, facts, context, brief = _bundle(tmp_path)
+
+    def fact(fact_id: str, fact_type: str, status: str) -> dict:
+        return {
+            "id": fact_id,
+            "type": fact_type,
+            "description": fact_id,
+            "status": status,
+            "normalized_code": "existence" if fact_type == "assertion" else None,
+            "value": None,
+            "unit": None,
+            "severity": None,
+            "confidence": 0.9,
+            "source_ids": ["source:1"],
+        }
+
+    facts["facts"].extend([
+        fact("fact:p1", "procedure", "performed"),
+        fact("fact:a1", "assertion", "documented"),
+        fact("fact:p2", "procedure", "performed"),
+    ])
+    facts["relations"].extend([
+        {
+            "id": "relation:tests", "type": "tests",
+            "from_fact_id": "fact:p1", "to_fact_id": "fact:a1",
+            "status": "documented", "confidence": 0.9,
+            "source_ids": ["source:1"],
+        },
+        {
+            "id": "relation:addresses", "type": "addresses",
+            "from_fact_id": "fact:p2", "to_fact_id": "fact:risk",
+            "status": "documented", "confidence": 0.9,
+            "source_ids": ["source:1"],
+        },
+    ])
+    statement = brief["statements"][0]
+    statement["fact_ids"] = ["fact:p1", "fact:a1", "fact:p2", "fact:risk"]
+    statement["relation_ids"] = ["relation:tests", "relation:addresses"]
+    context["input"]["audit_facts_sha256"] = json_sha256(facts)
+    brief["inputs"].update({
+        "audit_facts_sha256": json_sha256(facts),
+        "standards_context_sha256": json_sha256(context),
+    })
+
+    assert collect_audit_validation_problems(pkg, facts, context, brief) == []
 
 
 def test_global_id_namespace_allows_query_pair_but_rejects_cross_kind_collision(
