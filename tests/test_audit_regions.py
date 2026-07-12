@@ -50,6 +50,30 @@ def test_regions_cover_every_cell_and_preserve_sheet_order(tmp_path: Path) -> No
     assert len({c["cell"] + r.sheet for r in regions for c in r.cells}) == len(cells)
 
 
+def test_regions_can_limit_coverage_to_selected_sheets(tmp_path: Path) -> None:
+    cells = [
+        _cell("First", 1, 1, value="first"),
+        _cell("Second", 1, 1, value="second"),
+    ]
+    pkg = _package(tmp_path, cells, ["First", "Second"])
+
+    regions = build_regions(pkg, sheet_names=["Second"])
+
+    assert [region.sheet for region in regions] == ["Second"]
+    assert [cell["value"] for region in regions for cell in region.cells] == ["second"]
+
+
+def test_regions_reject_unknown_or_duplicate_sheet_selection(tmp_path: Path) -> None:
+    pkg = _package(tmp_path, [_cell("Known", 1, 1, value="value")])
+
+    with pytest.raises(ValueError, match="없는 시트"):
+        build_regions(pkg, sheet_names=["Missing"])
+    with pytest.raises(ValueError, match="중복"):
+        build_regions(pkg, sheet_names=["Known", "Known"])
+    with pytest.raises(ValueError, match="목록"):
+        build_regions(pkg, sheet_names="Known")
+
+
 def test_regions_split_on_cell_and_row_span_caps(tmp_path: Path) -> None:
     cells = [_cell("S", row, 1, value=row) for row in range(1, 7)]
     regions = build_regions(

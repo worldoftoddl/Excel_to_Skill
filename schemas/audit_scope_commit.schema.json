@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Sheet-scoped audit bundle commit marker",
+  "description": "Final commit marker for one independently prepared worksheet audit bundle. The marker binds the exact sheet scope, current deterministic workbook inputs, and all three prepared artifact keys.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "scope",
+    "inputs",
+    "present",
+    "status",
+    "version",
+    "facts_key",
+    "standards_key",
+    "brief_key",
+    "prepared_at",
+    "review_status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "audit_scope_commit.v1"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sheet", "id"],
+      "properties": {
+        "kind": {"const": "sheet"},
+        "sheet": {"type": "string", "minLength": 1},
+        "id": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workbook_sha256", "cells_sha256"],
+      "properties": {
+        "workbook_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "cells_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "present": {"const": true},
+    "status": {"enum": ["ready", "partial", "not_ready"]},
+    "version": {"type": "string", "minLength": 1},
+    "facts_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "standards_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "brief_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "prepared_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "review_status": {"enum": ["draft", "approved", "rejected"]}
+  }
+}

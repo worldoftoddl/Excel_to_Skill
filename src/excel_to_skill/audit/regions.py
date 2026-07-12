@@ -12,6 +12,7 @@ never become part of the region's source boundary.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -305,6 +306,7 @@ def build_regions(
     row_gap: int = DEFAULT_ROW_GAP,
     max_context_rows: int = DEFAULT_MAX_CONTEXT_ROWS,
     max_context_cells: int = DEFAULT_MAX_CONTEXT_CELLS,
+    sheet_names: Sequence[str] | None = None,
 ) -> list[AuditRegion]:
     """Partition every ledger cell into stable, non-overlapping worksheet regions.
 
@@ -328,6 +330,21 @@ def build_regions(
     meta = _load_meta(pkg)
     cells = _load_cells(pkg)
     sheet_order = [s.get("name") for s in meta.get("sheets", []) if isinstance(s, dict)]
+    if sheet_names is not None:
+        if isinstance(sheet_names, (str, bytes)):
+            raise ValueError("sheet_names는 문자열 하나가 아니라 시트명 목록이어야 합니다.")
+        selected = tuple(sheet_names)
+        if not selected or any(not isinstance(name, str) or not name for name in selected):
+            raise ValueError("sheet_names는 비어 있지 않은 시트명 목록이어야 합니다.")
+        if len(set(selected)) != len(selected):
+            raise ValueError("sheet_names에 중복 시트명이 있습니다.")
+        known = {name for name in sheet_order if isinstance(name, str)}
+        unknown = sorted(set(selected) - known)
+        if unknown:
+            raise ValueError(f"meta.json에 없는 시트입니다: {unknown}")
+        selected_set = set(selected)
+        sheet_order = [name for name in sheet_order if name in selected_set]
+        cells = [cell for cell in cells if cell["sheet"] in selected_set]
     grouped: dict[str, list[dict]] = {name: [] for name in sheet_order if isinstance(name, str)}
     for cell in cells:
         grouped.setdefault(cell["sheet"], []).append(cell)

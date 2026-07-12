@@ -8,8 +8,9 @@ import pytest
 
 from excel_to_skill import cache
 from excel_to_skill.audit.prepare import AuditPrepareError, prepare_package
+from excel_to_skill.audit.scope import bundle_paths, load_scope_bundle, resolve_scope
 from excel_to_skill.audit.consume import audit_get, audit_search, brief, trace
-from excel_to_skill.audit.standards import StandardHit
+from excel_to_skill.audit.standards import StandardHit, StandardsQueryError
 from excel_to_skill.audit.validate import validate_audit_package
 from excel_to_skill.cli import _convert_one, main
 from excel_to_skill.meta import _converter_version
@@ -92,6 +93,7 @@ class FailingRetriever:
 class PipelineClient:
     def __init__(self, *, fail_brief: bool = False) -> None:
         self.calls: list[str] = []
+        self.brief_users: list[str] = []
         self.fact_id: str | None = None
         self.fail_brief = fail_brief
 
@@ -145,6 +147,7 @@ class PipelineClient:
             }
         if "readiness" in properties:
             self.calls.append("brief")
+            self.brief_users.append(user)
             if self.fail_brief:
                 raise RuntimeError("brief unavailable")
             if self.fact_id is None:
@@ -239,6 +242,7 @@ def test_prepare_builds_and_validates_three_layer_bundle(tmp_path: Path) -> None
 
     assert result.cached is False and result.status == "ready"
     assert client.calls == ["region", "consolidate", "brief"]
+    assert "# analysis_scope" not in client.brief_users[0]
     assert len(retriever.calls) == 1
     assert all(path.is_file() for path in (
         result.facts_path, result.standards_path, result.brief_path
@@ -295,6 +299,238 @@ def test_prepare_full_cache_hit_calls_neither_model_nor_retriever(tmp_path: Path
     assert result.cached is True
     assert (pkg / "SKILL.md").is_file()
     assert "감사조서 Brief" in (pkg / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_prepare_sheet_publishes_independent_committed_bundle(
+    tmp_path: Path,
+) -> None:
+    pkg = _package(tmp_path)
+    meta_before = (pkg / "meta.json").read_bytes()
+    skill_before = (pkg / "SKILL.md").read_bytes()
+    client = PipelineClient()
+    retriever = StubRetriever()
+
+    result = prepare_package(
+        pkg,
+        sheet="Data",
+        client=client,
+        retriever=retriever,
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at=_WHEN,
+    )
+
+    scope = resolve_scope(pkg, sheet="Data")
+    paths = bundle_paths(pkg, scope)
+    assert result.scope == scope
+    assert (result.facts_path, result.standards_path, result.brief_path) == paths.artifacts
+    assert client.calls == ["region", "consolidate", "brief"]
+    assert "# analysis_scope (application-enforced)" in client.brief_users[0]
+    assert '"only_selected_sheet_observed":true' in client.brief_users[0]
+    assert '"observed_sheets":["Data"]' in client.brief_users[0]
+    assert '"dependency_sheet_contents_observed":false' in client.brief_users[0]
+    assert "Do not make workbook-wide conclusions" in client.brief_users[0]
+    assert len(retriever.calls) == 1
+    assert paths.commit.is_file()
+    loaded = load_scope_bundle(pkg, scope)
+    assert loaded is not None and loaded[0] == paths
+    facts = loaded[1]
+    assert {source["sheet"] for source in facts["sources"]} == {"Data"}
+    assert (pkg / "meta.json").read_bytes() == meta_before
+    assert (pkg / "SKILL.md").read_bytes() == skill_before
+    assert cache.get_audit(pkg.parent, pkg.name) is None
+    scoped_cache = cache.get_audit_scope(pkg.parent, pkg.name, scope.id)
+    assert scoped_cache is not None
+    assert scoped_cache["facts_key"] == loaded[4]["facts_key"]
+    assert all(len(scoped_cache[key]) == 64 for key in (
+        "facts_recipe_key", "standards_recipe_key", "brief_recipe_key"
+    ))
+
+
+def test_prepare_sheet_cache_hit_uses_no_provider_and_never_repairs_root_skill(
+    tmp_path: Path,
+) -> None:
+    pkg = _package(tmp_path)
+    first = prepare_package(
+        pkg,
+        sheet="Data",
+        client=PipelineClient(),
+        retriever=StubRetriever(),
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at=_WHEN,
+    )
+    (pkg / "SKILL.md").write_text("user root view\n", encoding="utf-8")
+    meta_before = (pkg / "meta.json").read_bytes()
+    skill_before = (pkg / "SKILL.md").read_bytes()
+
+    def exploding_factory():
+        raise AssertionError("model client must not be built on a sheet cache hit")
+
+    second = prepare_package(
+        pkg,
+        sheet="Data",
+        client=None,
+        client_factory=exploding_factory,
+        retriever=None,
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+    )
+
+    assert first.cached is False and second.cached is True
+    assert second.scope == first.scope
+    assert (pkg / "meta.json").read_bytes() == meta_before
+    assert (pkg / "SKILL.md").read_bytes() == skill_before
+
+
+def test_prepare_sheet_does_not_mutate_existing_workbook_bundle(
+    tmp_path: Path,
+) -> None:
+    pkg = _package(tmp_path)
+    workbook = prepare_package(
+        pkg,
+        client=PipelineClient(),
+        retriever=StubRetriever(),
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at=_WHEN,
+    )
+    root_paths = [
+        workbook.facts_path,
+        workbook.standards_path,
+        workbook.brief_path,
+        pkg / "meta.json",
+        pkg / "SKILL.md",
+    ]
+    before = {path: path.read_bytes() for path in root_paths}
+    root_cache = cache.get_audit(pkg.parent, pkg.name)
+
+    scoped = prepare_package(
+        pkg,
+        sheet="Data",
+        client=PipelineClient(),
+        retriever=StubRetriever(),
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at=_WHEN,
+    )
+
+    assert scoped.scope.kind == "sheet"
+    assert {path: path.read_bytes() for path in root_paths} == before
+    assert cache.get_audit(pkg.parent, pkg.name) == root_cache
+    assert cache.get_audit_scope(pkg.parent, pkg.name, scoped.scope.id) is not None
+
+
+def test_failed_force_sheet_prepare_preserves_prior_scope_and_root_views(
+    tmp_path: Path,
+) -> None:
+    pkg = _package(tmp_path)
+    first = prepare_package(
+        pkg,
+        sheet="Data",
+        client=PipelineClient(),
+        retriever=StubRetriever(),
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at=_WHEN,
+    )
+    paths = bundle_paths(pkg, first.scope)
+    protected = [*paths.artifacts, paths.commit, pkg / "meta.json", pkg / "SKILL.md"]
+    before = {path: path.read_bytes() for path in protected}
+
+    with pytest.raises(AuditPrepareError, match="brief unavailable"):
+        prepare_package(
+            pkg,
+            sheet="Data",
+            client=PipelineClient(fail_brief=True),
+            retriever=StubRetriever(corpus_version="2026.2"),
+            retriever_descriptor={**_DESCRIPTOR, "corpus_version": "2026.2"},
+            model="stub-model",
+            force=True,
+            generated_at="2026-07-12T00:00:00Z",
+        )
+
+    assert {path: path.read_bytes() for path in protected} == before
+    assert load_scope_bundle(pkg, first.scope) is not None
+
+
+def test_sheet_commit_failure_rolls_back_all_artifacts_and_marker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import excel_to_skill.audit.prepare as prepare_module
+
+    pkg = _package(tmp_path)
+    first = prepare_package(
+        pkg,
+        sheet="Data",
+        client=PipelineClient(),
+        retriever=StubRetriever(),
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at=_WHEN,
+    )
+    paths = bundle_paths(pkg, first.scope)
+    protected = [*paths.artifacts, paths.commit, pkg / "meta.json", pkg / "SKILL.md"]
+    before = {path: path.read_bytes() for path in protected}
+
+    def fail_final_commit(*args, **kwargs):
+        assert all(path.read_bytes() != before[path] for path in paths.artifacts)
+        raise OSError("injected scope commit failure")
+
+    monkeypatch.setattr(prepare_module, "write_scope_commit_atomic", fail_final_commit)
+    with pytest.raises(AuditPrepareError, match="scope commit failure"):
+        prepare_module.prepare_package(
+            pkg,
+            sheet="Data",
+            client=PipelineClient(),
+            retriever=StubRetriever(corpus_version="2026.2"),
+            retriever_descriptor={**_DESCRIPTOR, "corpus_version": "2026.2"},
+            model="stub-model",
+            force=True,
+            generated_at="2026-07-12T00:00:00Z",
+        )
+
+    assert {path: path.read_bytes() for path in protected} == before
+    assert load_scope_bundle(pkg, first.scope) is not None
+
+
+def test_concurrent_sheet_prepare_serializes_to_one_publish_and_one_cache_hit(
+    tmp_path: Path,
+) -> None:
+    pkg = _package(tmp_path)
+    barrier = threading.Barrier(2)
+    clients = [PipelineClient(), PipelineClient()]
+    retrievers = [StubRetriever(), StubRetriever()]
+    results = []
+    errors: list[BaseException] = []
+
+    def run(index: int) -> None:
+        try:
+            barrier.wait(timeout=5)
+            results.append(prepare_package(
+                pkg,
+                sheet="Data",
+                client=clients[index],
+                retriever=retrievers[index],
+                retriever_descriptor=_DESCRIPTOR,
+                model="stub-model",
+                generated_at=_WHEN,
+            ))
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(result.cached for result in results) == [False, True]
+    assert sum(len(client.calls) for client in clients) == 3
+    assert sum(len(retriever.calls) for retriever in retrievers) == 1
+    assert load_scope_bundle(pkg, results[0].scope) is not None
 
 
 def test_corrupt_non_authoritative_index_is_a_cache_miss_and_is_rebuilt(
@@ -503,8 +739,8 @@ def test_brief_version_change_reuses_facts_and_standards(
     )
     facts_before = (pkg / "data/audit_facts.json").read_bytes()
     context_before = (pkg / "data/standards_context.json").read_bytes()
-    monkeypatch.setattr(brief_module, "BRIEF_VERSION", "0.5.0")
-    monkeypatch.setattr(prepare_module, "BRIEF_VERSION", "0.5.0")
+    monkeypatch.setattr(brief_module, "BRIEF_VERSION", "0.6.0")
+    monkeypatch.setattr(prepare_module, "BRIEF_VERSION", "0.6.0")
     client = PipelineClient()
 
     class ExplodingRetriever:
@@ -525,7 +761,7 @@ def test_brief_version_change_reuses_facts_and_standards(
     assert (pkg / "data/audit_facts.json").read_bytes() == facts_before
     assert (pkg / "data/standards_context.json").read_bytes() == context_before
     brief_doc = json.loads(result.brief_path.read_text(encoding="utf-8"))
-    assert brief_doc["generator"]["version"] == "0.5.0"
+    assert brief_doc["generator"]["version"] == "0.6.0"
 
 
 def test_schema_stale_brief_reuses_valid_facts_and_standards(tmp_path: Path) -> None:
@@ -684,6 +920,44 @@ def test_error_context_is_retried_while_facts_are_reused(tmp_path: Path) -> None
         model="stub-model",
     )
     assert third.cached is True
+
+
+def test_retrieval_capped_context_is_a_stable_partial_cache_hit(
+    tmp_path: Path,
+) -> None:
+    class CappedRetriever:
+        def search(self, *args, **kwargs):
+            raise StandardsQueryError(
+                "prepare 전체 unique citation 상한을 초과했습니다.",
+                limitation_code="retrieval_capped",
+            )
+
+    pkg = _package(tmp_path)
+    first = prepare_package(
+        pkg,
+        client=PipelineClient(),
+        retriever=CappedRetriever(),
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+        generated_at=_WHEN,
+    )
+    context = json.loads(first.standards_path.read_text(encoding="utf-8"))
+    assert context["queries"][0]["status"] == "error"
+    assert any(
+        limitation["code"] == "retrieval_capped"
+        for limitation in context["limitations"]
+    )
+
+    second = prepare_package(
+        pkg,
+        client_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("stable capped context must not build a model client")
+        ),
+        retriever=None,
+        retriever_descriptor=_DESCRIPTOR,
+        model="stub-model",
+    )
+    assert second.cached is True
 
 
 def test_prepare_version_change_invalidates_cache(tmp_path: Path, monkeypatch) -> None:

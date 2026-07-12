@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -520,6 +521,7 @@ def extract_audit_facts(
     row_gap: int = DEFAULT_ROW_GAP,
     max_context_rows: int = DEFAULT_MAX_CONTEXT_ROWS,
     max_context_cells: int = DEFAULT_MAX_CONTEXT_CELLS,
+    sheet_names: Sequence[str] | None = None,
 ) -> dict:
     """Create and persist ``audit_facts.json`` using only workbook-region observations.
 
@@ -545,6 +547,7 @@ def extract_audit_facts(
         row_gap=row_gap,
         max_context_rows=max_context_rows,
         max_context_cells=max_context_cells,
+        sheet_names=sheet_names,
     )
 
     sources_by_id: dict[str, dict] = {}
@@ -573,21 +576,37 @@ def extract_audit_facts(
         "format": source_meta.get("format"),
     }
     sources = sorted(sources_by_id.values(), key=lambda item: item["id"])
+    selected_sheets = (
+        None if sheet_names is None else tuple(dict.fromkeys(sheet_names))
+    )
+    consolidation_payload = {
+        "source": source,
+        "sheets": [
+            {"name": sheet.get("name"), "dimensions": sheet.get("dimensions")}
+            for sheet in meta.get("sheets", [])
+            if isinstance(sheet, dict)
+            and (
+                selected_sheets is None
+                or sheet.get("name") in selected_sheets
+            )
+        ],
+        "regions": region_summaries,
+        "facts": facts,
+        "sources": sources,
+        "limitations": limitations,
+    }
+    # Keep the historical workbook prompt byte-for-byte compatible.  The explicit boundary
+    # marker is needed only for a selected scope, where it makes the prohibition on cross-sheet
+    # synthesis unambiguous to the consolidation model.
+    if selected_sheets is not None:
+        consolidation_payload["analysis_scope"] = {
+            "kind": "sheet",
+            "sheet_names": list(selected_sheets),
+        }
     consolidation = _call_and_validate(
         client,
         system=consolidate_prompt,
-        user_payload={
-            "source": source,
-            "sheets": [
-                {"name": sheet.get("name"), "dimensions": sheet.get("dimensions")}
-                for sheet in meta.get("sheets", [])
-                if isinstance(sheet, dict)
-            ],
-            "regions": region_summaries,
-            "facts": facts,
-            "sources": sources,
-            "limitations": limitations,
-        },
+        user_payload=consolidation_payload,
         schema=_consolidation_response_schema(audit_schema),
         label="workbook consolidation",
     )

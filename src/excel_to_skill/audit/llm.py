@@ -35,6 +35,8 @@ def _validation_error_summary(error: Exception) -> str:
             detail = "value is not in the allowed enum"
         elif validator == "pattern":
             detail = "string does not match the required pattern"
+        elif validator in {"minItems", "maxItems"}:
+            detail = f"array item count violates {validator}={error.validator_value}"
         elif validator in {"oneOf", "anyOf", "allOf"}:
             detail = f"value does not satisfy {validator}"
         else:

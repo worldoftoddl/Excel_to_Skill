@@ -249,6 +249,37 @@ def test_extract_normalizes_empty_optional_standard_numbers(tmp_path: Path) -> N
     ]["minItems"] == 0
 
 
+def test_extract_sheet_scope_never_sends_other_sheet_to_model(tmp_path: Path) -> None:
+    pkg = _package(tmp_path)
+    meta = json.loads((pkg / "meta.json").read_text(encoding="utf-8"))
+    meta["sheets"].append({"name": "Other", "dimensions": "A1:A1"})
+    (pkg / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+    )
+    with (pkg / "data" / "cells.jsonl").open("a", encoding="utf-8") as file:
+        file.write(json.dumps({
+            "sheet": "Other", "cell": "A1", "row": 1, "col": 1,
+            "value": "분석하면 안 되는 다른 계정", "formula": None,
+        }, ensure_ascii=False) + "\n")
+    client = StubExtractionClient()
+
+    document = extract_audit_facts(
+        pkg,
+        client=client,
+        sheet_names=["Main"],
+    )
+
+    region_calls = client.calls[:-1]
+    assert len(region_calls) == 2
+    assert {call["payload"]["sheet"] for call in region_calls} == {"Main"}
+    consolidation = client.calls[-1]["payload"]
+    assert consolidation["analysis_scope"] == {
+        "kind": "sheet", "sheet_names": ["Main"],
+    }
+    assert consolidation["sheets"] == [{"name": "Main", "dimensions": "A1:B10"}]
+    assert {source["sheet"] for source in document["sources"]} == {"Main"}
+
+
 def test_extract_rejects_real_ledger_address_outside_observed_region(
     tmp_path: Path,
 ) -> None:

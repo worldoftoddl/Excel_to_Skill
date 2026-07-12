@@ -21,7 +21,7 @@ from excel_to_skill.audit.agent import (
 from excel_to_skill.audit.llm import load_schema
 from excel_to_skill.cli import _cmd_audit_agent
 
-from test_audit_consume_gate import _write_committed_bundle
+from test_audit_consume_gate import _commit_sheet_bundle, _write_committed_bundle
 
 
 class StubClient:
@@ -68,7 +68,8 @@ def test_agent_turn_schema_is_packaged_and_strict() -> None:
     assert selection["additionalProperties"] is False
     assert selection["required"] == ["kind", "ids"]
     response_schema = load_schema("audit_agent_response.schema.json")
-    assert response_schema["title"] == "audit_agent_response.v1"
+    assert response_schema["title"] == "audit_agent_response.v2"
+    assert "scope" in response_schema["definitions"]["bundle"]["required"]
     assert response_schema["additionalProperties"] is False
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(
@@ -120,6 +121,7 @@ def test_agent_briefing_hydrates_cells_and_standards_and_marks_draft(
 
     assert response["mode"] == "briefing" and response["question"] is None
     assert response["bundle"]["workbook_sha256"] == "a" * 64
+    assert response["bundle"]["scope"] == {"kind": "workbook"}
     assert len(response["bundle"]["brief_key"]) == 64
     assert response["trust"]["source_facts_review_status"] == "draft"
     assert response["trust"]["source_brief_review_status"] == "draft"
@@ -152,6 +154,7 @@ def test_agent_briefing_hydrates_cells_and_standards_and_marks_draft(
     }
     assert len(client.calls) == 1
     assert "workbook cell" in client.calls[0]["system"]
+    assert "analysis_scope" not in json.loads(client.calls[0]["user"])
 
     rendered = render_audit_agent_markdown(response)
     assert "# 위험평가 브리핑" in rendered
@@ -162,6 +165,52 @@ def test_agent_briefing_hydrates_cells_and_standards_and_marks_draft(
     assert "KSA-315::26 (2026.1)" in rendered
     assert "기준서 원문 발췌(citation:1)" in rendered
     assert "중요한 거래유형" in rendered
+
+
+def test_agent_is_bound_to_one_committed_sheet_scope(tmp_path: Path) -> None:
+    pkg, facts, context, brief_doc = _write_committed_bundle(tmp_path)
+    scope = _commit_sheet_bundle(pkg, facts, context, brief_doc)
+    client = StubClient([_grounded_final()])
+
+    response = run_audit_agent(
+        pkg, sheet="Main", client=client, model="stub-model"
+    )
+
+    assert response["bundle"]["scope"] == scope.identity()
+    model_payload = json.loads(client.calls[0]["user"])
+    assert model_payload["analysis_scope"]["scope"] == scope.identity()
+    assert model_payload["analysis_scope"]["observed_sheets"] == ["Main"]
+    assert model_payload["analysis_scope"]["only_selected_sheet_observed"] is True
+    assert (
+        model_payload["analysis_scope"]["dependency_sheet_contents_observed"]
+        is False
+    )
+    assert "Do not make workbook-wide conclusions" in (
+        model_payload["analysis_scope"]["interpretation_rule"]
+    )
+    assert "분석 범위: 시트 Main" in render_audit_agent_markdown(response)
+
+
+def test_sheet_agent_fails_if_scope_commit_changes_during_turn(
+    tmp_path: Path,
+) -> None:
+    pkg, facts, context, brief_doc = _write_committed_bundle(tmp_path)
+    scope = _commit_sheet_bundle(pkg, facts, context, brief_doc)
+
+    class MutatingClient:
+        def __call__(self, **_kwargs):
+            from excel_to_skill.audit.scope import bundle_paths
+
+            commit_path = bundle_paths(pkg, scope).commit
+            commit = json.loads(commit_path.read_text(encoding="utf-8"))
+            commit["brief_key"] = "0" * 64
+            commit_path.write_text(json.dumps(commit), encoding="utf-8")
+            return _grounded_final()
+
+    with pytest.raises(AuditAgentError, match="변경"):
+        run_audit_agent(
+            pkg, sheet="Main", client=MutatingClient(), model="stub-model"
+        )
 
 
 def test_agent_can_use_a_read_only_tool_before_final_answer(tmp_path: Path) -> None:
@@ -685,5 +734,5 @@ def test_cli_agent_supports_markdown_and_json(tmp_path: Path, capsys) -> None:
     args.json = True
     assert _cmd_audit_agent(args, client_factory=lambda: StubClient([_grounded_final()])) == 0
     document = json.loads(capsys.readouterr().out)
-    assert document["schema_version"] == "audit_agent_response.v1"
+    assert document["schema_version"] == "audit_agent_response.v2"
     assert document["answer"]["claims"]

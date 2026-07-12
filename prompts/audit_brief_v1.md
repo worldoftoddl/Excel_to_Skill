@@ -36,6 +36,8 @@ You create an agent-ready brief from two already-structured inputs:
 
 Lead with workpaper identity and purpose, then risks/assertions, controls/procedures, results,
 findings, conclusions, open items, sign-offs, and only the standards context that materially helps
-the user interpret those workbook facts. Keep the summary concise and action-oriented.
+the user interpret those workbook facts. Keep the summary concise and action-oriented. Return at
+most 24 statements. Combine closely related or repeated template procedures into a smaller number
+of grounded statements with multiple exact fact/relation IDs; do not enumerate every example row.
 
 Return one JSON object matching the supplied schema. Return no prose or code fence.

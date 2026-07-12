@@ -6,15 +6,118 @@ from collections import deque
 import pytest
 
 from excel_to_skill.audit.brief import (
+    MAX_MODEL_LIMITATIONS,
+    MAX_MODEL_STATEMENTS,
+    _output_schema,
     _drop_unsupported_standard_reference_statements,
     _validate_authored_standard_references,
     build_audit_brief,
 )
-from excel_to_skill.audit.llm import AuditLLMError
+from excel_to_skill.audit.llm import AuditLLMError, load_schema
 from excel_to_skill.audit.model import json_sha256
 
 
 _SHA = "a" * 64
+
+
+def test_model_authored_brief_schema_is_bounded_for_large_templates() -> None:
+    full = load_schema("audit_brief.schema.json")
+    provider = _output_schema(full)
+
+    assert provider["properties"]["statements"]["maxItems"] == MAX_MODEL_STATEMENTS
+    assert provider["properties"]["limitations"]["maxItems"] == MAX_MODEL_LIMITATIONS
+    assert "maxItems" not in (
+        provider["definitions"]["briefStatement"]["properties"]["fact_ids"]
+    )
+    # The persisted contract remains capable of deterministic integrity completion beyond the
+    # model-output budget.
+    assert "maxItems" not in full["properties"]["statements"]
+
+
+def test_brief_drops_whole_statement_with_unknown_or_mixed_evidence() -> None:
+    facts = _facts()
+    context = _context(facts)
+    context["citations"] = [{"id": "standard:context"}]
+    authored = copy.deepcopy(_authored())
+    authoritative = {
+        "id": "brief:standard",
+        "section": "standards",
+        "type": "authoritative_context",
+        "text": "관련 기준서 문맥이 별도로 제공된다.",
+        "status": "documented",
+        "confidence": 0.9,
+        "fact_ids": ["fact:purpose", "fact:invented"],
+        "relation_ids": ["relation:invented"],
+        "standard_citation_ids": ["standard:context"],
+    }
+    authored["statements"].append(authoritative)
+    authored["summary"]["statement_ids"].append(authoritative["id"])
+    authored["workpaper"]["fact_ids"].append("fact:invented")
+
+    brief = build_audit_brief(
+        facts,
+        context,
+        client=StubClient([authored]),
+        model="stub",
+        generated_at="2026-07-11T00:00:00Z",
+    )
+
+    assert {statement["id"] for statement in brief["statements"]} == {
+        "brief:purpose"
+    }
+    assert brief["summary"]["statement_ids"] == ["brief:purpose"]
+    assert "fact:invented" not in brief["workpaper"]["fact_ids"]
+
+
+def test_brief_normalizes_planned_statement_status_to_persisted_enum() -> None:
+    facts = _facts()
+    facts["facts"][0]["status"] = "planned"
+    context = _context(facts)
+    context["citations"] = [{"id": "standard:context"}]
+    authored = _authored()
+    authored["statements"][0].update({
+        "type": "synthesis",
+        "status": "planned",
+        "standard_citation_ids": ["standard:context"],
+    })
+
+    brief = build_audit_brief(
+        facts,
+        context,
+        client=StubClient([authored]),
+        model="stub",
+        generated_at="2026-07-11T00:00:00Z",
+    )
+
+    assert brief["statements"][0]["status"] == "not_documented"
+
+
+def test_brief_retries_when_normalized_statement_still_violates_type_contract() -> None:
+    facts = _facts()
+    context = _context(facts)
+    context["citations"] = [{"id": "standard:context"}]
+    invalid = _authored()
+    invalid["statements"][0].update({
+        "section": "open_items",
+        "type": "gap",
+        "status": "documented",
+        "standard_citation_ids": ["standard:context"],
+    })
+    corrected = copy.deepcopy(invalid)
+    corrected["statements"][0]["status"] = "unresolved"
+    client = StubClient([invalid, corrected])
+
+    brief = build_audit_brief(
+        facts,
+        context,
+        client=client,
+        model="stub",
+        generated_at="2026-07-11T00:00:00Z",
+    )
+
+    assert len(client.calls) == 2
+    assert "[재시도]" in client.calls[1]["user"]
+    assert brief["statements"][0]["status"] == "unresolved"
 
 
 def _facts() -> dict:

@@ -25,10 +25,20 @@ from .consume import (
 )
 from .contract import bundle_keys
 from .llm import AuditLLMError, call_json, load_prompt, load_schema
+from .scope import (
+    AuditScope,
+    AuditScopeError,
+    WORKBOOK_SCOPE,
+    read_scope_commit,
+    resolve_scope,
+    sheet_model_context,
+    scope_bundle_keys,
+    validate_scope_commit,
+)
 from .sources import WorkbookSourceResolver
 
 
-AGENT_VERSION = "0.2.0"  # extractive selections, relation grounding, bounded hydration
+AGENT_VERSION = "0.3.0"  # scope-bound extractive selections and bounded hydration
 AGENT_PROMPT = "audit_agent_v1.md"
 AGENT_TURN_SCHEMA = "audit_agent_turn.schema.json"
 AGENT_RESPONSE_SCHEMA = "audit_agent_response.schema.json"
@@ -158,17 +168,34 @@ def _bundle_identity(
     facts: dict,
     context: dict,
     brief_doc: dict,
+    scope: AuditScope = WORKBOOK_SCOPE,
 ) -> dict:
-    try:
-        meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        raise AuditAgentError(f"검증된 bundle meta 재조회 실패: {e}") from e
-    if not isinstance(meta, dict) or not isinstance(meta.get("audit_preparation"), dict):
-        raise AuditAgentError(
-            "bundle identity 재조회 중 package meta 형식이 변경되었습니다. 다시 실행하십시오."
-        )
-    prepared = meta["audit_preparation"]
-    calculated = bundle_keys(facts, context, brief_doc)
+    if scope.kind == "sheet":
+        try:
+            prepared = read_scope_commit(path, scope)
+            assert prepared is not None
+            validate_scope_commit(
+                path, scope, prepared, facts, context, brief_doc
+            )
+        except (AuditScopeError, OSError, json.JSONDecodeError) as e:
+            raise AuditAgentError(
+                f"sheet bundle identity 재조회 중 package가 변경되었습니다: {e}"
+            ) from e
+        calculated = scope_bundle_keys(scope, facts, context, brief_doc)
+    else:
+        try:
+            meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            raise AuditAgentError(f"검증된 bundle meta 재조회 실패: {e}") from e
+        if not isinstance(meta, dict) or not isinstance(
+            meta.get("audit_preparation"), dict
+        ):
+            raise AuditAgentError(
+                "bundle identity 재조회 중 package meta 형식이 변경되었습니다. "
+                "다시 실행하십시오."
+            )
+        prepared = meta["audit_preparation"]
+        calculated = bundle_keys(facts, context, brief_doc)
     advertised = tuple(
         prepared.get(field) for field in ("facts_key", "standards_key", "brief_key")
     )
@@ -178,6 +205,7 @@ def _bundle_identity(
         )
     retriever = context.get("retriever", {})
     return {
+        "scope": scope.identity(),
         "workbook_sha256": facts.get("source", {}).get("sha256"),
         "prepare_version": prepared.get("version"),
         "facts_key": prepared.get("facts_key"),
@@ -194,8 +222,9 @@ def _assert_bundle_unchanged(
     context: dict,
     brief_doc: dict,
     expected: dict,
+    scope: AuditScope = WORKBOOK_SCOPE,
 ) -> None:
-    current = _bundle_identity(path, facts, context, brief_doc)
+    current = _bundle_identity(path, facts, context, brief_doc, scope)
     if current != expected:
         raise AuditAgentError("audit agent 실행 중 package bundle identity가 변경되었습니다.")
 
@@ -854,7 +883,7 @@ def _blocked_response(
         "suggested_questions": [],
     }
     return _validated_response({
-        "schema_version": "audit_agent_response.v1",
+        "schema_version": "audit_agent_response.v2",
         "mode": "answer" if question else "briefing",
         "question": question,
         "package": path.name,
@@ -906,6 +935,7 @@ def run_audit_agent(
     client=None,
     client_factory=None,
     question: str | None = None,
+    sheet: str | None = None,
     limit: int = DEFAULT_LIMIT,
     max_steps: int = DEFAULT_MAX_STEPS,
     eprint=None,
@@ -917,10 +947,14 @@ def run_audit_agent(
         max_steps, name="max_steps", default=DEFAULT_MAX_STEPS, maximum=MAX_STEPS
     )
     user_question = _question(question)
-    loaded = load_validated_audit_bundle(pkg)
+    loaded = load_validated_audit_bundle(pkg, sheet=sheet)
     assert loaded is not None
     path, facts, context, brief_doc = loaded
-    bundle = _bundle_identity(path, facts, context, brief_doc)
+    try:
+        scope = resolve_scope(path, sheet=sheet)
+    except AuditScopeError as e:
+        raise AuditAgentError(f"audit agent scope 검증 실패: {e}") from e
+    bundle = _bundle_identity(path, facts, context, brief_doc, scope)
     briefing = _brief_loaded(facts, context, brief_doc, limit=lim)
     mappings = _assertion_procedures_loaded(facts, brief_doc, limit=lim)
     prompt, prompt_sha = load_prompt(AGENT_PROMPT)
@@ -972,6 +1006,14 @@ def run_audit_agent(
             question=user_question,
         )
     try:
+        analysis_scope = (
+            sheet_model_context(path, scope)
+            if scope.kind == "sheet"
+            else None
+        )
+    except AuditScopeError as e:
+        raise AuditAgentError(f"audit agent scope context 구성 실패: {e}") from e
+    try:
         resolver = WorkbookSourceResolver(path)
     except Exception as e:  # workbook ledger may have changed after the committed-bundle gate
         raise AuditAgentError(f"workbook source ledger 재조회 실패: {e}") from e
@@ -1021,6 +1063,8 @@ def run_audit_agent(
             "remaining_turns": steps_limit - step,
             "observations": observations,
         }
+        if analysis_scope is not None:
+            payload["analysis_scope"] = analysis_scope
         try:
             turn = call_json(
                 client,
@@ -1126,7 +1170,9 @@ def run_audit_agent(
             })
             continue
 
-        _assert_bundle_unchanged(path, facts, context, brief_doc, bundle)
+        _assert_bundle_unchanged(
+            path, facts, context, brief_doc, bundle, scope
+        )
         try:
             evidence, trace_complete = _hydrate_evidence(
                 path,
@@ -1139,9 +1185,11 @@ def run_audit_agent(
             )
         except AuditConsumeError as e:
             raise AuditAgentError(f"최종 근거 trace 실패: {e}") from e
-        _assert_bundle_unchanged(path, facts, context, brief_doc, bundle)
+        _assert_bundle_unchanged(
+            path, facts, context, brief_doc, bundle, scope
+        )
         return _validated_response({
-            "schema_version": "audit_agent_response.v1",
+            "schema_version": "audit_agent_response.v2",
             "mode": "answer" if user_question else "briefing",
             "question": user_question,
             "package": path.name,
@@ -1222,6 +1270,11 @@ def render_audit_agent_markdown(response: dict) -> str:
     """Render the validated response; provenance metadata comes only from hydrated evidence."""
     answer = response["answer"]
     lines = [f"# {_markdown_text(answer['title'])}", ""]
+    scope = response.get("bundle", {}).get("scope", {"kind": "workbook"})
+    if scope.get("kind") == "sheet":
+        lines.append(f"> 분석 범위: 시트 {_markdown_text(scope.get('sheet'))}")
+    else:
+        lines.append("> 분석 범위: 전체 workbook")
     trust = response.get("trust", {})
     readiness = trust.get("readiness", {})
     lines.append(

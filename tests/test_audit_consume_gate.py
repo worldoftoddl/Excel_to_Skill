@@ -9,11 +9,19 @@ from excel_to_skill.audit.consume import (
     AuditConsumeError,
     audit_get,
     audit_search,
+    assertion_procedures,
     brief,
+    load_validated_audit_bundle,
     trace,
 )
 from excel_to_skill.audit.contract import PREPARE_VERSION, bundle_keys
 from excel_to_skill.audit.model import json_sha256
+from excel_to_skill.audit.scope import (
+    AuditScope,
+    build_scope_commit,
+    bundle_paths,
+    write_scope_commit_atomic,
+)
 from excel_to_skill.audit.sources import WorkbookSourceResolver
 from excel_to_skill.cli import _convert_one
 from excel_to_skill.consume import ConsumeError, overview
@@ -65,6 +73,40 @@ def _write_committed_bundle(
     return pkg, facts, context, brief_doc
 
 
+def _commit_sheet_bundle(
+    pkg: Path,
+    facts: dict,
+    context: dict,
+    brief_doc: dict,
+    *,
+    sheet: str = "Main",
+) -> AuditScope:
+    scope = AuditScope.for_sheet(sheet)
+    references_path = pkg / "data/references.json"
+    if not references_path.is_file():
+        references_path.write_text(
+            json.dumps({
+                "edges": [],
+                "impacts": {},
+                "external_refs": [],
+                "unresolved": [],
+                "observability": {"workbook": "full", "note": None},
+            }) + "\n",
+            encoding="utf-8",
+        )
+    paths = bundle_paths(pkg, scope)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    for path, document in zip(
+        paths.artifacts, (facts, context, brief_doc), strict=True
+    ):
+        path.write_text(
+            json.dumps(document, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+    commit = build_scope_commit(pkg, scope, facts, context, brief_doc)
+    write_scope_commit_atomic(pkg, scope, commit)
+    return scope
+
+
 def test_all_consumers_require_committed_matching_bundle(tmp_path: Path) -> None:
     pkg, facts, context, brief_doc = _validation_bundle(tmp_path)
     for name, doc in (
@@ -83,6 +125,59 @@ def test_all_consumers_require_committed_matching_bundle(tmp_path: Path) -> None
     for call in calls:
         with pytest.raises(AuditConsumeError, match="완료 표식"):
             call()
+
+
+def test_sheet_consumers_use_only_sheet_commit_and_identify_results(
+    tmp_path: Path,
+) -> None:
+    pkg, facts, context, brief_doc = _write_committed_bundle(tmp_path)
+
+    # A valid workbook bundle is not a fallback for an uncommitted sheet scope.
+    with pytest.raises(AuditConsumeError, match="시트 감사 scope 검증 실패"):
+        brief(pkg, sheet="Main")
+
+    scope = _commit_sheet_bundle(pkg, facts, context, brief_doc)
+    loaded = load_validated_audit_bundle(pkg, sheet="Main")
+    assert loaded is not None
+    assert loaded[0] == pkg
+    assert loaded[1:] == (facts, context, brief_doc)
+
+    results = (
+        brief(pkg, sheet="Main"),
+        audit_search(pkg, query="매출", sheet="Main"),
+        audit_get(pkg, item_id="fact:risk", sheet="Main"),
+        assertion_procedures(pkg, sheet="Main"),
+        trace(pkg, item_id="fact:risk", sheet="Main"),
+    )
+    assert all(result["scope"] == scope.identity() for result in results)
+    assert "scope" not in brief(pkg)
+
+
+def test_sheet_consumer_fails_closed_instead_of_falling_back_to_workbook(
+    tmp_path: Path,
+) -> None:
+    pkg, facts, context, brief_doc = _write_committed_bundle(tmp_path)
+    scope = _commit_sheet_bundle(pkg, facts, context, brief_doc)
+    paths = bundle_paths(pkg, scope)
+    commit = json.loads(paths.commit.read_text(encoding="utf-8"))
+    commit["facts_key"] = "0" * 64
+    paths.commit.write_text(json.dumps(commit), encoding="utf-8")
+
+    with pytest.raises(AuditConsumeError, match="artifact key"):
+        audit_search(pkg, query="매출", sheet="Main")
+    assert brief(pkg)["summary"] == brief_doc["summary"]
+
+
+def test_sheet_consumer_rejects_partial_scope_even_when_absence_is_allowed(
+    tmp_path: Path,
+) -> None:
+    pkg, facts, _, _ = _write_committed_bundle(tmp_path)
+    paths = bundle_paths(pkg, AuditScope.for_sheet("Main"))
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.facts.write_text(json.dumps(facts), encoding="utf-8")
+
+    with pytest.raises(AuditConsumeError, match="완료 표식 없이 artifact"):
+        load_validated_audit_bundle(pkg, sheet="Main", allow_absent=True)
 
 
 @pytest.mark.parametrize(

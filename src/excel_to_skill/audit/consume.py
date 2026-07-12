@@ -6,6 +6,13 @@ from pathlib import Path
 
 from .contract import PREPARE_VERSION, bundle_keys
 from .model import AuditModelError
+from .scope import (
+    AuditScope,
+    AuditScopeError,
+    bundle_paths,
+    load_scope_bundle,
+    resolve_scope,
+)
 from .sources import WorkbookSourceResolver
 from .validate import AuditValidationError, validate_audit_bundle
 
@@ -67,17 +74,36 @@ def _load(pkg: Path, rel: str) -> dict:
 def load_validated_audit_bundle(
     pkg: Path | str,
     *,
+    sheet: str | None = None,
     allow_absent: bool = False,
 ) -> tuple[Path, dict, dict, dict] | None:
     """Load the committed audit bundle after integrity and provenance validation.
 
     The three JSON files are staging material until ``meta.audit_preparation`` advertises the
-    exact validated keys.  Keeping this boundary in the reader prevents a failed/interrupted
-    prepare, manual file copy, or later artifact edit from becoming agent-visible content.
+    exact validated keys.  Sheet-scoped bundles instead require their own final ``commit.json``;
+    they never fall back to the workbook marker or artifacts.  Keeping this boundary in the
+    reader prevents a failed/interrupted prepare, manual file copy, or later artifact edit from
+    becoming agent-visible content.
     ``allow_absent`` lets legacy SKILL/overview consumers remain usable when no audit artifacts
     or commit marker exist; any partial presence is still rejected.
     """
     path = Path(pkg)
+    if sheet is not None:
+        try:
+            scope = resolve_scope(path, sheet=sheet)
+            paths = bundle_paths(path, scope)
+            loaded = load_scope_bundle(path, scope, allow_absent=allow_absent)
+        except (AuditScopeError, ValueError) as e:
+            raise AuditConsumeError(f"시트 감사 scope 검증 실패: {e}") from e
+        if loaded is None:
+            if any(artifact.is_file() for artifact in paths.artifacts):
+                raise AuditConsumeError(
+                    "시트 감사 scope 완료 표식 없이 artifact만 존재합니다."
+                )
+            return None
+        _, facts, context, brief_doc, _ = loaded
+        return path, facts, context, brief_doc
+
     meta = _load(path, "meta.json")
     audit_meta = meta.get("audit_preparation")
     artifacts_present = [rel for rel in _ARTIFACT_RELS if (path / rel).is_file()]
@@ -135,10 +161,21 @@ def load_validated_audit_bundle(
     return path, facts, context, brief_doc
 
 
-def _bundle(pkg: Path | str) -> tuple[Path, dict, dict, dict]:
-    loaded = load_validated_audit_bundle(pkg)
+def _bundle(
+    pkg: Path | str,
+    *,
+    sheet: str | None = None,
+) -> tuple[Path, dict, dict, dict]:
+    loaded = load_validated_audit_bundle(pkg, sheet=sheet)
     assert loaded is not None  # allow_absent=False
     return loaded
+
+
+def _with_sheet_scope(result: dict, sheet: str | None) -> dict:
+    """Identify independently committed sheet results without changing workbook output."""
+    if sheet is None:
+        return result
+    return {"scope": AuditScope.for_sheet(sheet).identity(), **result}
 
 
 def _trust_marker(brief_doc: dict, facts: dict) -> dict:
@@ -194,10 +231,12 @@ def _brief_loaded(facts: dict, context: dict, doc: dict, *, limit=None) -> dict:
     }
 
 
-def brief(pkg: Path | str, *, limit=None) -> dict:
+def brief(pkg: Path | str, *, sheet: str | None = None, limit=None) -> dict:
     """Return the prepared brief, including draft content with an explicit trust marker."""
-    _, facts, context, doc = _bundle(pkg)
-    return _brief_loaded(facts, context, doc, limit=limit)
+    _, facts, context, doc = _bundle(pkg, sheet=sheet)
+    return _with_sheet_scope(
+        _brief_loaded(facts, context, doc, limit=limit), sheet
+    )
 
 
 def _audit_search_loaded(
@@ -251,12 +290,16 @@ def audit_search(
     *,
     query: str,
     kind: str | None = None,
+    sheet: str | None = None,
     limit=None,
 ) -> dict:
     """Search normalized facts and brief statements, not the raw cell ledger."""
-    _, facts, _, brief_doc = _bundle(pkg)
-    return _audit_search_loaded(
-        facts, brief_doc, query=query, kind=kind, limit=limit
+    _, facts, _, brief_doc = _bundle(pkg, sheet=sheet)
+    return _with_sheet_scope(
+        _audit_search_loaded(
+            facts, brief_doc, query=query, kind=kind, limit=limit
+        ),
+        sheet,
     )
 
 
@@ -493,12 +536,16 @@ def assertion_procedures(
     pkg: Path | str,
     *,
     query: str | None = None,
+    sheet: str | None = None,
     limit=None,
 ) -> dict:
     """Return represented procedure-to-assertion mappings from a committed package."""
-    _, facts, _, brief_doc = _bundle(pkg)
-    return _assertion_procedures_loaded(
-        facts, brief_doc, query=query, limit=limit
+    _, facts, _, brief_doc = _bundle(pkg, sheet=sheet)
+    return _with_sheet_scope(
+        _assertion_procedures_loaded(
+            facts, brief_doc, query=query, limit=limit
+        ),
+        sheet,
     )
 
 
@@ -561,11 +608,16 @@ def _audit_get_loaded(
     }
 
 
-def audit_get(pkg: Path | str, *, item_id: str) -> dict:
+def audit_get(
+    pkg: Path | str,
+    *,
+    item_id: str,
+    sheet: str | None = None,
+) -> dict:
     """Return one typed audit object by ID."""
-    _, facts, context, brief_doc = _bundle(pkg)
-    return _audit_get_loaded(
-        facts, context, brief_doc, item_id=item_id
+    _, facts, context, brief_doc = _bundle(pkg, sheet=sheet)
+    return _with_sheet_scope(
+        _audit_get_loaded(facts, context, brief_doc, item_id=item_id), sheet
     )
 
 
@@ -746,14 +798,23 @@ def _trace_loaded(
     }
 
 
-def trace(pkg: Path | str, *, item_id: str, limit=None) -> dict:
+def trace(
+    pkg: Path | str,
+    *,
+    item_id: str,
+    sheet: str | None = None,
+    limit=None,
+) -> dict:
     """Resolve a fact/statement/relation to workbook cells and cached standards passages."""
-    path, facts, context, brief_doc = _bundle(pkg)
-    return _trace_loaded(
-        path,
-        facts,
-        context,
-        brief_doc,
-        item_id=item_id,
-        limit=limit,
+    path, facts, context, brief_doc = _bundle(pkg, sheet=sheet)
+    return _with_sheet_scope(
+        _trace_loaded(
+            path,
+            facts,
+            context,
+            brief_doc,
+            item_id=item_id,
+            limit=limit,
+        ),
+        sheet,
     )

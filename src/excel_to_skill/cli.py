@@ -544,20 +544,50 @@ def _cmd_audit_review(args: argparse.Namespace) -> int:
         return 1
     try:
         result = (
-            approve_audit_package(pkg, eprint=_eprint)
+            approve_audit_package(
+                pkg, sheet=getattr(args, "sheet", None), eprint=_eprint
+            )
             if args.approve
-            else reject_audit_package(pkg, note=args.note, eprint=_eprint)
+            else reject_audit_package(
+                pkg,
+                note=args.note,
+                sheet=getattr(args, "sheet", None),
+                eprint=_eprint,
+            )
         )
     except (AuditReviewError, RuntimeError) as e:
         _eprint(f"[audit-review 실패] {e}")
         return 1
-    print(result["skill"])
-    _eprint(f"[audit-review] {pkg.name}: status={result['status']}")
+    print(result["skill"] if "skill" in result else result["commit"])
+    scope_text = (
+        f"sheet={args.sheet!r}" if getattr(args, "sheet", None) is not None
+        else "scope=workbook"
+    )
+    _eprint(
+        f"[audit-review] {pkg.name}: {scope_text} · status={result['status']}"
+    )
+    return 0
+
+
+def _cmd_audit_scopes(args: argparse.Namespace) -> int:
+    """Show deterministic per-scope workload and committed preparation state."""
+    from .audit.scope import AuditScopeError, audit_scopes_plan
+
+    pkg = Path(args.path)
+    if not pkg.is_dir() or not (pkg / "meta.json").is_file():
+        _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
+        return 1
+    try:
+        result = audit_scopes_plan(pkg)
+    except (AuditScopeError, ValueError, OSError, json.JSONDecodeError) as e:
+        _eprint(f"[audit-scopes 실패] {e}")
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
 def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factory=None) -> int:
-    """Workbook facts → auditpaper standards MCP → agent-ready brief를 준비한다."""
+    """Prepare either one workbook bundle or independent per-sheet bundles."""
     from .annotator import DEFAULT_MODEL, build_anthropic_client
     from .audit.auditpaper_mcp import (
         AuditpaperStandardsRetriever,
@@ -572,12 +602,87 @@ def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factor
         StandardsStageCacheMiss,
         prepare_package,
     )
+    from .audit.scope import (
+        AuditScope,
+        AuditScopeError,
+        WORKBOOK_SCOPE,
+        audit_scopes_plan,
+        bundle_paths,
+    )
     from .audit.standards import StandardsRetrievalFatalError
 
     pkg = Path(args.path)
     if not pkg.is_dir() or not (pkg / "meta.json").is_file():
         _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
         return 1
+
+    # Resolve every requested scope from deterministic package artifacts before constructing an
+    # external model client or MCP connection.  Repeated sheet options are deduplicated in
+    # workbook order; empty sheets are skipped only for explicit --all-sheets fan-out.
+    try:
+        plan = audit_scopes_plan(pkg)
+        requested_sheets = getattr(args, "sheets", None) or []
+        all_sheets = bool(getattr(args, "all_sheets", False))
+        explicit_workbook = getattr(args, "scope", None) is not None
+        if sum((bool(requested_sheets), all_sheets, explicit_workbook)) > 1:
+            raise AuditScopeError(
+                "--scope, --sheet, --all-sheets 중 하나만 선택할 수 있습니다."
+            )
+        sheet_rows = plan["sheets"]
+        rows_by_name = {row["scope"]["sheet"]: row for row in sheet_rows}
+        if requested_sheets:
+            unknown = sorted(set(requested_sheets) - set(rows_by_name))
+            if unknown:
+                raise AuditScopeError(f"meta.json에 없는 시트입니다: {unknown}")
+            selected_names = [
+                row["scope"]["sheet"]
+                for row in sheet_rows
+                if row["scope"]["sheet"] in set(requested_sheets)
+            ]
+            empty = [
+                name for name in selected_names
+                if not rows_by_name[name]["analyzable"]
+            ]
+            if empty:
+                raise AuditScopeError(
+                    f"분석할 ledger cell/region이 없는 시트입니다: {empty}"
+                )
+            selected_scopes = [AuditScope.for_sheet(name) for name in selected_names]
+        elif all_sheets:
+            selected_scopes = [
+                AuditScope.for_sheet(row["scope"]["sheet"])
+                for row in sheet_rows
+                if row["analyzable"]
+            ]
+            if not selected_scopes:
+                raise AuditScopeError("분석 가능한 시트가 없습니다.")
+        else:
+            # Preserve the historical empty-workbook path: extraction/brief code turns it into a
+            # committed not_ready bundle instead of treating absence of regions as CLI misuse.
+            selected_scopes = [WORKBOOK_SCOPE]
+    except (AuditScopeError, ValueError, OSError, json.JSONDecodeError) as e:
+        _eprint(f"[prepare 실패] scope 선택 오류: {e}")
+        return 1
+
+    if len(selected_scopes) == 1 and selected_scopes[0].kind == "workbook":
+        calls = plan["workbook"]["estimated_calls"]["total_llm"]
+        _eprint(
+            f"[prepare plan] scope=workbook · regions={plan['workbook']['region_count']} "
+            f"· estimated_llm_calls={calls}"
+        )
+    else:
+        selected_names = {scope.sheet for scope in selected_scopes}
+        selected_rows = [
+            row for row in plan["sheets"]
+            if row["scope"]["sheet"] in selected_names
+        ]
+        _eprint(
+            f"[prepare plan] independent_sheets={len(selected_scopes)} · "
+            f"regions={sum(row['region_count'] for row in selected_rows)} · "
+            "estimated_llm_calls="
+            f"{sum(row['estimated_calls']['total_llm'] for row in selected_rows)}"
+        )
+
     config_path = args.mcp_config
     if (
         config_path is None
@@ -589,7 +694,10 @@ def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factor
     model = args.model or DEFAULT_MODEL
     generated_at = _now_iso()
     caller = None
-    result = None
+    results: dict[str, object] = {}
+    failures: list[tuple[str, str]] = []
+    pending: list[AuditScope] = []
+    shared_client = None
     try:
         policy = RetrievalPolicy(
             top_k=args.standards_top_k,
@@ -600,13 +708,24 @@ def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factor
             lambda selected_model: build_anthropic_client(
                 selected_model,
                 tool_name="emit_audit_artifact",
-                max_tokens=8192,
+                max_tokens=16384,
             )
         )
-        if not args.force:
+
+        def get_client():
+            nonlocal shared_client
+            if shared_client is None:
+                shared_client = make_client(model)
+            return shared_client
+
+        for selected in selected_scopes:
+            if args.force:
+                pending.append(selected)
+                continue
+            context_path = bundle_paths(pkg, selected).standards
             try:
                 cached_context = json.loads(
-                    (pkg / "data/standards_context.json").read_text(encoding="utf-8")
+                    context_path.read_text(encoding="utf-8")
                 )
                 cached_collection = cached_context["retriever"]["corpus_version"]
             except (OSError, json.JSONDecodeError, KeyError, TypeError):
@@ -621,17 +740,29 @@ def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factor
                     result = prepare_package(
                         pkg,
                         client=None,
-                        client_factory=lambda: make_client(model),
+                        client_factory=get_client,
                         retriever=None,
                         retriever_descriptor=cached_descriptor,
                         model=model,
+                        scope=selected,
                         generated_at=generated_at,
                         eprint=_eprint,
                     )
                 except StandardsStageCacheMiss:
-                    pass
+                    pending.append(selected)
+                except (
+                    AuditModelError,
+                    AuditPrepareError,
+                    StandardsRetrievalFatalError,
+                    RuntimeError,
+                ) as e:
+                    failures.append((str(selected.sheet or "workbook"), str(e)))
+                else:
+                    results[selected.id] = result
+            else:
+                pending.append(selected)
 
-        if result is None:
+        if pending:
             connection = load_mcp_connection(
                 config_path=config_path,
                 server_name=args.mcp_server,
@@ -646,35 +777,74 @@ def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factor
                 )
             )
             caller = make_caller(connection)
-            retriever = AuditpaperStandardsRetriever(
+            probe_retriever = AuditpaperStandardsRetriever(
                 caller,
                 policy=policy,
                 paragraph_cache_dir=pkg.parent / ".auditpaper_standards_cache",
             )
-            collection = retriever.discover_collection()
+            collection = probe_retriever.discover_collection()
             _eprint(f"[prepare] standards collection 고정: {collection}")
-            result = prepare_package(
-                pkg,
-                client=None,
-                client_factory=lambda: make_client(model),
-                retriever=retriever,
-                retriever_descriptor=retriever.descriptor(retrieved_at=generated_at),
-                model=model,
-                force=args.force,
-                generated_at=generated_at,
-                eprint=_eprint,
+            descriptor = build_retriever_descriptor(
+                collection=collection,
+                policy=policy,
+                retrieved_at=generated_at,
             )
+            for selected in pending:
+                # Citation/text budgets are per independently committed scope.  Reuse the MCP
+                # session and persistent paragraph cache, not the retriever's mutable run budget.
+                retriever = AuditpaperStandardsRetriever(
+                    caller,
+                    policy=policy,
+                    expected_collection=collection,
+                    paragraph_cache_dir=pkg.parent / ".auditpaper_standards_cache",
+                )
+                try:
+                    result = prepare_package(
+                        pkg,
+                        client=None,
+                        client_factory=get_client,
+                        retriever=retriever,
+                        retriever_descriptor=descriptor,
+                        model=model,
+                        scope=selected,
+                        force=args.force,
+                        generated_at=generated_at,
+                        eprint=_eprint,
+                    )
+                except (
+                    AuditModelError,
+                    AuditPrepareError,
+                    StandardsRetrievalFatalError,
+                    RuntimeError,
+                ) as e:
+                    failures.append((str(selected.sheet or "workbook"), str(e)))
+                except Exception as e:
+                    failures.append((
+                        str(selected.sheet or "workbook"),
+                        f"{type(e).__name__}: {e}",
+                    ))
+                else:
+                    results[selected.id] = result
     except (
         AuditModelError,
         AuditPrepareError,
         StandardsRetrievalFatalError,
         RuntimeError,
     ) as e:
-        _eprint(f"[prepare 실패] {e}")
-        return 1
+        for selected in pending or selected_scopes:
+            if selected.id not in results and not any(
+                name == str(selected.sheet or "workbook") for name, _ in failures
+            ):
+                failures.append((str(selected.sheet or "workbook"), str(e)))
     except Exception as e:
-        _eprint(f"[prepare 실패] {pkg.name}: {type(e).__name__}: {e}")
-        return 1
+        for selected in pending or selected_scopes:
+            if selected.id not in results and not any(
+                name == str(selected.sheet or "workbook") for name, _ in failures
+            ):
+                failures.append((
+                    str(selected.sheet or "workbook"),
+                    f"{type(e).__name__}: {e}",
+                ))
     finally:
         if caller is not None and callable(getattr(caller, "close", None)):
             try:
@@ -682,13 +852,23 @@ def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factor
             except Exception as e:
                 _eprint(f"[prepare] MCP session 종료 경고: {type(e).__name__}: {e}")
 
-    assert result is not None
-    print(result.brief_path)
-    _eprint(
-        f"[prepare] {pkg.name}: status={result.status} · "
-        f"{'cache' if result.cached else 'generated'}"
-    )
-    return 0
+    for selected in selected_scopes:
+        result = results.get(selected.id)
+        if result is None:
+            continue
+        print(result.brief_path)
+        scope_label = (
+            "scope=workbook"
+            if selected.kind == "workbook"
+            else f"sheet={selected.sheet!r}"
+        )
+        _eprint(
+            f"[prepare] {pkg.name}: {scope_label} · status={result.status} · "
+            f"{'cache' if result.cached else 'generated'}"
+        )
+    for scope_name, message in failures:
+        _eprint(f"[prepare 실패] {scope_name}: {message}")
+    return 1 if failures else 0
 
 
 def _cmd_consume(args: argparse.Namespace) -> int:
@@ -732,21 +912,31 @@ def _cmd_audit_consume(args: argparse.Namespace) -> int:
         _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
         return 1
     lim = {} if getattr(args, "limit", None) is None else {"limit": args.limit}
+    selected_sheet = getattr(args, "sheet", None)
     try:
         if args.cmd == "brief":
-            result = brief(pkg, **lim)
+            result = brief(pkg, sheet=selected_sheet, **lim)
         elif args.cmd == "audit-search":
             result = audit_search(
-                pkg, query=args.query, kind=getattr(args, "kind", None), **lim
+                pkg,
+                query=args.query,
+                kind=getattr(args, "kind", None),
+                sheet=selected_sheet,
+                **lim,
             )
         elif args.cmd == "audit-get":
-            result = audit_get(pkg, item_id=args.id)
+            result = audit_get(pkg, item_id=args.id, sheet=selected_sheet)
         elif args.cmd == "assertion-procedures":
             result = assertion_procedures(
-                pkg, query=getattr(args, "query", None), **lim
+                pkg,
+                query=getattr(args, "query", None),
+                sheet=selected_sheet,
+                **lim,
             )
         else:  # trace
-            result = trace(pkg, item_id=args.id, **lim)
+            result = trace(
+                pkg, item_id=args.id, sheet=selected_sheet, **lim
+            )
     except AuditConsumeError as e:
         _eprint(f"[{args.cmd} 실패] {e}")
         return 1
@@ -783,6 +973,7 @@ def _cmd_audit_agent(args: argparse.Namespace, *, client_factory=None) -> int:
             model=model,
             client_factory=make_client,
             question=args.question,
+            sheet=getattr(args, "sheet", None),
             limit=args.limit,
             max_steps=args.max_steps,
             eprint=_eprint,
@@ -841,6 +1032,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="감사조서 facts + auditpaper 기준서 MCP + agent-ready brief 생성",
     )
     ap.add_argument("path", help="convert가 만든 패키지 폴더")
+    scope_group = ap.add_mutually_exclusive_group()
+    scope_group.add_argument(
+        "--scope",
+        choices=("workbook",),
+        default=None,
+        help="전체 workbook을 한 번에 분석(기본 동작)",
+    )
+    scope_group.add_argument(
+        "--sheet",
+        dest="sheets",
+        action="append",
+        help="정확한 시트명을 독립 분석(반복 지정 가능)",
+    )
+    scope_group.add_argument(
+        "--all-sheets",
+        action="store_true",
+        help="내용이 있는 모든 시트를 각각 독립 분석",
+    )
     ap.add_argument("--model", default=None, help="준비 모델(기본은 annotate 기본 모델)")
     ap.add_argument("--force", action="store_true", help="단계별 cache를 무시하고 재생성")
     ap.add_argument(
@@ -924,8 +1133,15 @@ def _build_parser() -> argparse.ArgumentParser:
     rf.add_argument("--cell", required=True, help="절대 주소(Sheet!A1)")
     rf.add_argument("--limit", type=int, default=None, help="방향별 엣지 상한(기본 100)")
 
+    scopes = sub.add_parser(
+        "audit-scopes",
+        help="LLM 호출 전 workbook·시트별 분석량과 준비 상태 조회",
+    )
+    scopes.add_argument("path", help="convert가 만든 패키지 폴더")
+
     b = sub.add_parser("brief", help="준비된 감사조서 brief 조회(draft는 미검토 표시)")
     b.add_argument("path", help="prepare가 완료된 패키지 폴더")
+    b.add_argument("--sheet", default=None, help="독립 준비된 시트 scope")
     b.add_argument("--limit", type=int, default=None, help="brief statement 상한(기본 100)")
 
     aus = sub.add_parser("audit-search", help="감사 사실·brief 텍스트 부분일치 검색")
@@ -937,10 +1153,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="fact/statement 또는 fact type/brief section으로 제한",
     )
     aus.add_argument("--limit", type=int, default=None, help="매치 상한(기본 100)")
+    aus.add_argument("--sheet", default=None, help="독립 준비된 시트 scope")
 
     aug = sub.add_parser("audit-get", help="감사 객체를 ID로 조회")
     aug.add_argument("path", help="prepare가 완료된 패키지 폴더")
     aug.add_argument("--id", required=True, help="fact/statement/citation 등의 ID")
+    aug.add_argument("--sheet", default=None, help="독립 준비된 시트 scope")
 
     asp = sub.add_parser(
         "assertion-procedures",
@@ -955,10 +1173,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=None,
         help="쌍·미연결 주장·미연결 절차별 반환 상한(기본 100)",
     )
+    asp.add_argument("--sheet", default=None, help="독립 준비된 시트 scope")
 
     tr = sub.add_parser("trace", help="감사 객체의 workbook·기준서 근거 추적")
     tr.add_argument("path", help="prepare가 완료된 패키지 폴더")
     tr.add_argument("--id", required=True, help="fact/statement/relation/citation ID")
+    tr.add_argument("--sheet", default=None, help="독립 준비된 시트 scope")
     tr.add_argument("--limit", type=int, default=None, help="반환 workbook 셀 상한")
 
     aa = sub.add_parser(
@@ -966,6 +1186,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="준비된 감사조서를 근거 기반으로 브리핑하거나 질의응답",
     )
     aa.add_argument("path", help="prepare가 완료된 패키지 폴더")
+    aa.add_argument("--sheet", default=None, help="독립 준비된 시트 scope")
     aa.add_argument(
         "--question",
         default=None,
@@ -995,6 +1216,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="준비된 감사 facts+brief를 함께 승인 또는 반려",
     )
     ar.add_argument("path", help="prepare가 완료된 패키지 폴더")
+    ar.add_argument("--sheet", default=None, help="독립 준비된 시트 scope")
     decision = ar.add_mutually_exclusive_group(required=True)
     decision.add_argument("--approve", action="store_true", help="감사 bundle 승인")
     decision.add_argument("--reject", action="store_true", help="감사 bundle 반려")
@@ -1018,6 +1240,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_review(args)
     if args.cmd == "audit-review":
         return _cmd_audit_review(args)
+    if args.cmd == "audit-scopes":
+        return _cmd_audit_scopes(args)
     if args.cmd in ("overview", "inspect", "search", "refs"):
         return _cmd_consume(args)
     if args.cmd in (

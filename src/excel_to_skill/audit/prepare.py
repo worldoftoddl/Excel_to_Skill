@@ -16,6 +16,18 @@ from .context import build_standards_context
 from .extract import EXTRACTOR_VERSION, _prompt_bundle, extract_audit_facts
 from .llm import load_prompt, load_schema
 from .model import json_sha256
+from .scope import (
+    AuditScope,
+    WORKBOOK_SCOPE,
+    build_scope_commit,
+    bundle_paths,
+    read_scope_commit,
+    resolve_scope,
+    sheet_model_context,
+    scope_bundle_keys,
+    validate_scope_commit,
+    write_scope_commit_atomic,
+)
 from .standards import StandardsRetriever
 from .validate import validate_audit_bundle, validate_audit_upstream
 
@@ -39,6 +51,7 @@ class StandardsStageCacheMiss(AuditPrepareError):
 @dataclass(frozen=True, slots=True)
 class PrepareResult:
     package: Path
+    scope: AuditScope
     facts_path: Path
     standards_path: Path
     brief_path: Path
@@ -144,22 +157,33 @@ def _descriptor_identity(descriptor: dict) -> dict:
     return identity
 
 
-def _facts_recipe(pkg: Path, meta: dict, *, model: str) -> str:
+def _facts_recipe(
+    pkg: Path,
+    meta: dict,
+    *,
+    model: str,
+    scope: AuditScope = WORKBOOK_SCOPE,
+) -> str:
     _, _, prompt_sha = _prompt_bundle()
+    inputs = {
+        "model": model,
+        "prompt_sha256": prompt_sha,
+        "schema_sha256": json_sha256(load_schema("audit_facts.schema.json")),
+        "source": meta.get("source"),
+        "converter_version": meta.get("converter_version"),
+        "conversion_params": meta.get("conversion_params"),
+        "sheets": meta.get("sheets"),
+        "cells_sha256": cache.file_sha256(pkg / "data/cells.jsonl"),
+    }
+    # Keep the historical workbook recipe byte-for-byte stable.  Only the new sheet recipe is
+    # salted with its analysis boundary, so equal-looking sheets cannot share a stage witness.
+    if scope.kind == "sheet":
+        inputs["analysis_scope"] = scope.identity()
     return cache.audit_stage_recipe_key(
         "facts",
         prepare_version=PREPARE_VERSION,
         stage_version=EXTRACTOR_VERSION,
-        inputs={
-            "model": model,
-            "prompt_sha256": prompt_sha,
-            "schema_sha256": json_sha256(load_schema("audit_facts.schema.json")),
-            "source": meta.get("source"),
-            "converter_version": meta.get("converter_version"),
-            "conversion_params": meta.get("conversion_params"),
-            "sheets": meta.get("sheets"),
-            "cells_sha256": cache.file_sha256(pkg / "data/cells.jsonl"),
-        },
+        inputs=inputs,
     )
 
 
@@ -176,53 +200,128 @@ def _standards_recipe(facts: dict, retriever_descriptor: dict) -> str:
     )
 
 
-def _brief_recipe(facts: dict, context: dict, *, model: str) -> str:
+def _brief_recipe(
+    facts: dict,
+    context: dict,
+    *,
+    model: str,
+    analysis_scope: dict | None = None,
+) -> str:
     _, prompt_sha = load_prompt(BRIEF_PROMPT)
+    inputs = {
+        "model": model,
+        "prompt_sha256": prompt_sha,
+        "schema_sha256": json_sha256(load_schema("audit_brief.schema.json")),
+        "audit_facts_sha256": json_sha256(facts),
+        "standards_context_sha256": json_sha256(context),
+    }
+    if analysis_scope is not None:
+        inputs["analysis_scope"] = analysis_scope
     return cache.audit_stage_recipe_key(
         "brief",
         prepare_version=PREPARE_VERSION,
         stage_version=BRIEF_VERSION,
-        inputs={
-            "model": model,
-            "prompt_sha256": prompt_sha,
-            "schema_sha256": json_sha256(load_schema("audit_brief.schema.json")),
-            "audit_facts_sha256": json_sha256(facts),
-            "standards_context_sha256": json_sha256(context),
-        },
+        inputs=inputs,
     )
 
 
 def _context_has_errors(context: dict) -> bool:
+    """Return whether a context contains errors worth retrying on the next prepare.
+
+    A retrieval cap is a deterministic, explicitly surfaced partial result for the pinned
+    collection and policy.  Retrying it on every invocation wastes network/model work and cannot
+    improve the context.  Unclassified errors remain retryable.
+    """
     queries = context.get("queries")
-    return isinstance(queries, list) and any(
-        isinstance(query, dict) and query.get("status") == "error"
+    if not isinstance(queries, list):
+        return False
+    error_ids = {
+        query.get("id")
         for query in queries
+        if isinstance(query, dict)
+        and query.get("status") == "error"
+        and isinstance(query.get("id"), str)
+    }
+    limitations = context.get("limitations")
+    limitation_records = limitations if isinstance(limitations, list) else []
+    capped_ids = {
+        query_id
+        for limitation in limitation_records
+        for query_id in (
+            limitation.get("query_ids", []) if isinstance(limitation, dict) else []
+        )
+        if (
+            isinstance(limitation, dict)
+            and limitation.get("code") == "retrieval_capped"
+            and isinstance(query_id, str)
+        )
+    }
+    return bool(error_ids - capped_ids)
+
+
+def _scope_inputs_match(pkg: Path, meta: dict, commit: dict) -> bool:
+    source = meta.get("source")
+    workbook_sha = source.get("sha256") if isinstance(source, dict) else None
+    return commit.get("inputs") == {
+        "workbook_sha256": workbook_sha,
+        "cells_sha256": cache.file_sha256(pkg / "data/cells.jsonl"),
+    }
+
+
+def _scope_sources_are_local(facts: dict, scope: AuditScope) -> bool:
+    if scope.kind != "sheet":
+        return True
+    sources = facts.get("sources")
+    return isinstance(sources, list) and all(
+        isinstance(source, dict) and source.get("sheet") == scope.sheet
+        for source in sources
     )
 
 
-def _load_cached_bundle(pkg: Path) -> _CachedBundle | None:
+def _load_cached_bundle(
+    pkg: Path,
+    scope: AuditScope = WORKBOOK_SCOPE,
+) -> _CachedBundle | None:
     """Load valid upstream stages and, when possible, the complete prior bundle.
 
     A brief schema/prompt upgrade must not force workbook extraction or standards retrieval to
     run again.  The facts and standards artifacts therefore have their own strict validation
     boundary; an invalid or stale brief is represented as ``None`` and regenerated below.
     """
-    facts_path, context_path, brief_path = [pkg / "data" / name for name in _ARTIFACTS]
+    paths = bundle_paths(pkg, scope)
+    facts_path, context_path, brief_path = paths.artifacts
     if not facts_path.is_file() or not context_path.is_file():
         return None
     try:
         facts = _read_json(facts_path)
         context = _read_json(context_path)
         validate_audit_upstream(pkg, facts, context)
+        if not _scope_sources_are_local(facts, scope):
+            return None
     except Exception:  # damaged upstream is a cache miss and will be replaced transactionally
         return None
 
-    audit_meta = _read_json(pkg / "meta.json").get("audit_preparation", {})
-    upstream_keys = bundle_keys(facts, context, {})[:2]
+    meta = _read_json(pkg / "meta.json")
+    if scope.kind == "workbook":
+        audit_meta = meta.get("audit_preparation", {})
+        upstream_keys = bundle_keys(facts, context, {})[:2]
+    else:
+        try:
+            audit_meta = read_scope_commit(pkg, scope, allow_absent=True) or {}
+        except Exception:
+            return None
+        upstream_keys = scope_bundle_keys(scope, facts, context, {})[:2]
     if (
         not isinstance(audit_meta, dict)
         or audit_meta.get("present") is not True
         or audit_meta.get("version") != PREPARE_VERSION
+        or (
+            scope.kind == "sheet"
+            and (
+                audit_meta.get("scope") != scope.identity()
+                or not _scope_inputs_match(pkg, meta, audit_meta)
+            )
+        )
         or (audit_meta.get("facts_key"), audit_meta.get("standards_key"))
         != upstream_keys
     ):
@@ -234,7 +333,9 @@ def _load_cached_bundle(pkg: Path) -> _CachedBundle | None:
         try:
             candidate = _read_json(brief_path)
             validate_audit_bundle(pkg, facts, context, candidate)
-            keys = bundle_keys(facts, context, candidate)
+            keys = scope_bundle_keys(scope, facts, context, candidate)
+            if scope.kind == "sheet":
+                validate_scope_commit(pkg, scope, audit_meta, facts, context, candidate)
             if (
                 audit_meta.get("brief_key") == keys[2]
                 and audit_meta.get("status")
@@ -247,7 +348,11 @@ def _load_cached_bundle(pkg: Path) -> _CachedBundle | None:
         except Exception:
             # Only the downstream stage is stale.  Validated upstream artifacts remain reusable.
             pass
-    recipes = cache.get_audit(pkg.parent, pkg.name) or {}
+    recipes = (
+        cache.get_audit(pkg.parent, pkg.name)
+        if scope.kind == "workbook"
+        else cache.get_audit_scope(pkg.parent, pkg.name, scope.id)
+    ) or {}
     return _CachedBundle(
         facts,
         context,
@@ -267,6 +372,8 @@ def _prepare_package_unlocked(
     retriever: StandardsRetriever | None,
     retriever_descriptor: dict,
     model: str,
+    sheet: str | None = None,
+    scope: AuditScope | None = None,
     force: bool = False,
     generated_at: str | None = None,
     eprint=None,
@@ -279,8 +386,15 @@ def _prepare_package_unlocked(
 
     try:
         meta = _read_json(pkg / "meta.json")
-        facts_recipe = _facts_recipe(pkg, meta, model=model)
-        cached = None if force else _load_cached_bundle(pkg)
+        selected = resolve_scope(pkg, sheet=sheet, scope=scope)
+        analysis_scope = (
+            sheet_model_context(pkg, selected)
+            if selected.kind == "sheet"
+            else None
+        )
+        paths = bundle_paths(pkg, selected)
+        facts_recipe = _facts_recipe(pkg, meta, model=model, scope=selected)
+        cached = None if force else _load_cached_bundle(pkg, selected)
         recipe_state_ok = bool(
             cached
             and cached.recipes.get("prepare_version") == PREPARE_VERSION
@@ -303,7 +417,12 @@ def _prepare_package_unlocked(
                 and not _context_has_errors(cached.context)
             )
             if reuse_context:
-                brief_recipe = _brief_recipe(cached.facts, cached.context, model=model)
+                brief_recipe = _brief_recipe(
+                    cached.facts,
+                    cached.context,
+                    model=model,
+                    analysis_scope=analysis_scope,
+                )
                 reuse_brief = bool(
                     cached.brief is not None
                     and cached.brief_key is not None
@@ -319,18 +438,26 @@ def _prepare_package_unlocked(
             and cached.brief is not None
         ):
             status = cached.brief.get("readiness", {}).get("status", "not_ready")
-            # SKILL is a deterministic view over the current package. Repair deletion/tampering
-            # without paying model/RAG cost when the authoritative audit bundle is a cache hit.
-            skill_text = build_skill_md_from_package(pkg)
-            skill_path = pkg / "SKILL.md"
-            if not skill_path.is_file() or skill_path.read_text(encoding="utf-8") != skill_text:
-                _atomic_write_text(skill_path, skill_text)
-            eprint(f"[audit prepare cache hit] {pkg.name}")
+            if selected.kind == "workbook":
+                # SKILL is a deterministic view over the historical workbook package.  A sheet
+                # bundle is deliberately not allowed to replace that root-level view.
+                skill_text = build_skill_md_from_package(pkg)
+                skill_path = pkg / "SKILL.md"
+                if (
+                    not skill_path.is_file()
+                    or skill_path.read_text(encoding="utf-8") != skill_text
+                ):
+                    _atomic_write_text(skill_path, skill_text)
+            scope_label = (
+                "" if selected.kind == "workbook" else f" (sheet: {selected.sheet})"
+            )
+            eprint(f"[audit prepare cache hit] {pkg.name}{scope_label}")
             return PrepareResult(
                 package=pkg,
-                facts_path=pkg / "data" / _ARTIFACTS[0],
-                standards_path=pkg / "data" / _ARTIFACTS[1],
-                brief_path=pkg / "data" / _ARTIFACTS[2],
+                scope=selected,
+                facts_path=paths.facts,
+                standards_path=paths.standards,
+                brief_path=paths.brief,
                 status=status,
                 cached=True,
             )
@@ -347,7 +474,7 @@ def _prepare_package_unlocked(
             client = client_factory()
 
         generated_at = generated_at or _now_iso()
-        data_dir = pkg / "data"
+        data_dir = paths.data_dir
         data_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".audit_prepare_", dir=pkg) as td:
             staging = Path(td)
@@ -362,6 +489,9 @@ def _prepare_package_unlocked(
                     model=model,
                     generated_at=generated_at,
                     output=staging / _ARTIFACTS[0],
+                    sheet_names=(
+                        [selected.sheet] if selected.kind == "sheet" else None
+                    ),
                 )
 
             standards_recipe = _standards_recipe(facts, retriever_descriptor)
@@ -377,12 +507,18 @@ def _prepare_package_unlocked(
                     audit_facts_sha256=json_sha256(facts),
                 )
 
-            brief_recipe = _brief_recipe(facts, context, model=model)
+            brief_recipe = _brief_recipe(
+                facts,
+                context,
+                model=model,
+                analysis_scope=analysis_scope,
+            )
             brief = build_audit_brief(
                 facts,
                 context,
                 client=client,
                 model=model,
+                analysis_scope=analysis_scope,
                 generated_at=generated_at,
                 eprint=eprint,
             )
@@ -390,62 +526,89 @@ def _prepare_package_unlocked(
             if not (staging / _ARTIFACTS[1]).is_file():
                 _write_json(staging / _ARTIFACTS[1], context)
             _write_json(staging / _ARTIFACTS[2], brief)
-            keys = bundle_keys(facts, context, brief)
+            keys = scope_bundle_keys(selected, facts, context, brief)
             status = brief.get("readiness", {}).get("status", "not_ready")
-            _write_text(
-                staging / "SKILL.md",
-                build_skill_md_from_package(pkg, audit_brief=brief),
-            )
+            scope_commit = None
+            if selected.kind == "workbook":
+                _write_text(
+                    staging / "SKILL.md",
+                    build_skill_md_from_package(pkg, audit_brief=brief),
+                )
+            else:
+                scope_commit = build_scope_commit(
+                    pkg,
+                    selected,
+                    facts,
+                    context,
+                    brief,
+                    version=PREPARE_VERSION,
+                    prepared_at=generated_at,
+                )
 
-            # All expensive/semantic work and validation completed.  Publish the fixed artifact
-            # paths and the agent-facing SKILL first. meta.json is the final atomic commit marker,
-            # so a hard crash before it cannot advertise a bundle whose SKILL is still stale.
-            # If any catchable local write fails, restore the prior complete bundle byte-for-byte.
-            targets = [data_dir / name for name in _ARTIFACTS]
-            protected = [*targets, pkg / "meta.json", pkg / "SKILL.md"]
+            # All expensive/semantic work and validation completed.  Workbook scope preserves
+            # the historical artifact -> SKILL -> meta commit order.  Sheet scope publishes its
+            # three artifacts and writes commit.json last.  If any catchable local write fails,
+            # restore the prior complete scope byte-for-byte.
+            targets = list(paths.artifacts)
+            protected = [*targets]
+            if selected.kind == "workbook":
+                protected.extend((pkg / "meta.json", pkg / "SKILL.md"))
+            else:
+                protected.append(paths.commit)
             snapshot = _snapshot_files(protected)
             try:
                 for name, target in zip(_ARTIFACTS, targets, strict=True):
                     (staging / name).replace(target)
-                (staging / "SKILL.md").replace(pkg / "SKILL.md")
-                _fsync_directory(data_dir)
-                _fsync_directory(pkg)
-                set_audit_preparation(
-                    pkg,
-                    status=status,
-                    version=PREPARE_VERSION,
-                    facts_key=keys[0],
-                    standards_key=keys[1],
-                    brief_key=keys[2],
-                    prepared_at=generated_at,
-                    review_status=brief.get("review", {}).get("status", "draft"),
-                )
+                if selected.kind == "workbook":
+                    (staging / "SKILL.md").replace(pkg / "SKILL.md")
+                    _fsync_directory(data_dir)
+                    _fsync_directory(pkg)
+                    set_audit_preparation(
+                        pkg,
+                        status=status,
+                        version=PREPARE_VERSION,
+                        facts_key=keys[0],
+                        standards_key=keys[1],
+                        brief_key=keys[2],
+                        prepared_at=generated_at,
+                        review_status=brief.get("review", {}).get("status", "draft"),
+                    )
+                else:
+                    assert scope_commit is not None
+                    # This is the sole sheet-scope commit point and is intentionally last.
+                    _fsync_directory(data_dir)
+                    write_scope_commit_atomic(pkg, selected, scope_commit)
             except BaseException:
                 _restore_files(snapshot)
                 raise
 
         try:
-            entry = cache.update_audit(
-                pkg.parent,
-                pkg.name,
-                facts_key=keys[0],
-                standards_key=keys[1],
-                brief_key=keys[2],
-                facts_recipe_key=facts_recipe,
-                standards_recipe_key=standards_recipe,
-                brief_recipe_key=brief_recipe,
-                prepare_version=PREPARE_VERSION,
-                status=status,
-            )
+            cache_values = {
+                "facts_key": keys[0],
+                "standards_key": keys[1],
+                "brief_key": keys[2],
+                "facts_recipe_key": facts_recipe,
+                "standards_recipe_key": standards_recipe,
+                "brief_recipe_key": brief_recipe,
+                "prepare_version": PREPARE_VERSION,
+                "status": status,
+            }
+            if selected.kind == "workbook":
+                entry = cache.update_audit(pkg.parent, pkg.name, **cache_values)
+            else:
+                entry = cache.update_audit_scope(
+                    pkg.parent, pkg.name, selected.id, **cache_values
+                )
             if entry is None:
                 eprint(f"[audit prepare] _index.json에 {pkg.name} 항목 없음 — cache mirror 생략")
         except Exception as e:  # package artifacts are authoritative; index is only a mirror
             eprint(f"[audit prepare] cache mirror 갱신 실패(준비본은 유효): {e}")
         return PrepareResult(
             package=pkg,
-            facts_path=data_dir / _ARTIFACTS[0],
-            standards_path=data_dir / _ARTIFACTS[1],
-            brief_path=data_dir / _ARTIFACTS[2],
+            scope=selected,
+            facts_path=paths.facts,
+            standards_path=paths.standards,
+            brief_path=paths.brief,
             status=status,
             cached=False,
         )
@@ -463,6 +626,8 @@ def prepare_package(
     retriever: StandardsRetriever | None,
     retriever_descriptor: dict,
     model: str,
+    sheet: str | None = None,
+    scope: AuditScope | None = None,
     force: bool = False,
     generated_at: str | None = None,
     eprint=None,
@@ -478,6 +643,8 @@ def prepare_package(
             retriever=retriever,
             retriever_descriptor=retriever_descriptor,
             model=model,
+            sheet=sheet,
+            scope=scope,
             force=force,
             generated_at=generated_at,
             eprint=eprint,
@@ -490,6 +657,8 @@ def prepare_package(
             retriever=retriever,
             retriever_descriptor=retriever_descriptor,
             model=model,
+            sheet=sheet,
+            scope=scope,
             force=force,
             generated_at=generated_at,
             eprint=eprint,

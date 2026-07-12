@@ -512,6 +512,50 @@ def get_audit(root: Path, dirname: str) -> dict | None:
     return json.loads(json.dumps(entry["audit"], ensure_ascii=False))
 
 
+def update_audit_scope(
+    root: Path,
+    dirname: str,
+    scope_id: str,
+    **values,
+) -> dict | None:
+    """Mirror one namespaced audit scope without mutating the workbook audit cache."""
+    if not isinstance(scope_id, str) or not re.fullmatch(r"[0-9a-f]{64}", scope_id):
+        raise ValueError("scope_id는 64자리 소문자 SHA-256이어야 합니다.")
+    allowed = {
+        "facts_key", "standards_key", "brief_key",
+        "facts_recipe_key", "standards_recipe_key", "brief_recipe_key",
+        "prepare_version", "status",
+    }
+    unknown = sorted(set(values) - allowed)
+    if unknown:
+        raise ValueError(f"알 수 없는 audit scope cache 필드: {unknown}")
+    root = Path(root)
+    with _index_lock(root):
+        index = _load_index_unlocked(root)
+        entry = index.get("entries", {}).get(dirname)
+        if entry is None:
+            entry = _entry_from_package(root, dirname)
+            if entry is not None:
+                index.setdefault("entries", {})[dirname] = entry
+        if entry is not None:
+            scoped = entry.setdefault("audit_scopes", {}).setdefault(scope_id, {})
+            for name, value in values.items():
+                scoped[name] = value
+        _save_index_unlocked(root, index)
+        return entry
+
+
+def get_audit_scope(root: Path, dirname: str, scope_id: str) -> dict | None:
+    """Return a detached cache record for one sheet audit scope."""
+    entry = load_index(root).get("entries", {}).get(dirname)
+    if not isinstance(entry, dict):
+        return None
+    scopes = entry.get("audit_scopes")
+    if not isinstance(scopes, dict) or not isinstance(scopes.get(scope_id), dict):
+        return None
+    return json.loads(json.dumps(scopes[scope_id], ensure_ascii=False))
+
+
 def record(
     root: Path,
     source_path: Path | str,

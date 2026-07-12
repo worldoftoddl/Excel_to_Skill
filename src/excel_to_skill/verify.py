@@ -59,6 +59,9 @@ _AUDIT_RELS = (
     "data/standards_context.json",
     "data/audit_brief.json",
 )
+_AUDIT_SCOPE_CORE_REQUIRED = tuple(
+    rel for rel in _REQUIRED if rel != "SKILL.md"
+)
 
 
 @dataclass
@@ -99,6 +102,53 @@ def _check_files(pkg: Path) -> Check:
         "files",
         not missing,
         "필수 파일 모두 존재" if not missing else f"누락: {missing}",
+    )
+
+
+def _check_audit_scope_core_files(pkg: Path) -> Check:
+    """Check shared deterministic inputs without requiring the root agent view."""
+    missing = [
+        rel for rel in _AUDIT_SCOPE_CORE_REQUIRED if not (pkg / rel).is_file()
+    ]
+    if not _layout_htmls(pkg):
+        missing.append("layout/*.html")
+    return Check(
+        "audit_scope_core:files",
+        not missing,
+        "deterministic core 파일 모두 존재" if not missing else f"누락: {missing}",
+    )
+
+
+def _check_audit_scope_core_meta(pkg: Path) -> Check:
+    """Validate deterministic meta fields while ignoring unrelated operational layers."""
+    path = pkg / "meta.json"
+    if not path.is_file():
+        return Check("audit_scope_core:meta.json", False, "파일 없음")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return Check("audit_scope_core:meta.json", False, f"JSON 읽기 실패: {e}")
+    if not isinstance(document, dict):
+        return Check("audit_scope_core:meta.json", False, "JSON 객체가 아님")
+
+    # annotation and root audit_preparation are independently reviewed operational layers.  A
+    # sheet scope depends on the remaining conversion metadata, so validate that projection with
+    # a neutral annotation record required by the historical meta schema.
+    projected = dict(document)
+    projected["annotation"] = {
+        "present": False,
+        "annotator_version": None,
+        "review_status": None,
+        "annotation_key": None,
+    }
+    projected.pop("audit_preparation", None)
+    try:
+        jsonschema.validate(projected, _load_schema("meta.schema.json"))
+    except jsonschema.ValidationError as e:
+        loc = "/".join(str(part) for part in e.absolute_path) or "(root)"
+        return Check("audit_scope_core:meta.json", False, f"{loc}: {e.message}")
+    return Check(
+        "audit_scope_core:meta.json", True, "deterministic meta 스키마 통과"
     )
 
 
@@ -218,6 +268,53 @@ def _check_audit_bundle(pkg: Path) -> Check | None:
         not problems,
         (
             "facts·standards·brief 계약 통과"
+            if not problems
+            else f"문제 {len(problems)}건: {problems[:5]}"
+        ),
+    )
+
+
+def _check_audit_scopes(pkg: Path) -> Check | None:
+    """Validate every independently advertised sheet bundle; ignore uncommitted staging."""
+    root = pkg / "data/audit_scopes/sheets"
+    if not root.is_dir():
+        return None
+    commit_paths = sorted(root.glob("*/commit.json"))
+    if not commit_paths:
+        return None
+    problems: list[str] = []
+    for commit_path in commit_paths:
+        dirname = commit_path.parent.name
+        if len(dirname) != 64 or any(ch not in "0123456789abcdef" for ch in dirname):
+            problems.append(f"잘못된 scope 디렉터리 ID: {dirname!r}")
+            continue
+        try:
+            from .audit.scope import (
+                AuditScope,
+                load_scope_bundle,
+                resolve_scope,
+            )
+
+            commit = json.loads(commit_path.read_text(encoding="utf-8"))
+            if not isinstance(commit, dict):
+                raise ValueError("commit.json은 JSON 객체여야 합니다.")
+            identity = commit.get("scope")
+            sheet = identity.get("sheet") if isinstance(identity, dict) else None
+            if not isinstance(sheet, str) or not sheet:
+                raise ValueError("commit.scope.sheet가 유효하지 않습니다.")
+            scope = resolve_scope(pkg, scope=AuditScope.for_sheet(sheet))
+            if scope.id != dirname:
+                raise ValueError("scope sheet hash와 디렉터리 ID가 다릅니다.")
+            loaded = load_scope_bundle(pkg, scope)
+            if loaded is None:  # pragma: no cover - allow_absent=False contract
+                raise ValueError("scope commit을 읽지 못했습니다.")
+        except Exception as e:  # malformed optional layer is a failed check, never a crash
+            problems.append(f"{dirname}: {e}")
+    return Check(
+        "audit_scopes",
+        not problems,
+        (
+            f"독립 시트 audit scope {len(commit_paths)}개 계약 통과"
             if not problems
             else f"문제 {len(problems)}건: {problems[:5]}"
         ),
@@ -450,6 +547,9 @@ def verify_package(pkg: Path, source: Path | None = None) -> VerifyResult:
     audit_check = _check_audit_bundle(pkg)
     if audit_check is not None:
         checks.append(audit_check)
+    audit_scopes_check = _check_audit_scopes(pkg)
+    if audit_scopes_check is not None:
+        checks.append(audit_scopes_check)
 
     if source is None:
         checks.append(
@@ -465,3 +565,21 @@ def verify_package(pkg: Path, source: Path | None = None) -> VerifyResult:
         checks.append(_check_reproducibility(pkg, source))
 
     return VerifyResult(checks)
+
+
+def verify_audit_scope_core(pkg: Path) -> VerifyResult:
+    """Validate deterministic inputs shared by an independently reviewed sheet scope.
+
+    The selected scope's facts/context/brief and final commit are validated by its consumer gate.
+    Root SKILL, annotation, and workbook audit artifacts are separate operational views and must
+    not block review or recovery of an otherwise valid sheet scope.
+    """
+    path = Path(pkg)
+    return VerifyResult([
+        _check_audit_scope_core_files(path),
+        _check_audit_scope_core_meta(path),
+        _check_schema(path, "data/references.json", "references.schema.json"),
+        _check_schema(path, "data/diagnostics.json", "diagnostics.schema.json"),
+        _check_cells_jsonl(path),
+        _check_full_names(path),
+    ])
