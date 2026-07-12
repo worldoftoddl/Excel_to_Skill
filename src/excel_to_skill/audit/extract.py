@@ -41,7 +41,7 @@ _SCHEMA_PATH = SCHEMA_DIR / "audit_facts.schema.json"
 _REGION_PROMPT_PATH = PROMPT_DIR / "audit_extract_region_v1.md"
 _CONSOLIDATE_PROMPT_PATH = PROMPT_DIR / "audit_consolidate_v1.md"
 
-EXTRACTOR_VERSION = "0.2.0"
+EXTRACTOR_VERSION = "0.2.1"
 DEFAULT_OUTPUT = Path("data/audit_facts.json")
 
 ExtractionClient = Callable[..., dict | str]
@@ -203,6 +203,11 @@ def _region_response_schema(audit_schema: dict, region_id: str) -> dict:
 
 
 def _consolidation_response_schema(audit_schema: dict) -> dict:
+    definitions = copy.deepcopy(audit_schema["definitions"])
+    # Structured-output providers sometimes materialize an omitted optional array as ``[]``.
+    # Accept that representation only at the model boundary; the deterministic normalizer below
+    # removes it before the authoritative audit_facts schema is applied.
+    definitions["standardQuery"]["properties"]["standard_nos"]["minItems"] = 0
     schema = {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
@@ -221,10 +226,18 @@ def _consolidation_response_schema(audit_schema: dict) -> dict:
                 "uniqueItems": True,
             },
         },
-        "definitions": copy.deepcopy(audit_schema["definitions"]),
+        "definitions": definitions,
     }
     jsonschema.Draft7Validator.check_schema(schema)
     return schema
+
+
+def _normalize_consolidation_response(document: dict) -> dict:
+    """Canonicalize non-substantive provider representations before final validation."""
+    for query in document.get("standard_queries", []):
+        if isinstance(query, dict) and query.get("standard_nos") == []:
+            query.pop("standard_nos")
+    return document
 
 
 def _bounds(ref: str) -> tuple[str, tuple[int, int, int, int]]:
@@ -578,6 +591,7 @@ def extract_audit_facts(
         schema=_consolidation_response_schema(audit_schema),
         label="workbook consolidation",
     )
+    consolidation = _normalize_consolidation_response(consolidation)
 
     document = {
         "schema_version": "audit_facts.v1",

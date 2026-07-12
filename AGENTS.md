@@ -111,17 +111,19 @@ management assertions, deterministic assertion-procedure queries, and a bounded 
 briefing/Q&A agent. The current brief contract is `audit_brief.v2`; rerunning `prepare` upgrades
 a v1 brief while reusing valid upstream stages.
 
-The current verified baseline is `343 passed, 1 skipped`; prior wheel and source-distribution
-build checks pass. An earlier live synthetic receivables workpaper produced two documented
-mappings—existence to an
-external-confirmation/reconciliation procedure and completeness to a shipping-document-to-ledger
-trace—with no unpaired assertions or procedures. Four standards queries succeeded against
-`standards_20250829_bgem3`. The final `audit_brief` 0.4.3 smoke omitted two statements that named
-standards absent from their own citations and recorded that omission in readiness. The live
-briefing agent selected `tests` and `produces` relations, results, conclusions, gaps, exact cells,
-CID locations, and bounded original standards excerpts; deterministic hydration was complete.
-This smoke result proves the pipeline wiring, not human approval of a real audit workpaper;
-generated briefs and agent answers remain `draft`/`unreviewed` unless explicitly reviewed.
+The current verified baseline is `344 passed, 1 skipped`; prior wheel and source-distribution
+build checks pass. The latest live synthetic receivables workpaper regenerated
+`audit_facts` with extractor 0.2.1 and published `audit_brief.v2`/0.4.3. It produced two
+documented mappings—existence to an external-confirmation/reconciliation procedure and
+completeness to a shipping-document-to-ledger trace—with no unpaired assertions or procedures.
+Four standards queries and 25 verified citations succeeded against
+`standards_20250829_bgem3`. Readiness remained `partial` because framework/effective-date
+identity was not fully structured, while no workbook open-item facts remained. The live briefing
+agent selected `tests` and `produces` relations, results, conclusions, gaps, exact cells, CID
+locations, and bounded original standards excerpts; deterministic hydration was complete and a
+second `prepare` was a no-network cache hit. This smoke result proves the pipeline wiring, not
+human approval of a real audit workpaper; generated briefs and agent answers remain
+`draft`/`unreviewed` unless explicitly reviewed.
 
 ## Commit & Pull Request Guidelines
 

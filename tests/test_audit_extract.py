@@ -87,6 +87,7 @@ class StubExtractionClient:
         cite_context_with_current_region: bool = False,
         bad_query_reference: bool = False,
         bad_relation_endpoint: bool = False,
+        empty_standard_nos: bool = False,
     ) -> None:
         self.fenced_first_response = fenced_first_response
         self.outside_first_region = outside_first_region
@@ -95,6 +96,7 @@ class StubExtractionClient:
         self.cite_context_with_current_region = cite_context_with_current_region
         self.bad_query_reference = bad_query_reference
         self.bad_relation_endpoint = bad_relation_endpoint
+        self.empty_standard_nos = empty_standard_nos
         self.calls: list[dict] = []
 
     def __call__(self, *, system: str, user: str, schema: dict) -> dict | str:
@@ -139,7 +141,7 @@ class StubExtractionClient:
         sources = payload["sources"]
         risk_id, procedure_id = facts[0]["id"], facts[1]["id"]
         query_fact_id = "fact:missing" if self.bad_query_reference else risk_id
-        return {
+        result = {
             "workpaper": {
                 "kind": "risk_assessment",
                 "title": "매출 위험 평가",
@@ -174,6 +176,9 @@ class StubExtractionClient:
                 }
             ],
         }
+        if self.empty_standard_nos:
+            result["standard_queries"][0]["standard_nos"] = []
+        return result
 
 
 def test_extract_calls_every_region_then_consolidates_and_binds_sources(
@@ -200,7 +205,7 @@ def test_extract_calls_every_region_then_consolidates_and_binds_sources(
     assert document["standard_queries"][0]["domain"] == "audit"
     assert document["generator"] == {
         "name": "excel_to_skill.audit.extract",
-        "version": "0.2.0",
+        "version": "0.2.1",
         "kind": "hybrid",
         "model": "stub-model",
         "prompt_sha256": document["generator"]["prompt_sha256"],
@@ -229,6 +234,19 @@ def test_extract_calls_every_region_then_consolidates_and_binds_sources(
         )
     )
     jsonschema.validate(document, schema)
+
+
+def test_extract_normalizes_empty_optional_standard_numbers(tmp_path: Path) -> None:
+    pkg = _package(tmp_path)
+    client = StubExtractionClient(empty_standard_nos=True)
+
+    document = extract_audit_facts(pkg, client=client)
+
+    assert "standard_nos" not in document["standard_queries"][0]
+    response_schema = client.calls[-1]["schema"]
+    assert response_schema["definitions"]["standardQuery"]["properties"][
+        "standard_nos"
+    ]["minItems"] == 0
 
 
 def test_extract_rejects_real_ledger_address_outside_observed_region(
