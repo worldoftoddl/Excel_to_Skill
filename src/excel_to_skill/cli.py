@@ -586,6 +586,67 @@ def _cmd_audit_scopes(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_audit_aggregate(args: argparse.Namespace, *, client_factory=None) -> int:
+    """Plan or build a compact account briefing from committed sheet scopes."""
+    from .annotator import DEFAULT_MODEL, build_anthropic_client
+    from .audit.aggregate import (
+        AuditAggregateError,
+        aggregate_audit_package,
+        plan_audit_aggregate,
+        render_audit_aggregate_markdown,
+    )
+
+    pkg = Path(args.path)
+    if not pkg.is_dir() or not (pkg / "meta.json").is_file():
+        _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
+        return 1
+    model = args.model or DEFAULT_MODEL
+    selection = {
+        "sheets": getattr(args, "sheets", None),
+        "all_committed_sheets": bool(
+            getattr(args, "all_committed_sheets", False)
+        ),
+    }
+    try:
+        if args.plan:
+            result = plan_audit_aggregate(
+                pkg, model=model, force=args.force, **selection
+            )
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        _load_local_env()
+        make_client = client_factory or (
+            lambda: build_anthropic_client(
+                model,
+                tool_name="emit_audit_aggregate_plan",
+                max_tokens=16384,
+                purpose="audit-aggregate",
+            )
+        )
+        aggregate = aggregate_audit_package(
+            pkg,
+            model=model,
+            client_factory=make_client,
+            force=args.force,
+            eprint=_eprint,
+            **selection,
+        )
+    except (AuditAggregateError, OSError, RuntimeError) as e:
+        _eprint(f"[audit-aggregate 실패] {e}")
+        return 1
+    if args.json:
+        print(json.dumps(aggregate.document, ensure_ascii=False))
+    else:
+        print(render_audit_aggregate_markdown(aggregate.document), end="")
+    _eprint(
+        f"[audit-aggregate] {pkg.name}: scopes="
+        f"{aggregate.document['coverage']['selected_sheet_count']} · "
+        f"status={aggregate.document['readiness']['status']} · "
+        f"{'cache' if aggregate.cached else 'generated'} · {aggregate.paths.brief}"
+    )
+    return 0
+
+
 def _cmd_prepare(args: argparse.Namespace, *, client_factory=None, caller_factory=None) -> int:
     """Prepare either one workbook bundle or independent per-sheet bundles."""
     from .annotator import DEFAULT_MODEL, build_anthropic_client
@@ -988,6 +1049,51 @@ def _cmd_audit_agent(args: argparse.Namespace, *, client_factory=None) -> int:
     return 0
 
 
+def _cmd_audit_chat(args: argparse.Namespace, *, client_factory=None) -> int:
+    """Run or resume a compiled, persistent audit-workpaper conversation."""
+    from .annotator import DEFAULT_MODEL
+    from .audit.consume import AuditConsumeError
+    from .audit.conversation import (
+        AuditConversationError,
+        render_audit_conversation_markdown,
+        run_audit_conversation_turn,
+    )
+    from .audit.langchain_client import build_langchain_anthropic_client
+
+    pkg = Path(args.path)
+    if not pkg.is_dir() or not (pkg / "meta.json").is_file():
+        _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
+        return 1
+    model = args.model or DEFAULT_MODEL
+    make_client = client_factory or (
+        lambda: build_langchain_anthropic_client(
+            model,
+            max_tokens=8192,
+            purpose="audit-chat",
+        )
+    )
+    try:
+        result = run_audit_conversation_turn(
+            pkg,
+            model=model,
+            client_factory=make_client,
+            question=args.question,
+            thread_id=args.thread,
+            sheet=getattr(args, "sheet", None),
+            limit=args.limit,
+            max_steps=args.max_steps,
+            eprint=_eprint,
+        )
+    except (AuditConversationError, AuditConsumeError, RuntimeError) as e:
+        _eprint(f"[audit-chat 실패] {e}")
+        return 1
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(render_audit_conversation_markdown(result), end="")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     from .audit.consume import AUDIT_SEARCH_KINDS
 
@@ -1139,6 +1245,38 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     scopes.add_argument("path", help="convert가 만든 패키지 폴더")
 
+    aggregate = sub.add_parser(
+        "audit-aggregate",
+        help="commit된 시트 brief만으로 계정별 종합 브리핑 생성",
+    )
+    aggregate.add_argument("path", help="시트 prepare가 완료된 패키지 폴더")
+    aggregate_scope = aggregate.add_mutually_exclusive_group(required=True)
+    aggregate_scope.add_argument(
+        "--sheet",
+        dest="sheets",
+        action="append",
+        help="aggregate할 정확한 시트명(반복 지정 가능)",
+    )
+    aggregate_scope.add_argument(
+        "--all-committed-sheets",
+        action="store_true",
+        help="현재 commit된 모든 시트 scope를 workbook 순서로 aggregate",
+    )
+    aggregate.add_argument(
+        "--plan",
+        action="store_true",
+        help="모델 호출 없이 범위·payload 크기·cache 상태만 출력",
+    )
+    aggregate.add_argument(
+        "--model", default=None, help="aggregate 선택 모델(기본 annotate 기본 모델)"
+    )
+    aggregate.add_argument(
+        "--force", action="store_true", help="유효한 aggregate cache도 무시하고 재생성"
+    )
+    aggregate.add_argument(
+        "--json", action="store_true", help="Markdown 대신 aggregate artifact JSON 출력"
+    )
+
     b = sub.add_parser("brief", help="준비된 감사조서 brief 조회(draft는 미검토 표시)")
     b.add_argument("path", help="prepare가 완료된 패키지 폴더")
     b.add_argument("--sheet", default=None, help="독립 준비된 시트 scope")
@@ -1211,6 +1349,37 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Markdown 대신 근거가 보강된 JSON 출력",
     )
 
+    ac = sub.add_parser(
+        "audit-chat",
+        help="준비된 감사조서와 영속 대화를 시작하거나 재개",
+    )
+    ac.add_argument("path", help="prepare가 완료된 패키지 폴더")
+    ac.add_argument("--sheet", default=None, help="독립 준비된 시트 scope")
+    ac.add_argument("--question", required=True, help="현재 대화 turn의 질문")
+    ac.add_argument(
+        "--thread",
+        default=None,
+        help="재개할 thread ID(생략하면 새 thread 생성)",
+    )
+    ac.add_argument("--model", default=None, help="대화 모델(기본 annotate 기본 모델)")
+    ac.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="도구별 근거 반환 상한(1~200, 기본 100)",
+    )
+    ac.add_argument(
+        "--max-steps",
+        type=int,
+        default=6,
+        help="한 turn의 모델 도구 선택·최종화 최대 회수(1~12, 기본 6)",
+    )
+    ac.add_argument(
+        "--json",
+        action="store_true",
+        help="Markdown 대신 thread·usage·근거 응답 JSON 출력",
+    )
+
     ar = sub.add_parser(
         "audit-review",
         help="준비된 감사 facts+brief를 함께 승인 또는 반려",
@@ -1226,7 +1395,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.cmd in {"annotate", "prepare", "audit-agent"}:
+    if args.cmd in {"annotate", "prepare", "audit-agent", "audit-chat"}:
         _load_local_env()
     if args.cmd == "convert":
         return _cmd_convert(args)
@@ -1242,6 +1411,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_audit_review(args)
     if args.cmd == "audit-scopes":
         return _cmd_audit_scopes(args)
+    if args.cmd == "audit-aggregate":
+        return _cmd_audit_aggregate(args)
     if args.cmd in ("overview", "inspect", "search", "refs"):
         return _cmd_consume(args)
     if args.cmd in (
@@ -1250,6 +1421,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_audit_consume(args)
     if args.cmd == "audit-agent":
         return _cmd_audit_agent(args)
+    if args.cmd == "audit-chat":
+        return _cmd_audit_chat(args)
     _eprint(f"'{args.cmd}' 은(는) 알 수 없는 명령입니다.")
     return 2
 

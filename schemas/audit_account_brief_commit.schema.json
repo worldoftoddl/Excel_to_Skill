@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Account briefing aggregate commit marker",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "aggregate_id", "inputs", "present", "status", "version",
+    "aggregate_key", "prepared_at", "review_status"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_account_brief_commit.v1"},
+    "aggregate_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workbook_sha256", "cells_sha256", "sheet_manifest_sha256",
+        "references_sha256", "selection", "committed_scope_manifest_sha256",
+        "source_manifest_sha256", "scopes"
+      ],
+      "properties": {
+        "workbook_sha256": {"$ref": "#/definitions/sha256"},
+        "cells_sha256": {"$ref": "#/definitions/sha256"},
+        "sheet_manifest_sha256": {"$ref": "#/definitions/sha256"},
+        "references_sha256": {"$ref": "#/definitions/sha256"},
+        "selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "scope_ids"],
+          "properties": {
+            "mode": {"enum": ["explicit_sheets", "all_committed_sheets"]},
+            "scope_ids": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {"$ref": "#/definitions/sha256"},
+              "uniqueItems": true
+            }
+          }
+        },
+        "committed_scope_manifest_sha256": {"$ref": "#/definitions/sha256"},
+        "source_manifest_sha256": {"$ref": "#/definitions/sha256"},
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {"$ref": "#/definitions/scopeBinding"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "present": {"const": true},
+    "status": {"enum": ["ready", "partial", "not_ready"]},
+    "version": {"type": "string", "minLength": 1},
+    "aggregate_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "prepared_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "review_status": {"const": "draft"}
+  },
+  "definitions": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sheet", "id"],
+      "properties": {
+        "kind": {"const": "sheet"},
+        "sheet": {"type": "string", "minLength": 1},
+        "id": {"$ref": "#/definitions/sha256"}
+      }
+    },
+    "scopeBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope", "commit_sha256", "facts_key", "standards_key", "brief_key",
+        "prepared_at", "readiness_status", "facts_review_status",
+        "brief_review_status"
+      ],
+      "properties": {
+        "scope": {"$ref": "#/definitions/scope"},
+        "commit_sha256": {"$ref": "#/definitions/sha256"},
+        "facts_key": {"$ref": "#/definitions/sha256"},
+        "standards_key": {"$ref": "#/definitions/sha256"},
+        "brief_key": {"$ref": "#/definitions/sha256"},
+        "prepared_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "readiness_status": {"enum": ["ready", "partial", "not_ready"]},
+        "facts_review_status": {"enum": ["draft", "approved", "rejected"]},
+        "brief_review_status": {"enum": ["draft", "approved", "rejected"]}
+      }
+    }
+  }
+}

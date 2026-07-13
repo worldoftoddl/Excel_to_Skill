@@ -1,0 +1,401 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Committed account-level briefing over worksheet audit scopes",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "inputs",
+    "generator",
+    "review",
+    "readiness",
+    "trust",
+    "coverage",
+    "portfolio",
+    "accounts",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_account_brief.v1"},
+    "inputs": {"$ref": "#/definitions/inputs"},
+    "generator": {"$ref": "#/definitions/generator"},
+    "review": {"$ref": "#/definitions/review"},
+    "readiness": {"$ref": "#/definitions/readiness"},
+    "trust": {"$ref": "#/definitions/trust"},
+    "coverage": {"$ref": "#/definitions/coverage"},
+    "portfolio": {"$ref": "#/definitions/portfolio"},
+    "accounts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {"$ref": "#/definitions/account"}
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"$ref": "#/definitions/aggregateLimitation"},
+      "uniqueItems": true
+    }
+  },
+  "definitions": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sheet", "id"],
+      "properties": {
+        "kind": {"const": "sheet"},
+        "sheet": {"type": "string", "minLength": 1},
+        "id": {"$ref": "#/definitions/sha256"}
+      }
+    },
+    "scopeBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "commit_sha256",
+        "facts_key",
+        "standards_key",
+        "brief_key",
+        "prepared_at",
+        "readiness_status",
+        "facts_review_status",
+        "brief_review_status"
+      ],
+      "properties": {
+        "scope": {"$ref": "#/definitions/scope"},
+        "commit_sha256": {"$ref": "#/definitions/sha256"},
+        "facts_key": {"$ref": "#/definitions/sha256"},
+        "standards_key": {"$ref": "#/definitions/sha256"},
+        "brief_key": {"$ref": "#/definitions/sha256"},
+        "prepared_at": {"$ref": "#/definitions/timestamp"},
+        "readiness_status": {"enum": ["ready", "partial", "not_ready"]},
+        "facts_review_status": {"enum": ["draft", "approved", "rejected"]},
+        "brief_review_status": {"enum": ["draft", "approved", "rejected"]}
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "scope_ids"],
+      "properties": {
+        "mode": {"enum": ["explicit_sheets", "all_committed_sheets"]},
+        "scope_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {"$ref": "#/definitions/sha256"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workbook_sha256",
+        "cells_sha256",
+        "sheet_manifest_sha256",
+        "references_sha256",
+        "selection",
+        "committed_scope_manifest_sha256",
+        "source_manifest_sha256",
+        "scopes"
+      ],
+      "properties": {
+        "workbook_sha256": {"$ref": "#/definitions/sha256"},
+        "cells_sha256": {"$ref": "#/definitions/sha256"},
+        "sheet_manifest_sha256": {"$ref": "#/definitions/sha256"},
+        "references_sha256": {"$ref": "#/definitions/sha256"},
+        "selection": {"$ref": "#/definitions/selection"},
+        "committed_scope_manifest_sha256": {"$ref": "#/definitions/sha256"},
+        "source_manifest_sha256": {"$ref": "#/definitions/sha256"},
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {"$ref": "#/definitions/scopeBinding"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "model", "prompt_sha256", "generated_at"],
+      "properties": {
+        "name": {"const": "excel_to_skill.audit.aggregate"},
+        "version": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "prompt_sha256": {"$ref": "#/definitions/sha256"},
+        "generated_at": {"$ref": "#/definitions/timestamp"}
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reviewed_at", "note"],
+      "properties": {
+        "status": {"const": "draft"},
+        "reviewed_at": {"type": "null"},
+        "note": {"type": "null"}
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasons"],
+      "properties": {
+        "status": {"enum": ["ready", "partial", "not_ready"]},
+        "reasons": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["all_sources_approved", "source_unreviewed", "aggregate_unreviewed"],
+      "properties": {
+        "all_sources_approved": {"type": "boolean"},
+        "source_unreviewed": {"type": "boolean"},
+        "aggregate_unreviewed": {"const": true}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection_complete",
+        "grouping_mode",
+        "complete_over_committed_sheets",
+        "workbook_sheet_count",
+        "committed_sheet_count",
+        "selected_sheet_count",
+        "unprepared_sheet_count",
+        "included_sheets",
+        "omitted_committed_sheets",
+        "model_context_bytes",
+        "model_context_limit_bytes",
+        "candidate_source_record_count",
+        "candidate_record_count",
+        "omitted_candidate_record_count",
+        "candidate_selection_complete"
+      ],
+      "properties": {
+        "selection_complete": {"const": true},
+        "grouping_mode": {"const": "one_sheet_scope_per_account_section"},
+        "complete_over_committed_sheets": {"type": "boolean"},
+        "workbook_sheet_count": {"type": "integer", "minimum": 1},
+        "committed_sheet_count": {"type": "integer", "minimum": 1},
+        "selected_sheet_count": {"type": "integer", "minimum": 1, "maximum": 64},
+        "unprepared_sheet_count": {"type": "integer", "minimum": 0},
+        "included_sheets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "omitted_committed_sheets": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "model_context_bytes": {"type": "integer", "minimum": 1},
+        "model_context_limit_bytes": {"type": "integer", "minimum": 1},
+        "candidate_source_record_count": {"type": "integer", "minimum": 1},
+        "candidate_record_count": {"type": "integer", "minimum": 1},
+        "omitted_candidate_record_count": {"type": "integer", "minimum": 0},
+        "candidate_selection_complete": {"type": "boolean"}
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_ref",
+        "kind",
+        "scope",
+        "source_id",
+        "text",
+        "section",
+        "type",
+        "status",
+        "confidence",
+        "severity",
+        "fact_ids",
+        "relation_ids",
+        "standard_citation_ids"
+      ],
+      "properties": {
+        "record_ref": {"type": "string", "pattern": "^record:[0-9a-f]{64}$"},
+        "kind": {"enum": ["statement", "limitation", "readiness_reason"]},
+        "scope": {"$ref": "#/definitions/scope"},
+        "source_id": {"type": ["string", "null"]},
+        "text": {"type": "string", "minLength": 1},
+        "section": {"type": ["string", "null"]},
+        "type": {"type": ["string", "null"]},
+        "status": {"type": ["string", "null"]},
+        "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "severity": {"type": ["string", "null"]},
+        "fact_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "relation_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "standard_citation_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      }
+    },
+    "portfolio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "highlights", "attention_items"],
+      "properties": {
+        "summary": {"type": "string", "minLength": 1},
+        "highlights": {
+          "type": "array",
+          "maxItems": 24,
+          "items": {"$ref": "#/definitions/record"},
+          "uniqueItems": true
+        },
+        "attention_items": {
+          "type": "array",
+          "maxItems": 24,
+          "items": {"$ref": "#/definitions/record"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "workpaper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "title", "entity", "period_start", "period_end",
+        "audit_phase", "document_state", "purpose", "fact_ids"
+      ],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "title": {"type": ["string", "null"]},
+        "entity": {"type": ["string", "null"]},
+        "period_start": {"type": ["string", "null"]},
+        "period_end": {"type": ["string", "null"]},
+        "audit_phase": {"type": "string", "minLength": 1},
+        "document_state": {"type": "string", "minLength": 1},
+        "purpose": {"type": ["string", "null"]},
+        "fact_ids": {
+          "type": "array", "items": {"type": "string"}, "uniqueItems": true
+        }
+      }
+    },
+    "sourceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prepared_at", "readiness_status", "readiness_reasons",
+        "facts_review_status", "brief_review_status", "dependency_sheets",
+        "dependency_role", "dependency_sheet_contents_observed"
+      ],
+      "properties": {
+        "prepared_at": {"$ref": "#/definitions/timestamp"},
+        "readiness_status": {"enum": ["ready", "partial"]},
+        "readiness_reasons": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "facts_review_status": {"enum": ["draft", "approved"]},
+        "brief_review_status": {"enum": ["draft", "approved"]},
+        "dependency_sheets": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "dependency_role": {"const": "formula_reference_indicator_only"},
+        "dependency_sheet_contents_observed": {"const": false}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "facts", "relations", "statements", "limitations", "standards_citations",
+        "assertions", "procedures", "results", "findings", "tests_relations"
+      ],
+      "properties": {
+        "facts": {"type": "integer", "minimum": 0},
+        "relations": {"type": "integer", "minimum": 0},
+        "statements": {"type": "integer", "minimum": 0},
+        "limitations": {"type": "integer", "minimum": 0},
+        "standards_citations": {"type": "integer", "minimum": 0},
+        "assertions": {"type": "integer", "minimum": 0},
+        "procedures": {"type": "integer", "minimum": 0},
+        "results": {"type": "integer", "minimum": 0},
+        "findings": {"type": "integer", "minimum": 0},
+        "tests_relations": {"type": "integer", "minimum": 0}
+      }
+    },
+    "account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "label", "label_source", "label_fact_id", "scope", "workpaper",
+        "source_state", "counts", "source_summary", "source_summary_statement_ids",
+        "source_summary_record_refs", "highlights", "attention_items"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^account:[0-9a-f]{64}$"},
+        "label": {"type": "string", "minLength": 1},
+        "label_source": {"enum": ["account_fact", "workpaper_title", "sheet_name"]},
+        "label_fact_id": {"type": ["string", "null"]},
+        "scope": {"$ref": "#/definitions/scope"},
+        "workpaper": {"$ref": "#/definitions/workpaper"},
+        "source_state": {"$ref": "#/definitions/sourceState"},
+        "counts": {"$ref": "#/definitions/counts"},
+        "source_summary": {"type": "string", "minLength": 1},
+        "source_summary_statement_ids": {
+          "type": "array", "items": {"type": "string"}, "uniqueItems": true
+        },
+        "source_summary_record_refs": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^record:[0-9a-f]{64}$"},
+          "uniqueItems": true
+        },
+        "highlights": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {"$ref": "#/definitions/record"},
+          "uniqueItems": true
+        },
+        "attention_items": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {"$ref": "#/definitions/record"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "aggregateLimitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "code", "description", "severity", "scope_ids"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^aggregate_limitation:[0-9a-f]{64}$"},
+        "code": {"enum": [
+          "source_unreviewed", "partial_source", "selection_subset", "candidate_truncated"
+        ]},
+        "description": {"type": "string", "minLength": 1},
+        "severity": {"enum": ["low", "moderate", "high"]},
+        "scope_ids": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/sha256"},
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

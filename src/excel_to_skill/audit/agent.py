@@ -10,6 +10,7 @@ import copy
 import json
 import re
 import html
+from dataclasses import dataclass
 from pathlib import Path
 
 import jsonschema
@@ -82,6 +83,42 @@ _ABSTENTION_REASONS = {
 
 class AuditAgentError(RuntimeError):
     """The briefing agent could not produce a grounded response."""
+
+
+@dataclass(frozen=True)
+class _AuditAgentRuntime:
+    """Validated, immutable inputs shared by every step of one agent turn."""
+
+    path: Path
+    facts: dict
+    context: dict
+    brief_doc: dict
+    scope: AuditScope
+    bundle: dict
+    briefing: dict
+    mappings: dict
+    prompt: str
+    prompt_sha: str
+    schema: dict
+    provider_schema: dict
+    analysis_scope: dict | None
+    resolver: WorkbookSourceResolver
+    known: dict[str, set[str]]
+    model: str
+    question: str | None
+    limit: int
+    max_steps: int
+
+
+@dataclass
+class _AuditAgentTurnState:
+    """Mutable control state for the bounded model/tool loop."""
+
+    observations: list[dict]
+    used_tools: list[str]
+    observed: dict[str, set[str]]
+    discovery_complete: bool
+    seen_tool_requests: set[str]
 
 
 def _provider_turn_schema(strict_schema: dict) -> dict:
@@ -928,20 +965,22 @@ def _blocked_response(
     })
 
 
-def run_audit_agent(
+def _prepare_audit_agent_runtime(
     pkg: Path | str,
     *,
     model: str,
-    client=None,
-    client_factory=None,
     question: str | None = None,
     sheet: str | None = None,
     limit: int = DEFAULT_LIMIT,
     max_steps: int = DEFAULT_MAX_STEPS,
-    eprint=None,
-) -> dict:
-    """Run a bounded tool-using briefing turn over a committed audit package."""
-    eprint = eprint or (lambda *args: None)
+    prompt_name: str = AGENT_PROMPT,
+) -> tuple[_AuditAgentRuntime | None, dict | None]:
+    """Validate and bind a turn before any provider client is constructed.
+
+    Exactly one tuple member is returned. Rejected or not-ready packages yield a
+    validated blocked response; runnable packages yield the immutable runtime used
+    by the step primitives below.
+    """
     lim = _bounded_int(limit, name="limit", default=DEFAULT_LIMIT, maximum=MAX_LIMIT)
     steps_limit = _bounded_int(
         max_steps, name="max_steps", default=DEFAULT_MAX_STEPS, maximum=MAX_STEPS
@@ -957,7 +996,7 @@ def run_audit_agent(
     bundle = _bundle_identity(path, facts, context, brief_doc, scope)
     briefing = _brief_loaded(facts, context, brief_doc, limit=lim)
     mappings = _assertion_procedures_loaded(facts, brief_doc, limit=lim)
-    prompt, prompt_sha = load_prompt(AGENT_PROMPT)
+    prompt, prompt_sha = load_prompt(prompt_name)
     if (
         briefing.get("review_status") == "rejected"
         or briefing.get("facts_review_status") == "rejected"
@@ -977,7 +1016,7 @@ def run_audit_agent(
             )
             if isinstance(note, str) and note.strip()
         ))
-        return _blocked_response(
+        return None, _blocked_response(
             path=path,
             model=model,
             prompt_sha=prompt_sha,
@@ -996,7 +1035,7 @@ def run_audit_agent(
     if briefing.get("readiness", {}).get("status") == "not_ready":
         reasons = briefing.get("readiness", {}).get("reasons", [])
         detail = "; ".join(str(reason) for reason in reasons) or "준비된 감사 사실이 없습니다."
-        return _blocked_response(
+        return None, _blocked_response(
             path=path,
             model=model,
             prompt_sha=prompt_sha,
@@ -1017,6 +1056,322 @@ def run_audit_agent(
         resolver = WorkbookSourceResolver(path)
     except Exception as e:  # workbook ledger may have changed after the committed-bundle gate
         raise AuditAgentError(f"workbook source ledger 재조회 실패: {e}") from e
+    schema = load_schema(AGENT_TURN_SCHEMA)
+    return _AuditAgentRuntime(
+        path=path,
+        facts=facts,
+        context=context,
+        brief_doc=brief_doc,
+        scope=scope,
+        bundle=bundle,
+        briefing=briefing,
+        mappings=mappings,
+        prompt=prompt,
+        prompt_sha=prompt_sha,
+        schema=schema,
+        provider_schema=_provider_turn_schema(schema),
+        analysis_scope=analysis_scope,
+        resolver=resolver,
+        known=_known_ids(facts, context, brief_doc),
+        model=model,
+        question=user_question,
+        limit=lim,
+        max_steps=steps_limit,
+    ), None
+
+
+def _new_audit_agent_turn_state(
+    runtime: _AuditAgentRuntime,
+) -> _AuditAgentTurnState:
+    """Create the exact bootstrap state used by the legacy one-shot loop."""
+    observations: list[dict] = [
+        {
+            "tool": "brief",
+            "input": {"limit": runtime.limit},
+            "result": runtime.briefing,
+        },
+        {
+            "tool": "assertion_procedures",
+            "input": {"query": None, "limit": runtime.limit},
+            "result": runtime.mappings,
+        },
+    ]
+    observed = _empty_observed()
+    _merge_observed(
+        observed,
+        _observed_from_result("brief", runtime.briefing, runtime.known),
+    )
+    _merge_observed(
+        observed,
+        _observed_from_result(
+            "assertion_procedures", runtime.mappings, runtime.known
+        ),
+    )
+    return _AuditAgentTurnState(
+        observations=observations,
+        used_tools=["brief", "assertion_procedures"],
+        observed=observed,
+        discovery_complete=all((
+            _discovery_result_complete("brief", runtime.briefing),
+            _discovery_result_complete(
+                "assertion_procedures", runtime.mappings
+            ),
+        )),
+        seen_tool_requests=set(),
+    )
+
+
+def _request_audit_agent_model_turn(
+    runtime: _AuditAgentRuntime,
+    state: _AuditAgentTurnState,
+    *,
+    client,
+    step: int,
+    eprint=None,
+) -> dict:
+    """Request and locally validate one provider action."""
+    payload = {
+        "request": {
+            "mode": "answer" if runtime.question else "briefing",
+            "question": runtime.question,
+        },
+        "trust": {
+            "review_status": runtime.briefing.get("review_status"),
+            "unreviewed": runtime.briefing.get("unreviewed"),
+            "readiness": runtime.briefing.get("readiness"),
+        },
+        "turn": step,
+        "remaining_turns": runtime.max_steps - step,
+        "observations": state.observations,
+    }
+    if runtime.analysis_scope is not None:
+        payload["analysis_scope"] = runtime.analysis_scope
+    try:
+        return call_json(
+            client,
+            system=runtime.prompt,
+            user=_serialize_model_payload(payload),
+            schema=runtime.provider_schema,
+            validation_schema=runtime.schema,
+            label="audit briefing agent",
+            retries=0,
+            eprint=eprint or (lambda *args: None),
+        )
+    except AuditLLMError as e:
+        raise AuditAgentError(str(e)) from e
+
+
+def _apply_audit_agent_tool_turn(
+    runtime: _AuditAgentRuntime,
+    state: _AuditAgentTurnState,
+    turn: dict,
+) -> None:
+    """Validate and apply one requested read-only tool action to turn state."""
+    if not isinstance(turn.get("tool"), dict) or turn.get("final") is not None:
+        state.observations.append({
+            "tool": "agent_protocol",
+            "result": _tool_error(
+                "action=tool에는 tool 객체와 final=null이 필요합니다."
+            ),
+        })
+        return
+    request = turn["tool"]
+    request_key = json.dumps(request, ensure_ascii=False, sort_keys=True)
+    if request_key in state.seen_tool_requests:
+        result = _tool_error("동일한 tool request를 반복할 수 없습니다.")
+    else:
+        state.seen_tool_requests.add(request_key)
+        try:
+            result = _execute_tool(
+                runtime.path,
+                runtime.facts,
+                runtime.context,
+                runtime.brief_doc,
+                runtime.resolver,
+                request,
+                observed=state.observed,
+                maximum_limit=runtime.limit,
+            )
+        except (AuditAgentError, AuditConsumeError) as e:
+            result = _tool_error(str(e))
+    tool_name = str(request.get("name"))
+    state.observations.append({
+        "tool": tool_name,
+        "input": request,
+        "result": result,
+    })
+    state.used_tools.append(tool_name)
+    _merge_observed(
+        state.observed,
+        _observed_from_result(tool_name, result, runtime.known),
+    )
+    state.discovery_complete = (
+        state.discovery_complete
+        and _discovery_result_complete(tool_name, result)
+    )
+
+
+def _finalize_audit_agent_turn(
+    runtime: _AuditAgentRuntime,
+    state: _AuditAgentTurnState,
+    turn: dict,
+    *,
+    step: int,
+) -> dict | None:
+    """Validate a final plan and return a hydrated response, or record retry feedback."""
+    if turn.get("action") != "final" or turn.get("tool") is not None or not isinstance(
+        turn.get("final"), dict
+    ):
+        state.observations.append({
+            "tool": "agent_protocol",
+            "result": _tool_error(
+                "action=final에는 tool=null과 final 객체가 필요합니다."
+            ),
+        })
+        return None
+
+    plan = _sanitize_plan(turn["final"])
+    problems = _validate_plan(
+        plan,
+        known=runtime.known,
+        observed=state.observed,
+    )
+    if problems:
+        state.observations.append({
+            "tool": "answer_validation",
+            "result": {
+                "error": {
+                    "code": "UNGROUNDED_FINAL",
+                    "message": problems[:10],
+                }
+            },
+        })
+        return None
+
+    final = _materialize_plan(
+        plan,
+        facts_doc=runtime.facts,
+        context_doc=runtime.context,
+        brief_doc=runtime.brief_doc,
+        question=runtime.question,
+    )
+    budget_problems = _evidence_budget_problems(final)
+    if budget_problems:
+        state.observations.append({
+            "tool": "answer_validation",
+            "result": {
+                "error": {
+                    "code": "EVIDENCE_BUDGET_EXCEEDED",
+                    "message": budget_problems,
+                }
+            },
+        })
+        return None
+
+    _assert_bundle_unchanged(
+        runtime.path,
+        runtime.facts,
+        runtime.context,
+        runtime.brief_doc,
+        runtime.bundle,
+        runtime.scope,
+    )
+    try:
+        evidence, trace_complete = _hydrate_evidence(
+            runtime.path,
+            runtime.facts,
+            runtime.context,
+            runtime.brief_doc,
+            final,
+            limit=runtime.limit,
+            resolver=runtime.resolver,
+        )
+    except AuditConsumeError as e:
+        raise AuditAgentError(f"최종 근거 trace 실패: {e}") from e
+    _assert_bundle_unchanged(
+        runtime.path,
+        runtime.facts,
+        runtime.context,
+        runtime.brief_doc,
+        runtime.bundle,
+        runtime.scope,
+    )
+    briefing = runtime.briefing
+    return _validated_response({
+        "schema_version": "audit_agent_response.v2",
+        "mode": "answer" if runtime.question else "briefing",
+        "question": runtime.question,
+        "package": runtime.path.name,
+        "bundle": runtime.bundle,
+        "generator": {
+            "name": "excel_to_skill.audit.agent",
+            "version": AGENT_VERSION,
+            "model": runtime.model,
+            "prompt_sha256": runtime.prompt_sha,
+            "turns": step,
+            "tools_used": state.used_tools,
+        },
+        "trust": {
+            "source_facts_review_status": briefing.get("facts_review_status"),
+            "source_facts_reviewed_at": briefing.get("facts_reviewed_at"),
+            "source_facts_review_note": briefing.get("facts_review_note"),
+            "source_facts_review_note_truncated": briefing.get(
+                "facts_review_note_truncated", False
+            ),
+            "source_brief_review_status": briefing.get("review_status"),
+            "source_brief_reviewed_at": briefing.get("reviewed_at"),
+            "source_brief_review_note": briefing.get("review_note"),
+            "source_brief_review_note_truncated": briefing.get(
+                "review_note_truncated", False
+            ),
+            "source_unreviewed": briefing.get("unreviewed"),
+            "answer_review_status": "unreviewed",
+            "readiness": briefing.get("readiness"),
+        },
+        "answer": final,
+        "evidence": evidence,
+        "coverage": {
+            "complete": trace_complete and state.discovery_complete,
+            "discovery_complete": state.discovery_complete,
+            "evidence_complete": trace_complete,
+            "fact_count": len(evidence["facts"]),
+            "relation_count": len(evidence["relations"]),
+            "standards_citation_count": len(evidence["standards"]),
+        },
+        "notices": _notices(
+            briefing,
+            trace_complete=trace_complete,
+            discovery_complete=state.discovery_complete,
+        ),
+        "package_limitations": briefing.get("limitations", []),
+    })
+
+
+def run_audit_agent(
+    pkg: Path | str,
+    *,
+    model: str,
+    client=None,
+    client_factory=None,
+    question: str | None = None,
+    sheet: str | None = None,
+    limit: int = DEFAULT_LIMIT,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    eprint=None,
+) -> dict:
+    """Run a bounded tool-using briefing turn over a committed audit package."""
+    eprint = eprint or (lambda *args: None)
+    runtime, blocked_response = _prepare_audit_agent_runtime(
+        pkg,
+        model=model,
+        question=question,
+        sheet=sheet,
+        limit=limit,
+        max_steps=max_steps,
+    )
+    if blocked_response is not None:
+        return blocked_response
+    assert runtime is not None
     if client is None:
         if client_factory is None:
             raise AuditAgentError("audit agent 모델 client 또는 client_factory가 필요합니다.")
@@ -1024,221 +1379,29 @@ def run_audit_agent(
             client = client_factory()
         except Exception as e:  # noqa: BLE001 - provider factory boundary
             raise AuditAgentError(f"audit agent 모델 client 생성 실패: {e}") from e
-    observations: list[dict] = [
-        {"tool": "brief", "input": {"limit": lim}, "result": briefing},
-        {
-            "tool": "assertion_procedures",
-            "input": {"query": None, "limit": lim},
-            "result": mappings,
-        },
-    ]
-    used_tools = ["brief", "assertion_procedures"]
-    known = _known_ids(facts, context, brief_doc)
-    observed = _empty_observed()
-    _merge_observed(observed, _observed_from_result("brief", briefing, known))
-    _merge_observed(
-        observed,
-        _observed_from_result("assertion_procedures", mappings, known),
-    )
-    discovery_complete = all((
-        _discovery_result_complete("brief", briefing),
-        _discovery_result_complete("assertion_procedures", mappings),
-    ))
-    seen_tool_requests: set[str] = set()
-    schema = load_schema(AGENT_TURN_SCHEMA)
-    provider_schema = _provider_turn_schema(schema)
-
-    for step in range(1, steps_limit + 1):
-        payload = {
-            "request": {
-                "mode": "answer" if user_question else "briefing",
-                "question": user_question,
-            },
-            "trust": {
-                "review_status": briefing.get("review_status"),
-                "unreviewed": briefing.get("unreviewed"),
-                "readiness": briefing.get("readiness"),
-            },
-            "turn": step,
-            "remaining_turns": steps_limit - step,
-            "observations": observations,
-        }
-        if analysis_scope is not None:
-            payload["analysis_scope"] = analysis_scope
-        try:
-            turn = call_json(
-                client,
-                system=prompt,
-                user=_serialize_model_payload(payload),
-                schema=provider_schema,
-                validation_schema=schema,
-                label="audit briefing agent",
-                retries=0,
-                eprint=eprint,
-            )
-        except AuditLLMError as e:
-            raise AuditAgentError(str(e)) from e
-
-        action = turn.get("action")
-        if action == "tool":
-            if not isinstance(turn.get("tool"), dict) or turn.get("final") is not None:
-                observations.append({
-                    "tool": "agent_protocol",
-                    "result": _tool_error(
-                        "action=tool에는 tool 객체와 final=null이 필요합니다."
-                    ),
-                })
-                continue
-            request = turn["tool"]
-            request_key = json.dumps(request, ensure_ascii=False, sort_keys=True)
-            if request_key in seen_tool_requests:
-                result = _tool_error("동일한 tool request를 반복할 수 없습니다.")
-            else:
-                seen_tool_requests.add(request_key)
-                try:
-                    result = _execute_tool(
-                        path,
-                        facts,
-                        context,
-                        brief_doc,
-                        resolver,
-                        request,
-                        observed=observed,
-                        maximum_limit=lim,
-                    )
-                except (AuditAgentError, AuditConsumeError) as e:
-                    result = _tool_error(str(e))
-            tool_name = str(request.get("name"))
-            observations.append({"tool": tool_name, "input": request, "result": result})
-            used_tools.append(tool_name)
-            _merge_observed(
-                observed,
-                _observed_from_result(tool_name, result, known),
-            )
-            discovery_complete = (
-                discovery_complete
-                and _discovery_result_complete(tool_name, result)
-            )
-            continue
-
-        if action != "final" or turn.get("tool") is not None or not isinstance(
-            turn.get("final"), dict
-        ):
-            observations.append({
-                "tool": "agent_protocol",
-                "result": _tool_error(
-                    "action=final에는 tool=null과 final 객체가 필요합니다."
-                ),
-            })
-            continue
-
-        plan = _sanitize_plan(turn["final"])
-        problems = _validate_plan(
-            plan,
-            known=known,
-            observed=observed,
+    state = _new_audit_agent_turn_state(runtime)
+    for step in range(1, runtime.max_steps + 1):
+        turn = _request_audit_agent_model_turn(
+            runtime,
+            state,
+            client=client,
+            step=step,
+            eprint=eprint,
         )
-        if problems:
-            observations.append({
-                "tool": "answer_validation",
-                "result": {
-                    "error": {
-                        "code": "UNGROUNDED_FINAL",
-                        "message": problems[:10],
-                    }
-                },
-            })
+        if turn.get("action") == "tool":
+            _apply_audit_agent_tool_turn(runtime, state, turn)
             continue
-
-        final = _materialize_plan(
-            plan,
-            facts_doc=facts,
-            context_doc=context,
-            brief_doc=brief_doc,
-            question=user_question,
+        response = _finalize_audit_agent_turn(
+            runtime,
+            state,
+            turn,
+            step=step,
         )
-        budget_problems = _evidence_budget_problems(final)
-        if budget_problems:
-            observations.append({
-                "tool": "answer_validation",
-                "result": {
-                    "error": {
-                        "code": "EVIDENCE_BUDGET_EXCEEDED",
-                        "message": budget_problems,
-                    }
-                },
-            })
-            continue
-
-        _assert_bundle_unchanged(
-            path, facts, context, brief_doc, bundle, scope
-        )
-        try:
-            evidence, trace_complete = _hydrate_evidence(
-                path,
-                facts,
-                context,
-                brief_doc,
-                final,
-                limit=lim,
-                resolver=resolver,
-            )
-        except AuditConsumeError as e:
-            raise AuditAgentError(f"최종 근거 trace 실패: {e}") from e
-        _assert_bundle_unchanged(
-            path, facts, context, brief_doc, bundle, scope
-        )
-        return _validated_response({
-            "schema_version": "audit_agent_response.v2",
-            "mode": "answer" if user_question else "briefing",
-            "question": user_question,
-            "package": path.name,
-            "bundle": bundle,
-            "generator": {
-                "name": "excel_to_skill.audit.agent",
-                "version": AGENT_VERSION,
-                "model": model,
-                "prompt_sha256": prompt_sha,
-                "turns": step,
-                "tools_used": used_tools,
-            },
-            "trust": {
-                "source_facts_review_status": briefing.get("facts_review_status"),
-                "source_facts_reviewed_at": briefing.get("facts_reviewed_at"),
-                "source_facts_review_note": briefing.get("facts_review_note"),
-                "source_facts_review_note_truncated": briefing.get(
-                    "facts_review_note_truncated", False
-                ),
-                "source_brief_review_status": briefing.get("review_status"),
-                "source_brief_reviewed_at": briefing.get("reviewed_at"),
-                "source_brief_review_note": briefing.get("review_note"),
-                "source_brief_review_note_truncated": briefing.get(
-                    "review_note_truncated", False
-                ),
-                "source_unreviewed": briefing.get("unreviewed"),
-                "answer_review_status": "unreviewed",
-                "readiness": briefing.get("readiness"),
-            },
-            "answer": final,
-            "evidence": evidence,
-            "coverage": {
-                "complete": trace_complete and discovery_complete,
-                "discovery_complete": discovery_complete,
-                "evidence_complete": trace_complete,
-                "fact_count": len(evidence["facts"]),
-                "relation_count": len(evidence["relations"]),
-                "standards_citation_count": len(evidence["standards"]),
-            },
-            "notices": _notices(
-                briefing,
-                trace_complete=trace_complete,
-                discovery_complete=discovery_complete,
-            ),
-            "package_limitations": briefing.get("limitations", []),
-        })
+        if response is not None:
+            return response
 
     raise AuditAgentError(
-        f"{steps_limit}회 안에 근거가 검증된 최종 답변을 만들지 못했습니다."
+        f"{runtime.max_steps}회 안에 근거가 검증된 최종 답변을 만들지 못했습니다."
     )
 
 

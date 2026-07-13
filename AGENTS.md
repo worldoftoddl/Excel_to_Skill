@@ -14,6 +14,11 @@ The audit-RAG implementation lives in `src/excel_to_skill/audit/`:
 - `brief.py` synthesizes the agent-facing brief without blending workbook and standards sources.
 - `agent.py` runs bounded read-only briefing/Q&A over committed artifacts and hydrates selected
   IDs back to workbook cells and verified standards locations.
+- `aggregate.py` rolls independently committed sheet briefs into a compact account-oriented
+  briefing without resending the workbook ledger or full standards context.
+- `conversation.py` compiles the persistent LangGraph `audit-chat` workflow; `conversation_store.py`
+  keeps raw turn material outside checkpoints, and `langchain_client.py` provides the lazy
+  `ChatAnthropic` structured-output boundary.
 - `prepare.py` stages, validates, and atomically publishes all three artifacts.
 - `consume.py` exposes commit-gated `brief`, search/get, assertion-procedure, and trace readers.
 - `validate.py` enforces schemas, cross-links, digests, relation direction, and source separation.
@@ -66,6 +71,20 @@ Preserve these invariants when changing the audit path:
 - A brief statement may name a `KSA`/`KIFRS` standard number only when that statement directly
   cites a passage from the same standard. Fail closed by omitting the whole unsupported statement
   and surfacing the omission in readiness; never rewrite it into a plausible uncited claim.
+- Conversation checkpoints are control-plane state, never audit authority. They may contain only
+  exact bundle identity, counters/status, typed IDs, and content-addressed artifact references.
+  Questions, observations, model decisions, answers, cells, standards text, clients, paths, and
+  secrets stay outside checkpoint state. Every resumed turn must re-pass the committed-bundle gate.
+- A conversation thread is pinned to one exact workbook/sheet bundle. Resume-time drift fails
+  before a model call, and drift during an active turn fails before private history publication;
+  never auto-rebase a thread. Prior prose does not authorize IDs. Only historical IDs deliberately
+  re-exposed as current typed `conversation_focus.records` become visible this turn.
+- `.audit_runtime/conversations/` is a private, ignored runtime store, not a prepared artifact or
+  review boundary. Its canonical objects and SQLite checkpoints must remain refs-only separated,
+  digest-checked, thread-scoped, and created with private permissions where supported.
+- Persist graph-node failures as fixed codes only; provider exception text must never enter the
+  checkpoint error channel. Hash user-facing thread IDs before using them as SQLite checkpoint
+  keys, and validate usage metadata before publishing turn history.
 
 ## Build, Test, and Development Commands
 
@@ -73,6 +92,7 @@ Preserve these invariants when changing the audit path:
 uv sync                         # install the core and development dependencies
 uv sync --extra annotate        # also install Anthropic/LangSmith integrations
 uv sync --extra prepare         # also install Anthropic/FastMCP audit preparation dependencies
+uv sync --extra graph           # install LangGraph, SQLite checkpoint, and ChatAnthropic support
 uv run pytest                   # run the complete automated test suite
 uv run pytest tests/test_review.py  # run one focused test module
 uv run excel-to-skill convert tests/fixtures/fx1_merge_formula.xlsx
@@ -81,11 +101,13 @@ uv run excel-to-skill audit-review <prepared-package> --approve
 uv run excel-to-skill assertion-procedures <prepared-package> --query 완전성
 uv run excel-to-skill trace <prepared-package> --id <fact-or-relation-id>
 uv run excel-to-skill audit-agent <prepared-package> --question "핵심 미비점은?"
+uv run --extra graph excel-to-skill audit-chat <prepared-package> --question "핵심 위험은?"
+uv run --extra graph excel-to-skill audit-chat <prepared-package> --thread <id> --question "그 결과는?"
 uv build                        # build wheel and source distributions with Hatchling
 ```
 
 Run `verify <package> --source <workbook>` when changing deterministic conversion behavior or
-prepared-artifact publication. `prepare`, `brief`, `audit-agent`, and all audit consumer commands
+prepared-artifact publication. `prepare`, `brief`, `audit-agent`, `audit-chat`, and all audit consumer commands
 operate on a converted package directory, not directly on the source workbook.
 
 ## Coding Style & Naming Conventions
@@ -100,6 +122,10 @@ Audit changes should normally run the relevant `tests/test_audit*.py` modules pl
 `tests/test_assertion_procedures.py`, followed by the complete suite. Provider/MCP behavior must
 use injected stubs in automated tests. If a live smoke test is needed, use a non-sensitive
 synthetic workbook and record separately that its brief remains draft until reviewed.
+Graph tests should use an in-memory saver for routing and isolation, plus focused SQLite restart
+tests. Inspect checkpoint payloads to ensure raw questions, answers, cells, standards text, and
+secrets never entered the database. The core import/convert/verify path must still work without
+the optional `graph` extra.
 
 ## Current Audit-RAG Status
 
@@ -111,8 +137,32 @@ management assertions, deterministic assertion-procedure queries, and a bounded 
 briefing/Q&A agent. The current brief contract is `audit_brief.v2`; rerunning `prepare` upgrades
 a v1 brief while reusing valid upstream stages.
 
-The current verified baseline is `344 passed, 1 skipped`; prior wheel and source-distribution
-build checks pass. The latest live synthetic receivables workpaper regenerated
+The historical pre-aggregate baseline recorded here was `344 passed, 1 skipped`; prior wheel and
+source-distribution build checks passed. Sheet-scope account aggregation has since been implemented
+in the current worktree, and the first persistent conversation vertical slice is now implemented.
+Its compiled graph, private content-addressed store, SQLite persistence, lazy LangChain Anthropic
+adapter, CLI, result schema, same-thread serialization, and existing-agent primitive refactor are
+covered by regression tests. The current complete suite is `468 passed, 1 skipped`; compileall,
+lock consistency, diff/secret checks, and wheel/source-distribution builds pass.
+
+The current orchestration plan is intentionally staged:
+
+1. Maintain the verified `audit-chat` slice: compiled dynamic tool/final routing, restart-safe
+   threads, exact bundle pinning, typed prior-turn focus, refs-only checkpoints, and request-level
+   usage. Before long-running production use, add a bounded retention/GC policy for orphaned
+   private objects left by failed or abandoned invocations.
+2. Add an aggregate-bound main-agent adapter so a multi-sheet account brief can be the conversation
+   root while every selected record still traces to its exact committed source sheet. The current
+   first slice converses over one committed workbook or sheet bundle only.
+3. Add an optional dynamic standards-research subgraph only for questions outside the committed
+   context. A worker may select CIDs, but application code must re-fetch and verify each paragraph;
+   results remain turn-scoped, `ephemeral`, `unreviewed`, and outside the prepared bundle.
+4. Move `prepare` orchestration to a graph only after replacing temporary staging with durable,
+   crash-resumable staging that preserves commit-last publication and rollback guarantees.
+5. Keep the current single-call aggregate path outside the graph until it needs genuine dynamic
+   branching; do not migrate it merely for framework uniformity.
+
+The latest live synthetic receivables workpaper regenerated
 `audit_facts` with extractor 0.2.1 and published `audit_brief.v2`/0.4.3. It produced two
 documented mappings—existence to an external-confirmation/reconciliation procedure and
 completeness to a shipping-document-to-ledger trace—with no unpaired assertions or procedures.
@@ -132,7 +182,7 @@ Recent commits use concise milestone or scope prefixes followed by a concrete ou
 ## Security & Configuration
 
 Keep API keys in the ignored `.env`. `ANTHROPIC_API_KEY` is needed for annotation, audit
-preparation, and `audit-agent`; `MCP_AUTH_TOKEN` authenticates the remote standards MCP; LangSmith keys enable
+preparation, `audit-agent`, aggregation, and `audit-chat`; `MCP_AUTH_TOKEN` authenticates the remote standards MCP; LangSmith keys enable
 optional tracing. The client does not need direct Qdrant credentials when it uses the remote MCP.
 Use environment placeholders such as `${MCP_AUTH_TOKEN}` in `.mcp.json`; never commit a literal
 token or copy a credential from chat into source, tests, logs, or documentation.
@@ -144,5 +194,8 @@ to test wiring; use a synthetic fixture unless external processing of that workb
 within scope. `audit-agent` sends bounded prepared-package observations to the configured model;
 it does not call the standards MCP again. A model-requested `trace` can send selected raw cell
 values/formulas, optional LangSmith tracing can copy the same exchange externally, and `--json`
-prints hydrated raw cells. Use synthetic data for live tests and explicitly blank both LangSmith
-key variables when tracing must stay off.
+prints hydrated raw cells. `audit-chat` persists questions and hydrated answers under the private
+`.audit_runtime/` directory and its LangChain calls can be traced by the same environment keys; it
+uses hashed SQLite checkpoint thread keys while returning the friendly thread ID to the caller,
+and does not call standards MCP again in the current slice. Use synthetic data for live tests and
+explicitly blank both LangSmith key variables when tracing must stay off.

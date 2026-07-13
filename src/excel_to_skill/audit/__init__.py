@@ -16,6 +16,15 @@ from .standards import (
     StandardsRetriever,
 )
 from .prepare import AuditPrepareError, PrepareResult, prepare_package
+from .aggregate import (
+    AggregateResult,
+    AuditAggregateError,
+    AuditAggregateStaleError,
+    aggregate_audit_package,
+    load_audit_aggregate,
+    plan_audit_aggregate,
+    render_audit_aggregate_markdown,
+)
 from .review import (
     AuditReviewError,
     approve_audit_package,
@@ -26,10 +35,13 @@ from .review import (
 __all__ = [
     "AuditModelError",
     "AuditAgentError",
+    "AuditAggregateError",
+    "AuditAggregateStaleError",
     "AuditpaperStandardsRetriever",
     "AuditPrepareError",
     "AuditReviewError",
     "PrepareResult",
+    "AggregateResult",
     "RetrievalPolicy",
     "SourceKind",
     "StandardHit",
@@ -40,9 +52,13 @@ __all__ = [
     "canonical_json",
     "json_sha256",
     "prepare_package",
+    "aggregate_audit_package",
+    "load_audit_aggregate",
+    "plan_audit_aggregate",
     "approve_audit_package",
     "reject_audit_package",
     "review_audit_package",
     "render_audit_agent_markdown",
+    "render_audit_aggregate_markdown",
     "run_audit_agent",
 ]

@@ -321,6 +321,41 @@ def _check_audit_scopes(pkg: Path) -> Check | None:
     )
 
 
+def _check_audit_aggregates(pkg: Path) -> Check | None:
+    """Validate every published account aggregate against its current source scopes."""
+    root = pkg / "data/audit_aggregates"
+    if not root.is_dir():
+        return None
+    commit_paths = sorted(root.glob("*/commit.json"))
+    if not commit_paths:
+        return None
+    problems: list[str] = []
+    stale: list[str] = []
+    for commit_path in commit_paths:
+        aggregate_id = commit_path.parent.name
+        try:
+            from .audit.aggregate import (
+                AuditAggregateStaleError,
+                load_audit_aggregate,
+            )
+
+            load_audit_aggregate(pkg, aggregate_id)
+        except AuditAggregateStaleError as e:
+            stale.append(f"{aggregate_id}: {e}")
+        except Exception as e:  # malformed optional layer is a failed check, never a crash
+            problems.append(f"{aggregate_id}: {e}")
+    return Check(
+        "audit_aggregates",
+        not problems,
+        (
+            f"계정별 audit aggregate {len(commit_paths) - len(stale)}개 계약 통과"
+            + (f" · stale cache {len(stale)}개 무시" if stale else "")
+            if not problems
+            else f"문제 {len(problems)}건: {problems[:5]}"
+        ),
+    )
+
+
 def _layout_diffs(pkg: Path, fresh: Path) -> list[str]:
     """layout/*.html의 파일 목록·내용을 재변환 결과와 대조한 차이 목록."""
     want = {p.name for p in _layout_htmls(pkg)}
@@ -550,6 +585,9 @@ def verify_package(pkg: Path, source: Path | None = None) -> VerifyResult:
     audit_scopes_check = _check_audit_scopes(pkg)
     if audit_scopes_check is not None:
         checks.append(audit_scopes_check)
+    audit_aggregates_check = _check_audit_aggregates(pkg)
+    if audit_aggregates_check is not None:
+        checks.append(audit_aggregates_check)
 
     if source is None:
         checks.append(
