@@ -1072,6 +1072,10 @@ def _cmd_audit_chat(args: argparse.Namespace, *, client_factory=None) -> int:
             purpose="audit-chat",
         )
     )
+    aggregate_id = getattr(args, "aggregate_id", None)
+    aggregate_selection = (
+        {"aggregate_id": aggregate_id} if aggregate_id is not None else {}
+    )
     try:
         result = run_audit_conversation_turn(
             pkg,
@@ -1080,6 +1084,7 @@ def _cmd_audit_chat(args: argparse.Namespace, *, client_factory=None) -> int:
             question=args.question,
             thread_id=args.thread,
             sheet=getattr(args, "sheet", None),
+            **aggregate_selection,
             limit=args.limit,
             max_steps=args.max_steps,
             eprint=_eprint,
@@ -1354,7 +1359,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="준비된 감사조서와 영속 대화를 시작하거나 재개",
     )
     ac.add_argument("path", help="prepare가 완료된 패키지 폴더")
-    ac.add_argument("--sheet", default=None, help="독립 준비된 시트 scope")
+    chat_scope = ac.add_mutually_exclusive_group()
+    chat_scope.add_argument("--sheet", default=None, help="독립 준비된 시트 scope")
+    chat_scope.add_argument(
+        "--aggregate-id",
+        default=None,
+        help="게시된 계정별 종합 브리핑 aggregate ID",
+    )
     ac.add_argument("--question", required=True, help="현재 대화 turn의 질문")
     ac.add_argument(
         "--thread",

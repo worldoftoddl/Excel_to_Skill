@@ -27,6 +27,7 @@ from .agent import (
     _AuditAgentRuntime,
     _AuditAgentTurnState,
     _apply_audit_agent_tool_turn,
+    _audit_agent_observation_witness,
     _assert_bundle_unchanged,
     _bundle_identity,
     _finalize_audit_agent_turn,
@@ -36,6 +37,22 @@ from .agent import (
     _request_audit_agent_model_turn,
     _validated_response,
     render_audit_agent_markdown,
+)
+from .aggregate_agent import (
+    AuditAggregateAgentChangedError,
+    AuditAggregateAgentError,
+    _AuditAggregateAgentRuntime,
+    _aggregate_focus_records,
+    _aggregate_generator_profile,
+    _aggregate_observation_witness,
+    _apply_audit_aggregate_agent_tool_turn,
+    _assert_aggregate_agent_unchanged,
+    _finalize_audit_aggregate_agent_turn,
+    _new_audit_aggregate_agent_turn_state,
+    _prepare_audit_aggregate_agent_runtime,
+    _request_audit_aggregate_agent_model_turn,
+    _validated_aggregate_response,
+    render_audit_aggregate_agent_markdown,
 )
 from .consume import AuditConsumeError, _audit_get_loaded, load_validated_audit_bundle
 from .conversation_store import (
@@ -129,8 +146,9 @@ class AuditConversationRuntime:
     package_path: Path
     sheet: str | None
     store: ConversationArtifactStore
-    agent: _AuditAgentRuntime | None
+    agent: _AuditAgentRuntime | _AuditAggregateAgentRuntime | None
     blocked_response: dict | None
+    aggregate_id: str | None = None
     client: object | None = None
     client_factory: object | None = None
     eprint: object | None = None
@@ -144,8 +162,10 @@ class AuditConversationRuntime:
 
     @property
     def bundle(self) -> dict:
-        if self.agent is not None:
+        if isinstance(self.agent, _AuditAgentRuntime):
             return self.agent.bundle
+        if isinstance(self.agent, _AuditAggregateAgentRuntime):
+            return self.agent.context
         if self.blocked_response is not None:
             return self.blocked_response["bundle"]
         raise AuditConversationError("conversation runtime에 audit bundle이 없습니다.")
@@ -189,7 +209,10 @@ class AuditConversationRuntime:
 def _assert_runtime_bundle_current(context: AuditConversationRuntime) -> None:
     """Re-pass the committed-bundle gate immediately around conversation commit/read."""
     try:
-        if context.agent is not None:
+        if isinstance(context.agent, _AuditAggregateAgentRuntime):
+            _assert_aggregate_agent_unchanged(context.agent)
+            return
+        if isinstance(context.agent, _AuditAgentRuntime):
             _assert_bundle_unchanged(
                 context.agent.path,
                 context.agent.facts,
@@ -207,7 +230,13 @@ def _assert_runtime_bundle_current(context: AuditConversationRuntime) -> None:
         path, facts, standards, brief = loaded
         scope = resolve_scope(path, sheet=context.sheet)
         current = _bundle_identity(path, facts, standards, brief, scope)
-    except (AuditAgentError, AuditConsumeError, AuditScopeError, OSError) as e:
+    except (
+        AuditAgentError,
+        AuditAggregateAgentError,
+        AuditConsumeError,
+        AuditScopeError,
+        OSError,
+    ) as e:
         raise AuditConversationBundleChangedError(
             "audit-chat commit 직전 committed audit bundle을 재검증할 수 없습니다."
         ) from e
@@ -322,7 +351,7 @@ def _observed_json(value: dict[str, set[str]]) -> dict[str, list[str]]:
 
 def _restore_observed(
     value: object,
-    agent: _AuditAgentRuntime,
+    agent: _AuditAgentRuntime | _AuditAggregateAgentRuntime,
 ) -> dict[str, set[str]]:
     if not isinstance(value, dict) or set(value) != set(_OBSERVED_KINDS):
         raise AuditConversationError("checkpoint observed_ids 형식이 유효하지 않습니다.")
@@ -366,25 +395,67 @@ def _turn_state(
     if agent is None:
         raise AuditConversationError("차단된 conversation에는 agent turn state가 없습니다.")
     observations = _load_observations(context, state)
+    try:
+        expected_focus, _ = _focus_observation(context, state.get("history_ref"))
+        if isinstance(agent, _AuditAggregateAgentRuntime):
+            (
+                replayed_discovery,
+                replayed_observed,
+                replayed_tools,
+                _,
+            ) = _aggregate_observation_witness(
+                agent,
+                observations,
+                expected_limit=agent.limit,
+                expected_focus=expected_focus,
+            )
+        else:
+            (
+                replayed_discovery,
+                replayed_observed,
+                replayed_tools,
+            ) = _audit_agent_observation_witness(
+                agent,
+                observations,
+                expected_focus=expected_focus,
+            )
+    except (AuditAgentError, AuditAggregateAgentError) as e:
+        raise AuditConversationError(
+            "conversation observations deterministic replay가 실패했습니다."
+        ) from e
+    replay_start = 1 if isinstance(agent, _AuditAggregateAgentRuntime) else 2
     seen_requests = {
         json.dumps(item["input"], ensure_ascii=False, sort_keys=True)
-        for item in observations
+        for item in observations[replay_start:]
         if isinstance(item.get("input"), dict)
-        and item.get("tool") not in {"brief", "conversation_focus"}
+        and item.get("tool") != "conversation_focus"
     }
     used_tools = state.get("used_tools")
     if not isinstance(used_tools, list) or any(
         not isinstance(item, str) for item in used_tools
     ):
         raise AuditConversationError("checkpoint used_tools가 유효하지 않습니다.")
+    if used_tools != replayed_tools:
+        raise AuditConversationError(
+            "checkpoint used_tools가 observations replay와 다릅니다."
+        )
     discovery_complete = state.get("discovery_complete")
     if not isinstance(discovery_complete, bool):
         raise AuditConversationError("checkpoint discovery_complete가 유효하지 않습니다.")
+    if discovery_complete is not replayed_discovery:
+        raise AuditConversationError(
+            "checkpoint discovery_complete가 observations replay와 다릅니다."
+        )
+    checkpoint_observed = _restore_observed(state.get("observed_ids"), agent)
+    if checkpoint_observed != replayed_observed:
+        raise AuditConversationError(
+            "checkpoint observed_ids가 observations replay와 다릅니다."
+        )
     return _AuditAgentTurnState(
         observations=observations,
-        used_tools=list(used_tools),
-        observed=_restore_observed(state.get("observed_ids"), agent),
-        discovery_complete=discovery_complete,
+        used_tools=list(replayed_tools),
+        observed=replayed_observed,
+        discovery_complete=replayed_discovery,
         seen_tool_requests=seen_requests,
     )
 
@@ -430,16 +501,77 @@ def _turn_record(
         "response_ref",
         "usage_ref",
     }
-    if not isinstance(payload, dict) or set(payload) != required:
+    allowed = required | {"observations_ref", "execution"}
+    if (
+        not isinstance(payload, dict)
+        or not required <= set(payload)
+        or not set(payload) <= allowed
+    ):
         raise AuditConversationError("conversation turn record 형식이 유효하지 않습니다.")
-    if not isinstance(payload.get("turn_index"), int) or payload["turn_index"] < 1:
+    if (
+        not isinstance(payload.get("turn_index"), int)
+        or isinstance(payload["turn_index"], bool)
+        or payload["turn_index"] < 1
+    ):
         raise AuditConversationError("conversation turn index가 유효하지 않습니다.")
     if not isinstance(payload.get("invocation_id"), str):
         raise AuditConversationError("conversation turn invocation이 유효하지 않습니다.")
     for name in ("question_ref", "response_ref", "usage_ref"):
         if not isinstance(payload.get(name), dict):
             raise AuditConversationError(f"conversation turn {name}가 유효하지 않습니다.")
+    if "observations_ref" in payload and not isinstance(
+        payload.get("observations_ref"), dict
+    ):
+        raise AuditConversationError(
+            "conversation turn observations_ref가 유효하지 않습니다."
+        )
+    if "execution" in payload:
+        _execution_witness(payload["execution"])
     return payload
+
+
+def _execution_witness(value: object) -> dict:
+    fields = {
+        "name", "version", "model", "prompt_sha256", "limit", "turns", "tools_used",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise AuditConversationError(
+            "conversation turn execution witness 형식이 유효하지 않습니다."
+        )
+    turns = value.get("turns")
+    limit = value.get("limit")
+    tools_used = value.get("tools_used")
+    if (
+        value.get("name") != "excel_to_skill.audit.aggregate_agent"
+        or not isinstance(value.get("version"), str)
+        or not value["version"]
+        or not isinstance(value.get("model"), str)
+        or not value["model"]
+        or not isinstance(value.get("prompt_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", value["prompt_sha256"]) is None
+        or not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 1 <= limit <= 200
+        or not isinstance(turns, int)
+        or isinstance(turns, bool)
+        or not 1 <= turns <= 12
+        or not isinstance(tools_used, list)
+        or not tools_used
+        or tools_used[0] != "aggregate_brief"
+        or any(not isinstance(item, str) for item in tools_used)
+    ):
+        raise AuditConversationError(
+            "conversation turn execution witness 값이 유효하지 않습니다."
+        )
+    return {
+        "name": value["name"],
+        "version": value["version"],
+        "model": value["model"],
+        "prompt_sha256": value["prompt_sha256"],
+        "limit": limit,
+        "turns": turns,
+        "tools_used": list(tools_used),
+    }
 
 
 def _history_entries(
@@ -480,6 +612,9 @@ def _response_from_ref(
     ref: object,
     *,
     invocation_id: str,
+    observations_ref: object = None,
+    expected_focus: dict | None = None,
+    expected_execution: object = None,
 ) -> dict:
     payload = _load_payload(
         context,
@@ -494,7 +629,134 @@ def _response_from_ref(
     response = payload.get("value")
     if not isinstance(response, dict):
         raise AuditConversationError("conversation response 본문이 유효하지 않습니다.")
+    if isinstance(context.agent, _AuditAggregateAgentRuntime):
+        try:
+            execution = _execution_witness(expected_execution)
+            observations = _invocation_payload(
+                context,
+                {"invocation_id": invocation_id},
+                observations_ref,
+                kind="observations",
+                schema=OBSERVATIONS_SCHEMA,
+            )
+            discovery_complete, observed, tools_used, turns = (
+                _aggregate_observation_witness(
+                    context.agent,
+                    observations,
+                    expected_limit=execution["limit"],
+                    expected_focus=expected_focus,
+                )
+            )
+            if (
+                execution["turns"] != turns
+                or execution["tools_used"] != tools_used
+            ):
+                raise AuditAggregateAgentError(
+                    "aggregate observations replay가 turn execution witness와 다릅니다."
+                )
+            return _validated_aggregate_response(
+                context.agent,
+                response,
+                expected_discovery_complete=discovery_complete,
+                expected_observed=observed,
+                expected_generator=execution,
+            )
+        except AuditAggregateAgentError as e:
+            raise AuditConversationError(
+                f"aggregate conversation response 검증 실패: {e}"
+            ) from e
     return _validated_response(response)
+
+
+def _aggregate_focus_projection(
+    agent: _AuditAggregateAgentRuntime,
+    prior_turns: list[dict],
+    prior_responses: list[dict],
+) -> tuple[dict | None, dict[str, set[str]]]:
+    focus_turns = prior_turns[-MAX_FOCUS_TURNS:]
+    focus_responses = prior_responses[-MAX_FOCUS_TURNS:]
+    observed = {kind: set() for kind in _OBSERVED_KINDS}
+    records: list[dict] = []
+    seen_refs: set[str] = set()
+    for response in reversed(focus_responses):
+        try:
+            candidates, candidate_observed = _aggregate_focus_records(agent, response)
+        except AuditAggregateAgentError as e:
+            raise AuditConversationError(
+                f"aggregate conversation focus 재조회 실패: {e}"
+            ) from e
+        for wrapper in candidates:
+            ref = wrapper.get("record_ref") or wrapper.get("source_ref")
+            if not isinstance(ref, str) or ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+            records.append(wrapper)
+            for kind in _OBSERVED_KINDS:
+                if ref in candidate_observed[kind]:
+                    observed[kind].add(ref)
+            if len(records) >= MAX_FOCUS_RECORDS:
+                break
+        if len(records) >= MAX_FOCUS_RECORDS:
+            break
+    if not focus_turns:
+        return None, observed
+    return {
+        "tool": "conversation_focus",
+        "input": {"max_turns": MAX_FOCUS_TURNS, "max_records": MAX_FOCUS_RECORDS},
+        "result": {
+            "prior_turns": copy.deepcopy(focus_turns),
+            "records": records,
+            "authorization": (
+                "Only exact refs in typed records are evidence for this turn; refs and "
+                "local IDs in prior question or answer prose are not authorized."
+            ),
+        },
+    }, observed
+
+
+def _aggregate_focus_from_history_entries(
+    context: AuditConversationRuntime,
+    entries: list[dict],
+) -> tuple[dict | None, dict[str, set[str]]]:
+    agent = context.agent
+    if not isinstance(agent, _AuditAggregateAgentRuntime):
+        raise AuditConversationError("aggregate focus를 source bundle agent에 적용할 수 없습니다.")
+    prior_turns: list[dict] = []
+    prior_responses: list[dict] = []
+    for record in entries:
+        expected_focus, _ = _aggregate_focus_projection(
+            agent,
+            prior_turns,
+            prior_responses,
+        )
+        question = _question_from_ref(
+            context,
+            record["question_ref"],
+            invocation_id=record["invocation_id"],
+        )
+        response = _response_from_ref(
+            context,
+            record["response_ref"],
+            invocation_id=record["invocation_id"],
+            observations_ref=record.get("observations_ref"),
+            expected_focus=expected_focus,
+            expected_execution=record.get("execution"),
+        )
+        if response.get("context") != agent.context:
+            raise AuditConversationBundleChangedError(
+                "conversation history 응답의 audit aggregate가 현재 aggregate와 다릅니다."
+            )
+        if response.get("question") != question:
+            raise AuditConversationError(
+                "conversation history 질문과 응답이 일치하지 않습니다."
+            )
+        prior_turns.append({
+            "turn_index": record["turn_index"],
+            "question": question,
+            "answer": response["answer"],
+        })
+        prior_responses.append(response)
+    return _aggregate_focus_projection(agent, prior_turns, prior_responses)
 
 
 def _focus_observation(
@@ -504,8 +766,12 @@ def _focus_observation(
     agent = context.agent
     if agent is None:
         return None, {kind: set() for kind in _OBSERVED_KINDS}
-    entries = _history_entries(context, history_ref)[-MAX_FOCUS_TURNS:]
+    all_entries = _history_entries(context, history_ref)
+    if isinstance(agent, _AuditAggregateAgentRuntime):
+        return _aggregate_focus_from_history_entries(context, all_entries)
+    entries = all_entries[-MAX_FOCUS_TURNS:]
     prior_turns: list[dict] = []
+    prior_responses: list[dict] = []
     candidates: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for record in entries:
@@ -518,6 +784,7 @@ def _focus_observation(
             context,
             record["response_ref"],
             invocation_id=record["invocation_id"],
+            observations_ref=record.get("observations_ref"),
         )
         if response.get("bundle") != agent.bundle:
             raise AuditConversationBundleChangedError(
@@ -530,6 +797,7 @@ def _focus_observation(
             "question": question,
             "answer": response["answer"],
         })
+        prior_responses.append(response)
     for prior in reversed(prior_turns):
         for claim in prior["answer"].get("claims", []):
             for kind, field_name in (
@@ -651,7 +919,11 @@ def _bootstrap(state: AuditConversationState, runtime) -> dict:
     agent = context.agent
     if agent is None:
         raise AuditConversationError("runnable conversation에 agent runtime이 없습니다.")
-    turn_state = _new_audit_agent_turn_state(agent)
+    turn_state = (
+        _new_audit_aggregate_agent_turn_state(agent)
+        if isinstance(agent, _AuditAggregateAgentRuntime)
+        else _new_audit_agent_turn_state(agent)
+    )
     focus, focus_observed = _focus_observation(context, state.get("history_ref"))
     if focus is not None:
         turn_state.observations.append(focus)
@@ -686,14 +958,23 @@ def _decide(state: AuditConversationState, runtime) -> dict:
         )
     turn_state = _turn_state(context, state)
     try:
-        decision = _request_audit_agent_model_turn(
-            agent,
-            turn_state,
-            client=context.model_client(),
-            step=step + 1,
-            eprint=context.eprint,
-        )
-    except AuditAgentError as e:
+        if isinstance(agent, _AuditAggregateAgentRuntime):
+            decision = _request_audit_aggregate_agent_model_turn(
+                agent,
+                turn_state,
+                client=context.model_client(),
+                step=step + 1,
+                eprint=context.eprint,
+            )
+        else:
+            decision = _request_audit_agent_model_turn(
+                agent,
+                turn_state,
+                client=context.model_client(),
+                step=step + 1,
+                eprint=context.eprint,
+            )
+    except (AuditAgentError, AuditAggregateAgentError) as e:
         if "600KB 모델 예산" in str(e):
             raise AuditConversationError(
                 "audit agent 입력이 600KB 모델 예산을 초과했습니다. "
@@ -744,8 +1025,13 @@ def _execute_tool(state: AuditConversationState, runtime) -> dict:
         raise AuditConversationError("tool node에 agent runtime이 없습니다.")
     turn_state = _turn_state(context, state)
     try:
-        _apply_audit_agent_tool_turn(agent, turn_state, _decision(context, state))
-    except AuditAgentError as e:
+        if isinstance(agent, _AuditAggregateAgentRuntime):
+            _apply_audit_aggregate_agent_tool_turn(
+                agent, turn_state, _decision(context, state)
+            )
+        else:
+            _apply_audit_agent_tool_turn(agent, turn_state, _decision(context, state))
+    except (AuditAgentError, AuditAggregateAgentError) as e:
         raise AuditConversationError("audit-chat 도구 실행 검증에 실패했습니다.") from e
     observations_ref = _write_invocation_payload(
         context,
@@ -774,14 +1060,25 @@ def _finalize(state: AuditConversationState, runtime) -> dict:
     if not isinstance(step, int) or step < 1:
         raise AuditConversationError("finalize step이 유효하지 않습니다.")
     try:
-        response = _finalize_audit_agent_turn(
-            agent,
-            turn_state,
-            _decision(context, state),
-            step=step,
-        )
-    except AuditAgentError as e:
-        if "bundle identity가 변경" in str(e) or "package bundle identity" in str(e):
+        if isinstance(agent, _AuditAggregateAgentRuntime):
+            response = _finalize_audit_aggregate_agent_turn(
+                agent,
+                turn_state,
+                _decision(context, state),
+                step=step,
+            )
+        else:
+            response = _finalize_audit_agent_turn(
+                agent,
+                turn_state,
+                _decision(context, state),
+                step=step,
+            )
+    except (AuditAgentError, AuditAggregateAgentError) as e:
+        if isinstance(e, AuditAggregateAgentChangedError) or (
+            "bundle identity가 변경" in str(e)
+            or "package bundle identity" in str(e)
+        ):
             raise AuditConversationBundleChangedError(
                 "audit-chat 실행 중 committed audit bundle이 변경되었습니다."
             ) from e
@@ -928,12 +1225,35 @@ def _commit_turn_locked(
     invocation_id = state.get("invocation_id")
     if not isinstance(invocation_id, str):
         raise AuditConversationError("commit invocation_id가 유효하지 않습니다.")
+    canonical_turn_state = (
+        _turn_state(context, state) if context.agent is not None else None
+    )
+    previous = _history_entries(context, state.get("history_ref"))
+    expected_focus = None
+    execution = None
+    if isinstance(context.agent, _AuditAggregateAgentRuntime):
+        expected_focus, _ = _aggregate_focus_from_history_entries(context, previous)
+        execution = _execution_witness(
+            _aggregate_generator_profile(
+                context.agent,
+                turns=state.get("step"),
+                tools_used=canonical_turn_state.used_tools,
+            )
+        )
     response = _response_from_ref(
         context,
         state.get("answer_ref"),
         invocation_id=invocation_id,
+        observations_ref=state.get("observations_ref"),
+        expected_focus=expected_focus,
+        expected_execution=execution,
     )
-    if response.get("bundle") != state.get("bound_bundle"):
+    response_binding = response.get(
+        "context"
+        if isinstance(context.agent, _AuditAggregateAgentRuntime)
+        else "bundle"
+    )
+    if response_binding != state.get("bound_bundle"):
         raise AuditConversationBundleChangedError(
             "최종 response의 bundle이 thread binding과 일치하지 않습니다."
         )
@@ -951,20 +1271,29 @@ def _commit_turn_locked(
         schema=USAGE_SCHEMA,
         value=_validated_usage_summary(context.usage_events()),
     )
-    previous = _history_entries(context, state.get("history_ref"))
     turn_index = len(previous) + 1
     try:
+        turn_payload = {
+            "turn_index": turn_index,
+            "invocation_id": invocation_id,
+            "question_ref": state["question_ref"],
+            "response_ref": state["answer_ref"],
+            "usage_ref": usage_ref,
+        }
+        observations_ref = state.get("observations_ref")
+        if isinstance(observations_ref, dict):
+            turn_payload["observations_ref"] = observations_ref
+        elif isinstance(context.agent, _AuditAggregateAgentRuntime):
+            raise AuditConversationError(
+                "aggregate conversation observations witness가 없습니다."
+            )
+        if execution is not None:
+            turn_payload["execution"] = execution
         turn_record_ref = context.store.write(
             context.thread_id,
             kind="turn_record",
             schema_version=TURN_RECORD_SCHEMA,
-            payload={
-                "turn_index": turn_index,
-                "invocation_id": invocation_id,
-                "question_ref": state["question_ref"],
-                "response_ref": state["answer_ref"],
-                "usage_ref": usage_ref,
-            },
+            payload=turn_payload,
         )
         prior_refs = _history(context, state.get("history_ref"))
         history_ref = context.store.write(
@@ -1159,8 +1488,8 @@ def _turn_result(
     question_ref: ArtifactRef,
 ) -> dict:
     turn_record_ref = graph_result.get("turn_record_ref")
-    record = _turn_record(context, turn_record_ref)
     history_refs = _history(context, graph_result.get("history_ref"))
+    history_records = _history_entries(context, graph_result.get("history_ref"))
     turn_index = graph_result.get("turn_index")
     if not isinstance(turn_index, int) or len(history_refs) != turn_index:
         raise AuditConversationError(
@@ -1170,6 +1499,7 @@ def _turn_result(
         raise AuditConversationError(
             "conversation graph의 최신 turn record가 committed history와 다릅니다."
         )
+    record = history_records[-1]
     if record["turn_index"] != turn_index or record["invocation_id"] != invocation_id:
         raise AuditConversationError(
             "conversation graph turn record identity가 현재 invocation과 다릅니다."
@@ -1186,10 +1516,19 @@ def _turn_result(
         raise AuditConversationError(
             "conversation graph usage ref가 committed turn record와 다릅니다."
         )
+    expected_focus = None
+    if isinstance(context.agent, _AuditAggregateAgentRuntime):
+        expected_focus, _ = _aggregate_focus_from_history_entries(
+            context,
+            history_records[:-1],
+        )
     response = _response_from_ref(
         context,
         record["response_ref"],
         invocation_id=record["invocation_id"],
+        observations_ref=record.get("observations_ref"),
+        expected_focus=expected_focus,
+        expected_execution=record.get("execution"),
     )
     usage = _invocation_payload(
         context,
@@ -1213,7 +1552,12 @@ def _turn_result(
         jsonschema.validate(document, load_schema(RESULT_SCHEMA))
     except (jsonschema.ValidationError, AuditLLMError) as e:
         raise AuditConversationError(f"conversation turn result 계약 검증 실패: {e}") from e
-    if document["bundle"] != response["bundle"]:
+    response_binding = response.get(
+        "context"
+        if isinstance(context.agent, _AuditAggregateAgentRuntime)
+        else "bundle"
+    )
+    if document["bundle"] != response_binding:
         raise AuditConversationError("conversation result bundle과 response bundle이 다릅니다.")
     if document["resumed"] != (document["turn_index"] > 1):
         raise AuditConversationError("conversation resumed 상태와 turn_index가 다릅니다.")
@@ -1235,6 +1579,7 @@ def run_audit_conversation_turn(
     question: str,
     thread_id: str | None = None,
     sheet: str | None = None,
+    aggregate_id: str | None = None,
     limit: int = 100,
     max_steps: int = 6,
     client=None,
@@ -1247,17 +1592,30 @@ def run_audit_conversation_turn(
     selected_thread = _thread_id(thread_id)
     if not isinstance(question, str) or not question.strip():
         raise AuditConversationError("audit-chat question이 비어 있습니다.")
+    if sheet is not None and aggregate_id is not None:
+        raise AuditConversationError("sheet와 aggregate_id는 함께 사용할 수 없습니다.")
     try:
-        agent, blocked = _prepare_audit_agent_runtime(
-            pkg,
-            model=model,
-            question=question,
-            sheet=sheet,
-            limit=limit,
-            max_steps=max_steps,
-            prompt_name=CONVERSATION_PROMPT,
-        )
-    except (AuditAgentError, AuditConsumeError) as e:
+        if aggregate_id is not None:
+            agent = _prepare_audit_aggregate_agent_runtime(
+                pkg,
+                aggregate_id=aggregate_id,
+                model=model,
+                question=question,
+                limit=limit,
+                max_steps=max_steps,
+            )
+            blocked = None
+        else:
+            agent, blocked = _prepare_audit_agent_runtime(
+                pkg,
+                model=model,
+                question=question,
+                sheet=sheet,
+                limit=limit,
+                max_steps=max_steps,
+                prompt_name=CONVERSATION_PROMPT,
+            )
+    except (AuditAgentError, AuditAggregateAgentError, AuditConsumeError) as e:
         raise AuditConversationError(str(e)) from e
     path = Path(pkg)
     root = Path(runtime_root) if runtime_root is not None else path / RUNTIME_DIR
@@ -1290,6 +1648,7 @@ def run_audit_conversation_turn(
         store=store,
         agent=agent,
         blocked_response=blocked,
+        aggregate_id=aggregate_id,
         client=client,
         client_factory=client_factory,
         eprint=eprint,
@@ -1333,6 +1692,8 @@ def render_audit_conversation_markdown(result: dict) -> str:
         f"> LLM 요청 {usage.get('request_count', 0)}회 · "
         f"input {usage.get('input_tokens', 0)} / output {usage.get('output_tokens', 0)} tokens\n\n"
     )
+    if response.get("schema_version") == "audit_main_agent_response.v1":
+        return header + render_audit_aggregate_agent_markdown(response)
     return header + render_audit_agent_markdown(_validated_response(response))
 
 

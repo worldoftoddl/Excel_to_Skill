@@ -36,10 +36,17 @@ def _final() -> dict:
     }
 
 
-def _args(pkg: Path, *, thread: str | None, json_output: bool) -> Namespace:
+def _args(
+    pkg: Path,
+    *,
+    thread: str | None,
+    json_output: bool,
+    aggregate_id: str | None = None,
+) -> Namespace:
     return Namespace(
         path=str(pkg),
         sheet=None,
+        aggregate_id=aggregate_id,
         question="핵심 위험은?",
         thread=thread,
         model="stub-model",
@@ -110,6 +117,69 @@ def test_audit_chat_parser_requires_question_and_accepts_thread() -> None:
 
     with pytest.raises(SystemExit):
         parser.parse_args(["audit-chat", "/tmp/package"])
+
+
+def test_audit_chat_parser_makes_sheet_and_aggregate_mutually_exclusive() -> None:
+    parser = _build_parser()
+    aggregate_id = "a" * 64
+
+    parsed = parser.parse_args([
+        "audit-chat",
+        "/tmp/package",
+        "--aggregate-id",
+        aggregate_id,
+        "--question",
+        "전체 핵심 위험은?",
+    ])
+    assert parsed.sheet is None
+    assert parsed.aggregate_id == aggregate_id
+
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "audit-chat",
+            "/tmp/package",
+            "--sheet",
+            "C",
+            "--aggregate-id",
+            aggregate_id,
+            "--question",
+            "전체 핵심 위험은?",
+        ])
+
+
+def test_audit_chat_cli_forwards_aggregate_id(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    pkg, _, _, _ = _write_committed_bundle(tmp_path)
+    aggregate_id = "b" * 64
+    captured: dict = {}
+
+    def fake_run(path, **kwargs):
+        captured["path"] = path
+        captured.update(kwargs)
+        return {"forwarded": True}
+
+    monkeypatch.setattr(
+        "excel_to_skill.audit.conversation.run_audit_conversation_turn",
+        fake_run,
+    )
+
+    assert _cmd_audit_chat(
+        _args(
+            pkg,
+            thread="aggregate-thread",
+            json_output=True,
+            aggregate_id=aggregate_id,
+        ),
+        client_factory=lambda: StubClient([]),
+    ) == 0
+
+    assert json.loads(capsys.readouterr().out) == {"forwarded": True}
+    assert captured["path"] == pkg
+    assert captured["sheet"] is None
+    assert captured["aggregate_id"] == aggregate_id
 
 
 def test_audit_chat_cli_rejects_non_package_before_client_factory(

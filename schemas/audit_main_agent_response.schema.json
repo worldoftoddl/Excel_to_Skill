@@ -1,0 +1,258 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "audit_main_agent_response.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "mode", "question", "package", "context", "generator",
+    "trust", "answer", "evidence", "coverage", "notices", "package_limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_main_agent_response.v1"},
+    "mode": {"const": "answer"},
+    "question": {"type": "string", "minLength": 1},
+    "package": {"type": "string", "minLength": 1},
+    "context": {"$ref": "#/definitions/context"},
+    "generator": {"$ref": "#/definitions/generator"},
+    "trust": {"$ref": "#/definitions/trust"},
+    "answer": {"$ref": "#/definitions/answer"},
+    "evidence": {"$ref": "#/definitions/evidence"},
+    "coverage": {"$ref": "#/definitions/coverage"},
+    "notices": {"type": "array", "items": {"$ref": "#/definitions/notice"}},
+    "package_limitations": {"type": "array", "items": {"type": "object"}}
+  },
+  "definitions": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timestamp": {"type": "string", "minLength": 1},
+    "opaqueRef": {
+      "type": "string",
+      "pattern": "^(record|source):[0-9a-f]{64}$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sheet", "id"],
+      "properties": {
+        "kind": {"const": "sheet"},
+        "sheet": {"type": "string", "minLength": 1},
+        "id": {"$ref": "#/definitions/sha256"}
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "scope_ids"],
+      "properties": {
+        "mode": {"enum": ["explicit_sheets", "all_committed_sheets"]},
+        "scope_ids": {
+          "type": "array", "minItems": 1, "maxItems": 64,
+          "items": {"$ref": "#/definitions/sha256"}, "uniqueItems": true
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "aggregate_id", "aggregate_key", "commit_sha256", "inputs_sha256",
+        "aggregate_version", "workbook_sha256", "source_manifest_sha256",
+        "committed_scope_manifest_sha256", "selection", "prepared_at"
+      ],
+      "properties": {
+        "kind": {"const": "aggregate"},
+        "aggregate_id": {"$ref": "#/definitions/sha256"},
+        "aggregate_key": {"$ref": "#/definitions/sha256"},
+        "commit_sha256": {"$ref": "#/definitions/sha256"},
+        "inputs_sha256": {"$ref": "#/definitions/sha256"},
+        "aggregate_version": {"type": "string", "minLength": 1},
+        "workbook_sha256": {"$ref": "#/definitions/sha256"},
+        "source_manifest_sha256": {"$ref": "#/definitions/sha256"},
+        "committed_scope_manifest_sha256": {"$ref": "#/definitions/sha256"},
+        "selection": {"$ref": "#/definitions/selection"},
+        "prepared_at": {"$ref": "#/definitions/timestamp"}
+      }
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "version", "model", "prompt_sha256", "limit", "turns", "tools_used"
+      ],
+      "properties": {
+        "name": {"const": "excel_to_skill.audit.aggregate_agent"},
+        "version": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "prompt_sha256": {"$ref": "#/definitions/sha256"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+        "turns": {"type": "integer", "minimum": 0, "maximum": 12},
+        "tools_used": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasons"],
+      "properties": {
+        "status": {"enum": ["ready", "partial", "not_ready"]},
+        "reasons": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "all_sources_approved", "source_unreviewed", "aggregate_review_status",
+        "answer_review_status", "readiness"
+      ],
+      "properties": {
+        "all_sources_approved": {"type": "boolean"},
+        "source_unreviewed": {"type": "boolean"},
+        "aggregate_review_status": {"const": "draft"},
+        "answer_review_status": {"const": "unreviewed"},
+        "readiness": {"$ref": "#/definitions/readiness"}
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section", "text", "basis", "status", "confidence", "scope",
+        "aggregate_record_refs", "source_record_refs"
+      ],
+      "properties": {
+        "section": {"type": "string", "minLength": 1},
+        "text": {"type": "string", "minLength": 1},
+        "basis": {"enum": ["documented_fact", "authoritative_context", "synthesis", "gap"]},
+        "status": {"type": ["string", "null"]},
+        "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "scope": {"$ref": "#/definitions/scope"},
+        "aggregate_record_refs": {
+          "type": "array", "items": {"type": "string", "pattern": "^record:[0-9a-f]{64}$"},
+          "uniqueItems": true
+        },
+        "source_record_refs": {
+          "type": "array", "items": {"type": "string", "pattern": "^source:[0-9a-f]{64}$"},
+          "uniqueItems": true
+        }
+      },
+      "anyOf": [
+        {"properties": {"aggregate_record_refs": {"minItems": 1}}},
+        {"properties": {"source_record_refs": {"minItems": 1}}}
+      ]
+    },
+    "answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "abstained", "abstention_reason", "claims", "suggested_questions"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "abstained": {"type": "boolean"},
+        "abstention_reason": {"type": ["string", "null"]},
+        "claims": {"type": "array", "maxItems": 60, "items": {"$ref": "#/definitions/claim"}},
+        "suggested_questions": {
+          "type": "array", "maxItems": 5,
+          "items": {"type": "string", "minLength": 1}, "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"abstained": {"const": true}}},
+          "then": {
+            "properties": {
+              "abstention_reason": {"type": "string", "minLength": 1},
+              "claims": {"maxItems": 0}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"abstained": {"const": false}}},
+          "then": {
+            "properties": {
+              "abstention_reason": {"type": "null"},
+              "claims": {"minItems": 1}
+            }
+          }
+        }
+      ]
+    },
+    "sourceBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope", "commit_sha256", "facts_key", "standards_key", "brief_key", "prepared_at",
+        "readiness_status", "facts_review_status", "brief_review_status"
+      ],
+      "properties": {
+        "scope": {"$ref": "#/definitions/scope"},
+        "commit_sha256": {"$ref": "#/definitions/sha256"},
+        "facts_key": {"$ref": "#/definitions/sha256"},
+        "standards_key": {"$ref": "#/definitions/sha256"},
+        "brief_key": {"$ref": "#/definitions/sha256"},
+        "prepared_at": {"$ref": "#/definitions/timestamp"},
+        "readiness_status": {"enum": ["ready", "partial", "not_ready"]},
+        "facts_review_status": {"enum": ["draft", "approved", "rejected"]},
+        "brief_review_status": {"enum": ["draft", "approved", "rejected"]}
+      }
+    },
+    "evidenceRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection_ref", "selection_kind", "scope", "source_kind", "source_id",
+        "aggregate_record", "source_record", "source_binding", "trace", "trace_complete"
+      ],
+      "properties": {
+        "selection_ref": {"$ref": "#/definitions/opaqueRef"},
+        "selection_kind": {"enum": ["aggregate_record", "source_record"]},
+        "scope": {"$ref": "#/definitions/scope"},
+        "source_kind": {"type": "string", "minLength": 1},
+        "source_id": {"type": ["string", "null"]},
+        "aggregate_record": {"type": ["object", "null"]},
+        "source_record": {"type": ["object", "null"]},
+        "source_binding": {"$ref": "#/definitions/sourceBinding"},
+        "trace": {"type": ["object", "null"]},
+        "trace_complete": {"type": "boolean"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["records"],
+      "properties": {
+        "records": {
+          "type": "array", "maxItems": 60,
+          "items": {"$ref": "#/definitions/evidenceRecord"}
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete", "discovery_complete", "evidence_complete", "record_count", "scope_count",
+        "aggregate_candidate_selection_complete", "complete_over_committed_sheets",
+        "unprepared_sheet_count"
+      ],
+      "properties": {
+        "complete": {"type": "boolean"},
+        "discovery_complete": {"type": "boolean"},
+        "evidence_complete": {"type": "boolean"},
+        "record_count": {"type": "integer", "minimum": 0, "maximum": 60},
+        "scope_count": {"type": "integer", "minimum": 0, "maximum": 64},
+        "aggregate_candidate_selection_complete": {"type": "boolean"},
+        "complete_over_committed_sheets": {"type": "boolean"},
+        "unprepared_sheet_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "notice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "text"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"enum": ["high", "moderate", "low"]},
+        "text": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

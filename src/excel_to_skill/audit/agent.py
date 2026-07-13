@@ -1121,6 +1121,168 @@ def _new_audit_agent_turn_state(
     )
 
 
+def _audit_agent_observation_witness(
+    runtime: _AuditAgentRuntime,
+    observations: object,
+    *,
+    expected_focus: dict | None = None,
+) -> tuple[bool, dict[str, set[str]], list[str]]:
+    """Replay private observations so checkpoint state never grants record authority."""
+    if (
+        not isinstance(observations, list)
+        or len(observations) < 2
+        or any(not isinstance(item, dict) for item in observations)
+    ):
+        raise AuditAgentError("audit conversation observations witness가 유효하지 않습니다.")
+    bootstrap = (
+        {
+            "tool": "brief",
+            "input": {"limit": runtime.limit},
+            "result": runtime.briefing,
+        },
+        {
+            "tool": "assertion_procedures",
+            "input": {"query": None, "limit": runtime.limit},
+            "result": runtime.mappings,
+        },
+    )
+    if observations[0] != bootstrap[0] or observations[1] != bootstrap[1]:
+        raise AuditAgentError(
+            "audit conversation bootstrap witness가 runtime과 다릅니다."
+        )
+    observed = _empty_observed()
+    for observation in bootstrap:
+        _merge_observed(
+            observed,
+            _observed_from_result(
+                observation["tool"], observation["result"], runtime.known
+            ),
+        )
+    discovery_complete = all((
+        _discovery_result_complete("brief", runtime.briefing),
+        _discovery_result_complete("assertion_procedures", runtime.mappings),
+    ))
+    used_tools = ["brief", "assertion_procedures"]
+    seen_tool_requests: set[str] = set()
+    saw_focus = False
+    for index, observation in enumerate(observations[2:], 2):
+        tool = observation.get("tool")
+        if tool == "conversation_focus":
+            if (
+                saw_focus
+                or index != 2
+                or expected_focus is None
+                or observation != expected_focus
+            ):
+                raise AuditAgentError(
+                    "audit conversation focus witness가 prior turn 기록과 다릅니다."
+                )
+            saw_focus = True
+            result = observation.get("result")
+            if not isinstance(result, dict) or not isinstance(
+                result.get("records"), list
+            ):
+                raise AuditAgentError(
+                    "audit conversation focus payload가 유효하지 않습니다."
+                )
+            for record in result["records"]:
+                _merge_observed(
+                    observed,
+                    _observed_from_result("audit_get", record, runtime.known),
+                )
+            continue
+        if tool == "answer_validation":
+            if (
+                set(observation) != {"tool", "result"}
+                or not isinstance(observation.get("result"), dict)
+                or set(observation["result"]) != {"error"}
+            ):
+                raise AuditAgentError(
+                    "audit answer validation witness가 유효하지 않습니다."
+                )
+            continue
+        if tool == "agent_protocol":
+            if observation not in ({
+                "tool": "agent_protocol",
+                "result": _tool_error(
+                    "action=tool에는 tool 객체와 final=null이 필요합니다."
+                ),
+            }, {
+                "tool": "agent_protocol",
+                "result": _tool_error(
+                    "action=final에는 tool=null과 final 객체가 필요합니다."
+                ),
+            }):
+                raise AuditAgentError(
+                    "audit agent protocol witness가 유효하지 않습니다."
+                )
+            continue
+        request = observation.get("input")
+        if not isinstance(tool, str) or not isinstance(request, dict):
+            raise AuditAgentError(
+                "audit tool observation witness가 유효하지 않습니다."
+            )
+        try:
+            jsonschema.validate(
+                request,
+                {
+                    "$schema": runtime.schema.get(
+                        "$schema",
+                        "http://json-schema.org/draft-07/schema#",
+                    ),
+                    "$ref": "#/definitions/toolRequest",
+                    "definitions": runtime.schema["definitions"],
+                },
+            )
+        except (jsonschema.ValidationError, KeyError) as e:
+            raise AuditAgentError(
+                "audit tool request witness schema가 유효하지 않습니다."
+            ) from e
+        request_key = json.dumps(request, ensure_ascii=False, sort_keys=True)
+        if request_key in seen_tool_requests:
+            expected_result = _tool_error(
+                "동일한 tool request를 반복할 수 없습니다."
+            )
+        else:
+            seen_tool_requests.add(request_key)
+            try:
+                expected_result = _execute_tool(
+                    runtime.path,
+                    runtime.facts,
+                    runtime.context,
+                    runtime.brief_doc,
+                    runtime.resolver,
+                    request,
+                    observed=observed,
+                    maximum_limit=runtime.limit,
+                )
+            except (AuditAgentError, AuditConsumeError) as e:
+                expected_result = _tool_error(str(e))
+        expected_observation = {
+            "tool": str(request.get("name")),
+            "input": request,
+            "result": expected_result,
+        }
+        if observation != expected_observation:
+            raise AuditAgentError(
+                "audit tool result witness가 deterministic replay와 다릅니다."
+            )
+        used_tools.append(tool)
+        _merge_observed(
+            observed,
+            _observed_from_result(tool, expected_result, runtime.known),
+        )
+        discovery_complete = (
+            discovery_complete
+            and _discovery_result_complete(tool, expected_result)
+        )
+    if (expected_focus is not None) != saw_focus:
+        raise AuditAgentError(
+            "audit conversation focus witness 유무가 prior turn 기록과 다릅니다."
+        )
+    return discovery_complete, observed, used_tools
+
+
 def _request_audit_agent_model_turn(
     runtime: _AuditAgentRuntime,
     state: _AuditAgentTurnState,
@@ -1597,6 +1759,7 @@ def render_audit_agent_markdown(response: dict) -> str:
 __all__ = [
     "AGENT_VERSION",
     "AuditAgentError",
+    "_audit_agent_observation_witness",
     "render_audit_agent_markdown",
     "run_audit_agent",
 ]

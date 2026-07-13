@@ -1,6 +1,7 @@
 """Compiled audit conversation workflow, persistence, and trust-boundary tests."""
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 import stat
@@ -148,6 +149,69 @@ def _recommit_changed_brief(pkg: Path) -> None:
         json.dumps(meta, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
+
+def test_checkpoint_control_state_must_match_private_observation_replay(
+    tmp_path: Path,
+) -> None:
+    pkg, _, _, _ = _write_committed_bundle(tmp_path)
+    runtime, blocked = agent_module._prepare_audit_agent_runtime(
+        pkg,
+        model="stub-model",
+        question="핵심 미비점은?",
+    )
+    assert runtime is not None and blocked is None
+    turn_state = agent_module._new_audit_agent_turn_state(runtime)
+    root = tmp_path / "runtime"
+    store = conversation_module.ConversationArtifactStore(root)
+    invocation_id = "checkpoint-replay"
+    observations_ref = store.write(
+        "thread-a",
+        kind="observations",
+        schema_version=conversation_module.OBSERVATIONS_SCHEMA,
+        payload={
+            "invocation_id": invocation_id,
+            "value": turn_state.observations,
+        },
+    )
+    context = conversation_module.AuditConversationRuntime(
+        thread_id="thread-a",
+        package_path=pkg,
+        sheet=None,
+        store=store,
+        agent=runtime,
+        blocked_response=None,
+    )
+    state = {
+        "invocation_id": invocation_id,
+        "history_ref": None,
+        "observations_ref": observations_ref,
+        "observed_ids": {
+            kind: sorted(values) for kind, values in turn_state.observed.items()
+        },
+        "used_tools": list(turn_state.used_tools),
+        "discovery_complete": turn_state.discovery_complete,
+    }
+
+    restored = conversation_module._turn_state(context, state)
+    assert restored.observed == turn_state.observed
+    assert restored.seen_tool_requests == set()
+
+    tampered_observed = copy.deepcopy(state)
+    citation_id = next(iter(runtime.known["standard_citation"]))
+    tampered_observed["observed_ids"]["standard_citation"] = [citation_id]
+    with pytest.raises(AuditConversationError, match="observed_ids"):
+        conversation_module._turn_state(context, tampered_observed)
+
+    tampered_tools = copy.deepcopy(state)
+    tampered_tools["used_tools"].append("trace")
+    with pytest.raises(AuditConversationError, match="used_tools"):
+        conversation_module._turn_state(context, tampered_tools)
+
+    tampered_discovery = copy.deepcopy(state)
+    tampered_discovery["discovery_complete"] = not turn_state.discovery_complete
+    with pytest.raises(AuditConversationError, match="discovery_complete"):
+        conversation_module._turn_state(context, tampered_discovery)
 
 
 def test_conversation_result_schema_is_packaged_and_strict() -> None:

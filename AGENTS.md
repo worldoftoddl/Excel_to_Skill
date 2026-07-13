@@ -16,6 +16,8 @@ The audit-RAG implementation lives in `src/excel_to_skill/audit/`:
   IDs back to workbook cells and verified standards locations.
 - `aggregate.py` rolls independently committed sheet briefs into a compact account-oriented
   briefing without resending the workbook ledger or full standards context.
+- `aggregate_agent.py` uses a committed aggregate as a conversation routing root, then resolves
+  opaque aggregate/source refs back to the exact committed source sheet before final hydration.
 - `conversation.py` compiles the persistent LangGraph `audit-chat` workflow; `conversation_store.py`
   keeps raw turn material outside checkpoints, and `langchain_client.py` provides the lazy
   `ChatAnthropic` structured-output boundary.
@@ -75,10 +77,19 @@ Preserve these invariants when changing the audit path:
   exact bundle identity, counters/status, typed IDs, and content-addressed artifact references.
   Questions, observations, model decisions, answers, cells, standards text, clients, paths, and
   secrets stay outside checkpoint state. Every resumed turn must re-pass the committed-bundle gate.
-- A conversation thread is pinned to one exact workbook/sheet bundle. Resume-time drift fails
-  before a model call, and drift during an active turn fails before private history publication;
-  never auto-rebase a thread. Prior prose does not authorize IDs. Only historical IDs deliberately
-  re-exposed as current typed `conversation_focus.records` become visible this turn.
+- A conversation thread is pinned to one exact workbook/sheet bundle or aggregate snapshot.
+  Aggregate binding includes the aggregate key and input/source manifests, not merely its stable
+  selection ID. Resume-time drift fails before a model call, and drift during an active turn fails
+  before private history publication; never auto-rebase a thread. Prior prose does not authorize
+  IDs. Only historical IDs deliberately re-exposed as current typed `conversation_focus.records`
+  become visible this turn.
+- An aggregate is a compact routing index, not new audit evidence. Models may select only observed
+  scope-qualified `record:<sha256>` or `source:<sha256>` refs. Application readers must resolve
+  every selected record through its exact committed source sheet before hydrating cells or CIDs;
+  same-named local IDs from different sheets must never share authority.
+- Aggregate trust and coverage remain visible in every answer. Preserve source review state,
+  aggregate `draft`, answer `unreviewed`, candidate truncation, subset selection, partial sources,
+  and unprepared-sheet counts. Never turn an incomplete aggregate into a workbook-wide conclusion.
 - `.audit_runtime/conversations/` is a private, ignored runtime store, not a prepared artifact or
   review boundary. Its canonical objects and SQLite checkpoints must remain refs-only separated,
   digest-checked, thread-scoped, and created with private permissions where supported.
@@ -103,6 +114,7 @@ uv run excel-to-skill trace <prepared-package> --id <fact-or-relation-id>
 uv run excel-to-skill audit-agent <prepared-package> --question "핵심 미비점은?"
 uv run --extra graph excel-to-skill audit-chat <prepared-package> --question "핵심 위험은?"
 uv run --extra graph excel-to-skill audit-chat <prepared-package> --thread <id> --question "그 결과는?"
+uv run --extra graph excel-to-skill audit-chat <prepared-package> --aggregate-id <id> --question "계정별 위험은?"
 uv build                        # build wheel and source distributions with Hatchling
 ```
 
@@ -138,29 +150,28 @@ briefing/Q&A agent. The current brief contract is `audit_brief.v2`; rerunning `p
 a v1 brief while reusing valid upstream stages.
 
 The historical pre-aggregate baseline recorded here was `344 passed, 1 skipped`; prior wheel and
-source-distribution build checks passed. Sheet-scope account aggregation has since been implemented
-in the current worktree, and the first persistent conversation vertical slice is now implemented.
-Its compiled graph, private content-addressed store, SQLite persistence, lazy LangChain Anthropic
-adapter, CLI, result schema, same-thread serialization, and existing-agent primitive refactor are
-covered by regression tests. The current complete suite is `468 passed, 1 skipped`; compileall,
-lock consistency, diff/secret checks, and wheel/source-distribution builds pass.
+source-distribution build checks passed. Sheet-scope account aggregation and the persistent
+conversation graph have since been implemented. The graph now accepts either one committed
+workbook/sheet bundle or `--aggregate-id`: aggregate records remain a compact root, opaque refs
+route to exact committed source sheets, and final cells/CIDs are hydrated there. Focused aggregate
+conversation, persistence, CLI, and trust/coverage regression tests pass. The current complete
+suite is `490 passed, 1 skipped`; compileall, lock consistency, diff/credential-pattern checks,
+and wheel/source-distribution builds pass.
 
 The current orchestration plan is intentionally staged:
 
-1. Maintain the verified `audit-chat` slice: compiled dynamic tool/final routing, restart-safe
-   threads, exact bundle pinning, typed prior-turn focus, refs-only checkpoints, and request-level
-   usage. Before long-running production use, add a bounded retention/GC policy for orphaned
-   private objects left by failed or abandoned invocations.
-2. Add an aggregate-bound main-agent adapter so a multi-sheet account brief can be the conversation
-   root while every selected record still traces to its exact committed source sheet. The current
-   first slice converses over one committed workbook or sheet bundle only.
-3. Add an optional dynamic standards-research subgraph only for questions outside the committed
+1. Maintain the verified `audit-chat` slices: compiled dynamic tool/final routing, restart-safe
+   threads, exact workbook/sheet/aggregate pinning, typed prior-turn focus, refs-only checkpoints,
+   exact-source aggregate tracing, and request-level usage. Before long-running production use,
+   add a bounded retention/GC policy for orphaned private objects left by failed or abandoned
+   invocations.
+2. Add an optional dynamic standards-research subgraph only for questions outside the committed
    context. A worker may select CIDs, but application code must re-fetch and verify each paragraph;
    results remain turn-scoped, `ephemeral`, `unreviewed`, and outside the prepared bundle.
-4. Move `prepare` orchestration to a graph only after replacing temporary staging with durable,
+3. Move `prepare` orchestration to a graph only after replacing temporary staging with durable,
    crash-resumable staging that preserves commit-last publication and rollback guarantees.
-5. Keep the current single-call aggregate path outside the graph until it needs genuine dynamic
-   branching; do not migrate it merely for framework uniformity.
+4. Keep the current single-call aggregate generation path outside the graph until it needs
+   genuine dynamic branching; do not migrate it merely for framework uniformity.
 
 The latest live synthetic receivables workpaper regenerated
 `audit_facts` with extractor 0.2.1 and published `audit_brief.v2`/0.4.3. It produced two
@@ -197,5 +208,8 @@ values/formulas, optional LangSmith tracing can copy the same exchange externall
 prints hydrated raw cells. `audit-chat` persists questions and hydrated answers under the private
 `.audit_runtime/` directory and its LangChain calls can be traced by the same environment keys; it
 uses hashed SQLite checkpoint thread keys while returning the friendly thread ID to the caller,
-and does not call standards MCP again in the current slice. Use synthetic data for live tests and
+and does not call standards MCP again in the current slice. Aggregate-bound `audit-chat` also uses
+no child LLM: the configured conversation model selects opaque refs, while local readers route to
+the exact committed source sheet. Dynamic MCP-backed standards research is the next roadmap stage,
+not an implicit capability of current conversations. Use synthetic data for live tests and
 explicitly blank both LangSmith key variables when tracing must stay off.
