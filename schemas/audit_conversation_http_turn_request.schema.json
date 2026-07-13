@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_conversation_http_turn_request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bundle_id", "question"],
+  "properties": {
+    "bundle_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 12000,
+      "pattern": "^[^\\s\\u0000-\\u001F\\u007F](?:[^\\u0000-\\u001F\\u007F]*[^\\s\\u0000-\\u001F\\u007F])?$"
+    },
+    "thread_id": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "sheet": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 31,
+      "pattern": "^[^\\s\\u0000-\\u001F\\u007F\\[\\]:*?/\\\\](?:[^\\u0000-\\u001F\\u007F\\[\\]:*?/\\\\]*[^\\s\\u0000-\\u001F\\u007F\\[\\]:*?/\\\\])?$"
+    },
+    "aggregate_id": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "standards_research": {"type": "boolean", "default": false},
+    "procedure_planning": {"type": "boolean", "default": false},
+    "workbook_inspection": {"type": "boolean", "default": false}
+  },
+  "allOf": [
+    {
+      "not": {
+        "required": ["sheet", "aggregate_id"],
+        "properties": {
+          "sheet": {"type": "string"},
+          "aggregate_id": {"type": "string"}
+        }
+      }
+    }
+  ]
+}

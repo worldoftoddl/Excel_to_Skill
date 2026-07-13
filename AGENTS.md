@@ -26,6 +26,12 @@ The audit-RAG implementation lives in `src/excel_to_skill/audit/`:
 - `procedure_planning.py` compiles the uncheckpointed proposed-test worker. It authors three to
   five bounded alternatives and combinations from exact typed workbook and standards basis refs
   without promoting them to prepared evidence.
+- `workbook_source.py` binds an opaque uploaded asset to the package source digest;
+  `workbook_inspection.py` provides bounded ledger-first range, dependency, profile, duplicate,
+  outlier, and optional raw-XLSX observations without creating audit evidence.
+- `service.py` maps opaque web bundle/thread commands to server-owned snapshots with
+  principal-scoped runtime IDs and atomic idempotency claims; `web.py` exposes a lazy FastAPI
+  POST/GET adapter without accepting package paths, providers, or model settings from clients.
 - `prepare.py` stages, validates, and atomically publishes all three artifacts.
 - `consume.py` exposes commit-gated `brief`, search/get, assertion-procedure, and trace readers.
 - `validate.py` enforces schemas, cross-links, digests, relation direction, and source separation.
@@ -95,6 +101,16 @@ Preserve these invariants when changing the audit path:
 - Aggregate trust and coverage remain visible in every answer. Preserve source review state,
   aggregate `draft`, answer `unreviewed`, candidate truncation, subset selection, partial sources,
   and unprepared-sheet counts. Never turn an incomplete aggregate into a workbook-wide conclusion.
+- Workbook inspection is opt-in, read-only, ledger-first, and bounded to one exact sheet/range per
+  request and two attempted calls per turn. Raw XLSX requires a same-range ledger observation,
+  an opaque host-bound provider, exact source digest, and archive/parser bounds. Its output is
+  always `computed`/`unreviewed`/`not_documented`/turn-scoped, is not a workbook fact, and must not
+  enter prepared artifacts, aggregate evidence, checkpoints, or later-turn ID authority.
+- Web commands use opaque `bundle_id`; the host alone resolves package/runtime paths and optional
+  raw workbook providers. Public thread IDs must be deterministically namespaced by tenant and
+  subject before graph persistence, while receipts expose only the public ID. Claim an
+  Idempotency-Key before entering the runtime; a started but unpublished turn fails closed as
+  pending rather than being executed twice.
 - `.audit_runtime/conversations/` is a private, ignored runtime store, not a prepared artifact or
   review boundary. Its canonical objects and SQLite checkpoints must remain refs-only separated,
   digest-checked, thread-scoped, and created with private permissions where supported.
@@ -121,6 +137,8 @@ uv sync                         # install the core and development dependencies
 uv sync --extra annotate        # also install Anthropic/LangSmith integrations
 uv sync --extra prepare         # also install Anthropic/FastMCP audit preparation dependencies
 uv sync --extra graph           # install LangGraph, SQLite checkpoint, and ChatAnthropic support
+uv sync --extra inspection      # install pandas for bounded table analytics
+uv sync --extra web --extra graph  # install web service and audit-chat runtime support
 uv run pytest                   # run the complete automated test suite
 uv run pytest tests/test_review.py  # run one focused test module
 uv run excel-to-skill convert tests/fixtures/fx1_merge_formula.xlsx
@@ -135,6 +153,7 @@ uv run --extra graph excel-to-skill audit-chat <prepared-package> --aggregate-id
 uv run --extra graph --extra prepare excel-to-skill audit-chat <prepared-package> --question "외부조회 관련 감사기준은?" --standards-research
 uv run --extra graph excel-to-skill audit-chat <prepared-package> --question "이 위험에 가능한 test는?" --procedure-planning
 uv run --extra graph --extra prepare excel-to-skill audit-chat <prepared-package> --question "기준을 확인하고 test들을 비교해줘" --standards-research --procedure-planning
+uv run --extra graph --extra inspection excel-to-skill audit-chat <prepared-package> --question "C시트 J열을 분석해줘" --workbook-inspection
 uv build                        # build wheel and source distributions with Hatchling
 ```
 
@@ -157,11 +176,17 @@ synthetic workbook and record separately that its brief remains draft until revi
 Graph tests should use an in-memory saver for routing and isolation, plus focused SQLite restart
 tests. Inspect checkpoint payloads to ensure raw questions, answers, cells, standards text, and
 secrets never entered the database. The core import/convert/verify path must still work without
-the optional `graph` extra.
+the optional `graph` extra. Inspection tests must cover exact Excel grid/range limits, source
+digest mismatch, raw archive expansion bounds, lazy pandas import, truncated auxiliary-reference
+coverage, aggregate exact-source routing, and the absence of inspection payloads from checkpoints
+and later-turn focus. Web tests should exercise the framework-neutral adapter and actual ASGI
+POST/GET requests; do not depend on Starlette `TestClient` when the installed portal/http client
+combination is incompatible. Production repositories need multi-worker claim/publish/abort and
+principal-isolation tests; the in-memory implementations prove only the single-process contract.
 
 ## Current Audit-RAG Status
 
-The audit-RAG path is now the local `main` direction, based on commit `07f75e9`. The former local
+The audit-RAG path is now the local `main` direction, based on commit `ef1337e`. The former local
 main harness series remains only at `archive/harness-v1.20`. The current checkpoint includes region-wide
 fact extraction, remote auditpaper standards MCP retrieval, collection-pinned CID verification,
 persistent paragraph caching, agent-ready brief generation, commit-gated readers, canonical
@@ -181,9 +206,16 @@ procedure planning now uses exact observed risk/assertion and standards basis to
 five `primary`/`alternative`/`complementary` test options, per-option conditions and evidence
 trade-offs, and recommended combinations. Plans remain proposed, unreviewed, not evidenced, and
 outside every prepared artifact; when committed standards context is insufficient, the main graph
-may use a same-turn, same-scope research result first. The current
-complete suite is `562 passed, 1 skipped`; compileall, lock consistency, diff/credential-pattern
-checks, and wheel/source-distribution builds pass.
+may use a same-turn, same-scope research result first. Optional workbook inspection now adds a
+ledger-first deterministic branch for exact range reads, formula dependencies, pandas profiles,
+duplicates, outliers, and a digest-bound raw XLSX re-read when a host provider is present. Selected
+inspection refs remain computed, unreviewed, not documented, turn-scoped supplements and never
+become prepared or later-turn evidence. A web-ready service boundary now resolves opaque bundle
+IDs, namespaces public threads per principal, claims idempotency keys before runtime entry, and
+offers strict FastAPI POST/GET adapters over server-owned snapshots. The in-memory repository and
+lock are prototype implementations; durable multi-worker storage remains a host responsibility.
+The current complete suite is `620 passed, 1 skipped`; compileall, schema validation, lock
+consistency, diff/credential-pattern checks, and wheel/source-distribution builds pass.
 
 The current orchestration plan is intentionally staged:
 
@@ -201,9 +233,21 @@ The current orchestration plan is intentionally staged:
    combinations, exact-scope refs, and fixed `proposed`/`unreviewed`/`not_evidenced` status. When
    needed, use only current-turn verified research as a fallback standards basis; never promote a
    proposal into documented workpaper evidence.
-4. Move `prepare` orchestration to a graph only after replacing temporary staging with durable,
+4. Maintain the optional workbook-inspection slice: package-ledger first, one exact source
+   sheet/range, two request attempts per turn, bounded deterministic analytics, opaque
+   digest-bound raw source only when the host supplies it, refs-only checkpoints, and no
+   later-turn authority.
+5. Stabilize the web service boundary around opaque bundle snapshots and repository interfaces.
+   Replace the in-memory receipt/idempotency/turn-lock implementations with durable DB/object
+   storage and a distributed claim/lock plus pending-claim reconciliation before multi-worker
+   production use. Keep the current API synchronous until a job/queue product contract is chosen.
+6. Add Office.js writing only as a separate approved-edit executor after the read-only boundary is
+   stable: propose edits, preview an exact diff, obtain user approval, apply in an Excel Add-in,
+   reread/recalculate, verify, and retain a change record. Never grant arbitrary JavaScript or
+   Python execution through the conversation model.
+7. Move `prepare` orchestration to a graph only after replacing temporary staging with durable,
    crash-resumable staging that preserves commit-last publication and rollback guarantees.
-5. Keep the current single-call aggregate generation path outside the graph until it needs
+8. Keep the current single-call aggregate generation path outside the graph until it needs
    genuine dynamic branching; do not migrate it merely for framework uniformity.
 
 The latest live synthetic receivables workpaper regenerated
@@ -229,6 +273,14 @@ conditions, evidence, strengths, and limitations, while the plan remained
 `ephemeral`/`unreviewed`/turn-scoped/outside the prepared bundle. The two child-model requests used
 18,075 total tokens in that deterministic routing smoke; main-agent routing remains separately
 covered by compiled-graph integration tests and live research selection.
+
+The latest deterministic inspection smoke used the non-client 2025 K-IFRS account-procedure
+template with 36 non-empty sheets, 5,895 emitted cells, and 59 workbook regions. Without an LLM
+call, a C-sheet range inspection returned 24 relevant ledger cells, dependency inspection found
+the four exact C-to-A formula precedents, table profiling described the 11-column procedure area,
+and duplicate analysis found two repeated assertion-code groups. A host-bound raw provider with
+the same source digest re-read `C4:G5` and preserved formulas plus cached values. This demonstrates
+bounded sheet/range reinspection, not audit approval or a workbook-wide conclusion.
 
 ## Commit & Pull Request Guidelines
 
@@ -259,5 +311,11 @@ With `--procedure-planning`, an isolated child may author multiple proposed test
 basis refs, but those outputs remain private turn-scoped supplements and never become performed
 facts. Enabling both flags permits research-first fallback only when the main agent selects it;
 planning itself does not connect to MCP. Aggregate-bound research and planning require one exact
-exposed source scope, and neither child inherits the parent checkpointer. Use synthetic data for
-live tests and explicitly blank both LangSmith key variables when tracing must stay off.
+exposed source scope, and neither child inherits the parent checkpointer. With
+`--workbook-inspection`, package-ledger observations or host-bound raw ranges may be included in the
+model exchange and public answer, but they remain computed supplements; raw providers must never
+expose an asset locator and must match the committed source digest. Web clients may provide only
+opaque bundle/thread IDs. Keep server paths, provider objects, internal principal-scoped runtime
+thread IDs, and idempotency claim tokens outside receipts and logs. The bundled in-memory
+repository/lock is not a multi-worker production store. Use synthetic data for live tests and
+explicitly blank both LangSmith key variables when tracing must stay off.

@@ -29,6 +29,12 @@ workbook facts, standards context, and audit-brief observations through bounded 
   observed typed fact/relation/standard IDs plus any current-turn `research_ref`. The isolated
   worker proposes three to five distinct options and a recommended combination; it never records
   that a procedure was performed.
+- `workbook_inspection`: only when `capabilities.workbook_inspection.enabled=true` and committed
+  package observations do not contain the requested range detail or a deterministic calculation is
+  needed. Request exactly one sheet and one rectangular A1 range. Start with the package ledger;
+  request `source="raw"` only when `raw_source_available=true` and an exact range attribute is
+  unavailable in the ledger. The result is
+  current-turn `computed / unreviewed / not_documented` material, not a workbook fact.
 
 The application supplies `brief` and `assertion_procedures` bootstrap observations on every
 turn. Return a tool action only when those observations and the typed conversation focus are
@@ -66,6 +72,13 @@ duplicate an already committed standards citation.
   `final.plan_refs`. The plan is a non-exhaustive `proposed / unreviewed / not_evidenced`
   supplement. It is not a fact, a performed procedure, a `tests` or `addresses` relation, or
   evidence of compliance. It is not automatically authorized in a later turn.
+- Copy `inspection_ref` only from a successful typed `workbook_inspection` observation in this
+  turn and put selected refs in `final.inspection_refs`. Never reinterpret an inspection result as
+  documented workbook content or use it to authorize a fact/relation/citation ID. It is not
+  re-exposed as later-turn conversation focus.
+- Each inspection request must use `query=null`, `kind=null`, `item_id=null`, and `limit=1`, plus
+  one exact `operation`, `sheet`, `range`, and its parameters. Do not combine sheets or ranges in
+  one call. At most `capabilities.workbook_inspection.max_requests` calls are available.
 - To report a documentation gap, select an observed brief statement whose type is `gap`. A search
   miss or a general standard is not evidence of a gap, and absence is not proof of non-compliance.
 - Copy every selected ID exactly from an observed typed record. IDs that appear only inside cell
@@ -90,7 +103,8 @@ Return exactly one object matching the supplied schema:
 - To finish: `action="final"`, `tool=null`, and a structured `final` response.
 
 For a final response, return only `abstained`, `abstention_code`, ordered `selections`, and optional
-`research_refs` and `plan_refs`. When research or a proposed plan is the only useful material,
+`research_refs`, `plan_refs`, and `inspection_refs`. When research, a proposed plan, or computed
+inspection is the only useful material,
 leave committed selections empty and abstain from a workpaper-evidence answer; the application
 renders each separate supplement.
 Do not add a title, reason, summary, finding text, claim text, or suggested question; the

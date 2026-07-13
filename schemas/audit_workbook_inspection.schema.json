@@ -1,0 +1,389 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "bounded workbook inspection result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "inspection_ref", "status", "evidence_status",
+    "review_status", "documentation_status", "turn_scoped",
+    "outside_prepared_bundle", "operation", "scope", "scope_id",
+    "source", "source_sha256", "input", "input_sha256", "result",
+    "result_sha256", "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_workbook_inspection.v1"},
+    "inspection_ref": {"type": "string", "pattern": "^inspection:[0-9a-f]{64}$"},
+    "status": {"const": "computed"},
+    "evidence_status": {"const": "computed"},
+    "review_status": {"const": "unreviewed"},
+    "documentation_status": {"const": "not_documented"},
+    "turn_scoped": {"const": true},
+    "outside_prepared_bundle": {"const": true},
+    "operation": {"$ref": "#/definitions/operation"},
+    "scope": {"$ref": "#/definitions/scope"},
+    "scope_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/definitions/sha256"}
+      ]
+    },
+    "source": {"$ref": "#/definitions/source"},
+    "source_sha256": {"$ref": "#/definitions/sha256"},
+    "input": {"$ref": "#/definitions/input"},
+    "input_sha256": {"$ref": "#/definitions/sha256"},
+    "result": {"$ref": "#/definitions/result"},
+    "result_sha256": {"$ref": "#/definitions/sha256"},
+    "limitations": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 400}
+    }
+  },
+  "definitions": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "operation": {
+      "enum": [
+        "inspect_range", "inspect_formula_dependencies", "profile_table",
+        "find_duplicates", "find_outliers"
+      ]
+    },
+    "scope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {"kind": {"const": "workbook"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "sheet", "id"],
+          "properties": {
+            "kind": {"const": "sheet"},
+            "sheet": {"type": "string", "minLength": 1, "maxLength": 255},
+            "id": {"$ref": "#/definitions/sha256"}
+          }
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "workbook_sha256", "ledger_sha256", "content_sha256"],
+      "properties": {
+        "kind": {"enum": ["package_ledger", "raw_workbook"]},
+        "workbook_sha256": {"$ref": "#/definitions/sha256"},
+        "ledger_sha256": {"$ref": "#/definitions/sha256"},
+        "content_sha256": {"$ref": "#/definitions/sha256"}
+      }
+    },
+    "excelRange": {
+      "type": "string",
+      "pattern": "^[A-Z]{1,3}[1-9][0-9]*(?::[A-Z]{1,3}[1-9][0-9]*)?$"
+    },
+    "column": {"type": "string", "pattern": "^[A-Z]{1,3}$"},
+    "scalar": {
+      "type": ["string", "number", "integer", "boolean", "null"]
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "sheet", "range", "parameters"],
+      "properties": {
+        "operation": {"$ref": "#/definitions/operation"},
+        "sheet": {"type": "string", "minLength": 1, "maxLength": 255},
+        "range": {"$ref": "#/definitions/excelRange"},
+        "parameters": {"type": "object"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"operation": {"const": "inspect_range"}}},
+          "then": {"properties": {"parameters": {"$ref": "#/definitions/inspectParameters"}}}
+        },
+        {
+          "if": {"properties": {"operation": {"const": "inspect_formula_dependencies"}}},
+          "then": {"properties": {"parameters": {"$ref": "#/definitions/dependencyParameters"}}}
+        },
+        {
+          "if": {"properties": {"operation": {"const": "profile_table"}}},
+          "then": {"properties": {"parameters": {"$ref": "#/definitions/profileParameters"}}}
+        },
+        {
+          "if": {"properties": {"operation": {"const": "find_duplicates"}}},
+          "then": {"properties": {"parameters": {"$ref": "#/definitions/duplicateParameters"}}}
+        },
+        {
+          "if": {"properties": {"operation": {"const": "find_outliers"}}},
+          "then": {"properties": {"parameters": {"$ref": "#/definitions/outlierParameters"}}}
+        }
+      ]
+    },
+    "inspectParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "limit"],
+      "properties": {
+        "source": {"enum": ["ledger", "raw"]},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200}
+      }
+    },
+    "dependencyParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction", "limit"],
+      "properties": {
+        "direction": {"enum": ["precedents", "dependents", "both"]},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100}
+      }
+    },
+    "profileParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["header"],
+      "properties": {"header": {"type": "boolean"}}
+    },
+    "duplicateParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["header", "columns", "limit"],
+      "properties": {
+        "header": {"type": "boolean"},
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {"$ref": "#/definitions/column"}
+        },
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+      }
+    },
+    "outlierParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["header", "column", "limit"],
+      "properties": {
+        "header": {"type": "boolean"},
+        "column": {"$ref": "#/definitions/column"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+      }
+    },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sheet", "cell", "row", "col", "value", "formula", "cached_value",
+        "data_type", "number_format"
+      ],
+      "properties": {
+        "sheet": {"type": "string", "minLength": 1, "maxLength": 255},
+        "cell": {"type": "string", "pattern": "^[A-Z]{1,3}[1-9][0-9]*$"},
+        "row": {"type": "integer", "minimum": 1},
+        "col": {"type": "integer", "minimum": 1, "maximum": 16384},
+        "value": {"$ref": "#/definitions/scalar"},
+        "formula": {"type": ["string", "null"], "maxLength": 32767},
+        "cached_value": {"$ref": "#/definitions/scalar"},
+        "data_type": {"type": ["string", "null"], "maxLength": 20},
+        "number_format": {"type": ["string", "null"], "maxLength": 500}
+      }
+    },
+    "inspectResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "range_area", "returned", "total_records", "truncated", "cells"],
+      "properties": {
+        "kind": {"const": "inspect_range"},
+        "range_area": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "returned": {"type": "integer", "minimum": 0, "maximum": 200},
+        "total_records": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "truncated": {"type": "boolean"},
+        "cells": {"type": "array", "maxItems": 200, "items": {"$ref": "#/definitions/cell"}}
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction", "from", "to", "formula", "ref_type"],
+      "properties": {
+        "direction": {"enum": ["precedent", "dependent"]},
+        "from": {"type": "string", "minLength": 3, "maxLength": 520},
+        "to": {"type": "string", "minLength": 3, "maxLength": 520},
+        "formula": {"type": "string", "maxLength": 32767},
+        "ref_type": {"enum": ["cell", "range"]}
+      }
+    },
+    "unresolved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cell", "formula", "reason"],
+      "properties": {
+        "cell": {"type": "string", "minLength": 3, "maxLength": 520},
+        "formula": {"type": "string", "maxLength": 32767},
+        "reason": {"enum": ["indirect", "offset"]}
+      }
+    },
+    "externalRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cell", "raw", "target"],
+      "properties": {
+        "cell": {"type": "string", "minLength": 3, "maxLength": 520},
+        "raw": {"type": "string", "minLength": 1, "maxLength": 32767},
+        "target": {"type": ["string", "null"], "maxLength": 2000}
+      }
+    },
+    "dependencyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "direction", "returned", "total_dependencies", "truncated",
+        "dependencies", "unresolved", "total_unresolved", "unresolved_truncated",
+        "external_refs", "total_external_refs", "external_refs_truncated",
+        "observability"
+      ],
+      "properties": {
+        "kind": {"const": "inspect_formula_dependencies"},
+        "direction": {"enum": ["precedents", "dependents", "both"]},
+        "returned": {"type": "integer", "minimum": 0, "maximum": 100},
+        "total_dependencies": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"},
+        "dependencies": {"type": "array", "maxItems": 100, "items": {"$ref": "#/definitions/dependency"}},
+        "unresolved": {"type": "array", "maxItems": 20, "items": {"$ref": "#/definitions/unresolved"}},
+        "total_unresolved": {"type": "integer", "minimum": 0},
+        "unresolved_truncated": {"type": "boolean"},
+        "external_refs": {"type": "array", "maxItems": 20, "items": {"$ref": "#/definitions/externalRef"}},
+        "total_external_refs": {"type": "integer", "minimum": 0},
+        "external_refs_truncated": {"type": "boolean"},
+        "observability": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["workbook", "note"],
+          "properties": {
+            "workbook": {"enum": ["full", "unavailable_xls"]},
+            "note": {"type": ["string", "null"], "maxLength": 2000}
+          }
+        }
+      }
+    },
+    "columnProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "column", "header", "inferred_type", "non_null_count", "null_count",
+        "distinct_count", "numeric_count", "minimum", "maximum", "mean"
+      ],
+      "properties": {
+        "column": {"$ref": "#/definitions/column"},
+        "header": {"$ref": "#/definitions/scalar"},
+        "inferred_type": {"enum": ["empty", "numeric", "mixed", "text"]},
+        "non_null_count": {"type": "integer", "minimum": 0, "maximum": 2000},
+        "null_count": {"type": "integer", "minimum": 0, "maximum": 2000},
+        "distinct_count": {"type": "integer", "minimum": 0, "maximum": 2000},
+        "numeric_count": {"type": "integer", "minimum": 0, "maximum": 2000},
+        "minimum": {"type": ["number", "integer", "null"]},
+        "maximum": {"type": ["number", "integer", "null"]},
+        "mean": {"type": ["number", "integer", "null"]}
+      }
+    },
+    "profileResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "header", "range_area", "row_count", "data_row_count", "column_count", "columns"],
+      "properties": {
+        "kind": {"const": "profile_table"},
+        "header": {"type": "boolean"},
+        "range_area": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "row_count": {"type": "integer", "minimum": 1, "maximum": 2000},
+        "data_row_count": {"type": "integer", "minimum": 0, "maximum": 2000},
+        "column_count": {"type": "integer", "minimum": 1, "maximum": 100},
+        "columns": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/definitions/columnProfile"}}
+      }
+    },
+    "duplicateKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column", "value"],
+      "properties": {
+        "column": {"$ref": "#/definitions/column"},
+        "value": {"$ref": "#/definitions/scalar"}
+      }
+    },
+    "duplicateGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "rows", "cells", "count"],
+      "properties": {
+        "key": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"$ref": "#/definitions/duplicateKey"}},
+        "rows": {"type": "array", "minItems": 2, "maxItems": 2000, "items": {"type": "integer", "minimum": 1}},
+        "cells": {"type": "array", "minItems": 2, "maxItems": 20000, "items": {"type": "string", "pattern": "^[A-Z]{1,3}[1-9][0-9]*$"}},
+        "count": {"type": "integer", "minimum": 2, "maximum": 2000}
+      }
+    },
+    "duplicateResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "header", "columns", "returned", "total_groups",
+        "total_duplicate_rows", "truncated", "groups"
+      ],
+      "properties": {
+        "kind": {"const": "find_duplicates"},
+        "header": {"type": "boolean"},
+        "columns": {"type": "array", "minItems": 1, "maxItems": 10, "uniqueItems": true, "items": {"$ref": "#/definitions/column"}},
+        "returned": {"type": "integer", "minimum": 0, "maximum": 50},
+        "total_groups": {"type": "integer", "minimum": 0, "maximum": 2000},
+        "total_duplicate_rows": {"type": "integer", "minimum": 0, "maximum": 2000},
+        "truncated": {"type": "boolean"},
+        "groups": {"type": "array", "maxItems": 50, "items": {"$ref": "#/definitions/duplicateGroup"}}
+      }
+    },
+    "outlier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row", "cell", "value", "side"],
+      "properties": {
+        "row": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "cell": {"type": "string", "pattern": "^[A-Z]{1,3}[1-9][0-9]*$"},
+        "value": {"type": ["number", "integer"]},
+        "side": {"enum": ["lower", "upper"]}
+      }
+    },
+    "outlierResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "method", "header", "column", "numeric_count", "quartile_1",
+        "quartile_3", "iqr", "lower_bound", "upper_bound", "returned",
+        "total_outliers", "truncated", "outliers"
+      ],
+      "properties": {
+        "kind": {"const": "find_outliers"},
+        "method": {"const": "iqr_1_5"},
+        "header": {"type": "boolean"},
+        "column": {"$ref": "#/definitions/column"},
+        "numeric_count": {"type": "integer", "minimum": 0, "maximum": 2000},
+        "quartile_1": {"type": ["number", "integer", "null"]},
+        "quartile_3": {"type": ["number", "integer", "null"]},
+        "iqr": {"type": ["number", "integer", "null"]},
+        "lower_bound": {"type": ["number", "integer", "null"]},
+        "upper_bound": {"type": ["number", "integer", "null"]},
+        "returned": {"type": "integer", "minimum": 0, "maximum": 50},
+        "total_outliers": {"type": "integer", "minimum": 0, "maximum": 2000},
+        "truncated": {"type": "boolean"},
+        "outliers": {"type": "array", "maxItems": 50, "items": {"$ref": "#/definitions/outlier"}}
+      }
+    },
+    "result": {
+      "oneOf": [
+        {"$ref": "#/definitions/inspectResult"},
+        {"$ref": "#/definitions/dependencyResult"},
+        {"$ref": "#/definitions/profileResult"},
+        {"$ref": "#/definitions/duplicateResult"},
+        {"$ref": "#/definitions/outlierResult"}
+      ]
+    }
+  }
+}

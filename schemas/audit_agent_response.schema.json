@@ -37,7 +37,8 @@
       "items": {"type": "object"}
     },
     "standards_research": {"$ref": "#/definitions/standardsResearch"},
-    "procedure_plan": {"$ref": "#/$defs/procedurePlan"}
+    "procedure_plan": {"$ref": "#/$defs/procedurePlan"},
+    "workbook_inspection": {"$ref": "#/definitions/workbookInspection"}
   },
   "allOf": [
     {
@@ -815,6 +816,36 @@
         "limitations": {
           "type": "array", "minItems": 3, "maxItems": 3,
           "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "workbookInspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "status", "evidence_status", "review_status", "documentation_status",
+        "turn_scoped", "outside_prepared_bundle", "selected_refs", "inspections",
+        "limitations"
+      ],
+      "properties": {
+        "schema_version": {"const": "audit_workbook_inspection_summary.v1"},
+        "status": {"const": "computed"},
+        "evidence_status": {"const": "computed"},
+        "review_status": {"const": "unreviewed"},
+        "documentation_status": {"const": "not_documented"},
+        "turn_scoped": {"const": true},
+        "outside_prepared_bundle": {"const": true},
+        "selected_refs": {
+          "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^inspection:[0-9a-f]{64}$"}
+        },
+        "inspections": {
+          "type": "array", "minItems": 1, "maxItems": 2,
+          "items": {"type": "object", "required": ["schema_version", "inspection_ref"]}
+        },
+        "limitations": {
+          "type": "array", "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
         }
       }
     }

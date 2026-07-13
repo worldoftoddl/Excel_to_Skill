@@ -15,6 +15,8 @@ uv sync                    # 결정론 계층(convert·verify)
 uv sync --extra annotate   # 해석 계층(annotate)까지 — anthropic 포함
 uv sync --extra prepare    # 감사조서 prepare — anthropic + FastMCP HTTP client
 uv sync --extra graph      # LangGraph 영속 audit-chat + LangChain Anthropic
+uv sync --extra inspection # 범위 profile·중복·이상치 분석용 pandas
+uv sync --extra web --extra graph  # FastAPI/Uvicorn 웹 service + audit-chat runtime
 uv sync --extra graph --extra prepare  # audit-chat 동적 기준서 research·research-first planning까지
 ```
 
@@ -84,6 +86,9 @@ excel-to-skill audit-chat <패키지> --question "이 매출채권 실재성 위
 
 # 관련 기준 근거가 committed 문맥에 부족하면 같은 turn의 동적 조사부터 허용
 excel-to-skill audit-chat <패키지> --question "이 위험에 가능한 test들을 비교해줘" --standards-research --procedure-planning [--mcp-config .mcp.json]
+
+# 전체 workbook을 다시 보내지 않고 한 시트·한 범위의 결정론 검사를 필요할 때만 허용
+excel-to-skill audit-chat <패키지> --question "C시트 J열의 반복 주장과 수식 참조를 확인해줘" --workbook-inspection
 
 # 게시된 다중 시트 aggregate를 대화 root로 사용(--sheet와 동시 사용 불가)
 excel-to-skill audit-chat <패키지> --aggregate-id <selection-sha256> --question "계정별 핵심 위험은?"
@@ -254,7 +259,7 @@ sheet scope identity가 필수로 포함된다.
 `audit-chat`은 기존 `audit-agent`의 commit gate, typed ID 권한, 600KB 관찰 상한, 중복 도구
 차단, 최종 셀·CID hydration을 그대로 재사용하는 별도 LangGraph workflow다. 컴파일된 graph는
 `bind_turn → bootstrap → decide → (execute_tool ↔ decide | execute_research ↔ decide |
-execute_plan ↔ decide | finalize) → commit_turn`으로
+execute_plan ↔ decide | execute_inspection ↔ decide | finalize) → commit_turn`으로
 조건 분기한다. `--thread`를 생략하면 새 ID를 출력하고, 같은 ID를 다음 호출에 주면 프로세스가
 종료된 뒤에도 SQLite checkpoint에서 대화를 재개한다.
 같은 thread의 동시 turn은 hash-only lock으로 직렬화하고, 서로 다른 thread는 독립적으로
@@ -347,6 +352,63 @@ plan은 다음 turn의 focus나 새 ID 권한으로 승계되지 않는다.
 켠 turn에 한해 Anthropic 출력 상한을 16,384 tokens로 예약한다(일반 `audit-chat`은 8,192).
 이는 실제 사용량을 미리 소비한다는 뜻이 아니며, 반환 JSON의 `usage.requests`와 집계 필드에서
 research·planning child를 포함해 provider가 보고한 실제 token 사용량을 확인할 수 있다.
+
+#### Workbook 추가 검사
+
+`--workbook-inspection`은 기본적으로 닫힌 read-only capability다. 모델이 committed brief와
+bounded reader만으로 답하기 어렵다고 판단한 경우에 한해, 전체 원장이나 원본 파일을 모델에
+다시 보내지 않고 정확히 한 시트·한 A1 범위를 결정론적으로 검사한다. 한 turn의 검사 시도는
+성공·실패를 합해 최대 2회이며 aggregate 대화에서는 두 요청 모두 하나의 exact source sheet에 고정된다.
+
+지원 operation은 다음과 같다.
+
+- `inspect_range`: package `cells.jsonl`에서 최대 200개 셀을 다시 읽음
+- `inspect_formula_dependencies`: `references.json`에서 선행·후행 참조를 최대 100건 조회
+- `profile_table`: pandas로 열별 null·distinct·numeric·최소·최대·평균을 계산
+- `find_duplicates`: 선택 열 조합의 중복 그룹을 최대 50건 계산
+- `find_outliers`: 한 숫자 열의 IQR 1.5 방식 이상치를 최대 50건 계산
+
+기본 source는 commit gate를 통과한 package ledger다. 원본 재조회는 같은 sheet/range의 ledger
+검사가 먼저 성공했고, 호스트가 `BundleSnapshot.workbook_source_provider`에 opaque asset reader를
+연결했으며, 그 bytes가 `meta.source.sha256`과 일치할 때만 가능하다. CLI는 경로를 agent tool에
+노출하지 않으므로 현재 `--workbook-inspection`만 켠 경우 ledger 분석이 기본이고 raw source는
+연결되지 않는다. raw XLSX는 압축 archive 상한과 XML 안전 parser를 거친 뒤 read-only로 열며,
+요청 범위에 수식이 있을 때만 cached-value view를 두 번째로 연다.
+
+결과는 `inspection:<sha256>` ref와 source/input/result digest를 가진
+`computed / unreviewed / not_documented / turn_scoped` 보조 응답이다. 조서 fact, 수행된 감사절차,
+감사결론이 아니며 prepared bundle·aggregate·다음 turn의 ID 권한으로 승격되지 않는다.
+
+### 웹 service/API adapter
+
+`audit.service`는 웹 요청이 로컬 경로를 직접 지정하지 못하도록 opaque `bundle_id`를
+서버 소유 `BundleSnapshot`으로 해석한다. public thread ID는 tenant·subject별 내부 runtime ID로
+변환되어 SQLite checkpoint와 private object store가 사용자 사이에서 섞이지 않는다. 같은
+`Idempotency-Key`는 repository가 실행 전에 원자적으로 claim하며, 완료 전 재요청은
+`TURN_IN_PROGRESS`, 다른 command 재사용은 `IDEMPOTENCY_CONFLICT`로 닫힌다.
+
+`audit.web.create_fastapi_app(...)`은 호스트가 인증된 `ServicePrincipal` resolver와 위 service를
+주입할 때 다음 동기식 turn API를 만든다.
+
+```text
+POST /v1/audit/conversation-turns
+GET  /v1/audit/conversation-turns/{request_id}
+```
+
+POST body는 `bundle_id`, `question`, 선택적인 `thread_id`·`sheet`·`aggregate_id`와 세 opt-in
+capability만 받으며 package path, model, runtime root, provider는 거부한다. 모든 POST에는 정확히
+하나의 `Idempotency-Key`가 필요하다. FastAPI는 bounded 전용 executor에서 동기 graph turn을
+수행하고, Pydantic/JSON 오류도 고정 400 오류 봉투로 반환한다.
+
+내장 `InMemoryConversationArtifactRepository`와 `InMemoryTurnLock`은 테스트·단일 프로세스
+prototype용이다. 다중 worker 운영은 `ConversationArtifactRepository`의 atomic
+`claim/publish/abort`, principal-scoped receipt/thread binding과 `TurnLock`을 DB·분산 lock으로
+구현해야 한다. runtime 시작 뒤 실패한 claim은 중복 turn을 막기 위해 자동 재실행하지 않고
+pending으로 남으므로 운영 repository에는 별도 reconciliation 정책도 필요하다.
+
+현재 웹 slice는 읽기·대화 backend까지다. Office.js 쓰기는 이 API가 바로 workbook을 수정하지
+않고, 후속 단계에서 `propose → preview diff → user approval → apply → reread/verify` 계약과 Excel
+Add-in executor를 추가하는 방식으로 분리한다.
 
 prepare의 Python 오케스트레이션 진입점은
 `excel_to_skill.audit.prepare.prepare_package(...)`이다. 모델 client와

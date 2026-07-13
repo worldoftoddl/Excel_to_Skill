@@ -85,6 +85,15 @@ from .standards_research import (
     validate_research_result,
     validate_research_summary,
 )
+from .workbook_inspection import (
+    INSPECTION_RESULT_SCHEMA,
+    WorkbookInspectionError,
+    inspection_records,
+    inspection_summary,
+    run_workbook_inspection,
+    validate_workbook_inspection_result,
+    validate_workbook_inspection_summary,
+)
 
 
 CONVERSATION_VERSION = "0.1.0"
@@ -103,6 +112,7 @@ MAX_FOCUS_TURNS = 3
 MAX_FOCUS_RECORDS = 40
 MAX_RESEARCH_REQUESTS = 1
 MAX_PLANNING_REQUESTS = 1
+MAX_INSPECTION_REQUESTS = 2
 
 _THREAD_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _OBSERVED_KINDS = (
@@ -190,8 +200,10 @@ class AuditConversationRuntime:
     client_factory: object | None = None
     standards_research_enabled: bool = False
     procedure_planning_enabled: bool = False
+    workbook_inspection_enabled: bool = False
     standards_retriever: object | None = None
     standards_retriever_factory: object | None = None
+    workbook_source_provider: object | None = None
     eprint: object | None = None
     _resolved_client: object | None = field(default=None, init=False, repr=False)
     _usage_start: int = field(default=0, init=False, repr=False)
@@ -212,6 +224,12 @@ class AuditConversationRuntime:
         repr=False,
     )
     _planning_request_count: int = field(default=0, init=False, repr=False)
+    _inspection_results: dict[str, list[dict]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _inspection_request_count: int = field(default=0, init=False, repr=False)
     _child_model_call_count: int = field(default=0, init=False, repr=False)
     _node_failure: tuple[str, Exception] | None = field(
         default=None,
@@ -279,6 +297,23 @@ class AuditConversationRuntime:
                 "min_candidates": 3,
                 "max_candidates": 5,
                 "result_status": "proposed_unreviewed_not_evidenced",
+            },
+            "workbook_inspection": {
+                "enabled": self.workbook_inspection_enabled,
+                "max_requests": MAX_INSPECTION_REQUESTS,
+                "max_selected": MAX_INSPECTION_REQUESTS,
+                "one_sheet_per_request": True,
+                "one_range_per_request": True,
+                "source_preference": "package_ledger_first",
+                "raw_source_available": self.workbook_source_provider is not None,
+                "operations": [
+                    "inspect_range",
+                    "inspect_formula_dependencies",
+                    "profile_table",
+                    "find_duplicates",
+                    "find_outliers",
+                ],
+                "result_status": "computed_unreviewed_not_documented_turn_scoped",
             },
         }
 
@@ -554,6 +589,222 @@ def _planning_error(code: str) -> dict:
             "message": "감사 test 후보 계획을 완료하지 못했습니다.",
         }
     }
+
+
+def _inspection_request_key(value: object) -> str:
+    if not isinstance(value, dict):
+        raise AuditConversationError("workbook_inspection input이 유효하지 않습니다.")
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _inspection_error(code: str) -> dict:
+    allowed = {
+        "INSPECTION_DISABLED",
+        "INSPECTION_LIMIT_EXCEEDED",
+        "DUPLICATE_REQUEST",
+        "INVALID_REQUEST",
+        "SOURCE_UNAVAILABLE",
+        "CONTRACT_MISMATCH",
+        "UPSTREAM_UNAVAILABLE",
+    }
+    selected = code if code in allowed else "UPSTREAM_UNAVAILABLE"
+    return {
+        "error": {
+            "code": selected,
+            "message": "workbook 추가 검사를 완료하지 못했습니다.",
+        }
+    }
+
+
+def _inspection_binding(
+    context: AuditConversationRuntime,
+    request: dict,
+) -> tuple[dict, object, str | None]:
+    agent = context.agent
+    if agent is None:
+        raise AuditConversationError(
+            "차단된 conversation은 workbook inspection을 사용할 수 없습니다."
+        )
+    neutral = {
+        "query": request.get("query"),
+        "kind": request.get("kind"),
+        "limit": request.get("limit"),
+    }
+    neutral_id_name = (
+        "item_ref" if isinstance(agent, _AuditAggregateAgentRuntime) else "item_id"
+    )
+    neutral[neutral_id_name] = request.get(neutral_id_name)
+    if neutral != {
+        "query": None,
+        "kind": None,
+        "limit": 1,
+        neutral_id_name: None,
+    }:
+        raise AuditConversationError(
+            "workbook_inspection의 query/kind/item/limit control이 유효하지 않습니다."
+        )
+    canonical = {
+        name: copy.deepcopy(request.get(name))
+        for name in ("operation", "sheet", "range", "parameters")
+    }
+    if any(value is None for value in canonical.values()):
+        raise AuditConversationError(
+            "workbook_inspection에는 operation/sheet/range/parameters가 필요합니다."
+        )
+    if isinstance(agent, _AuditAggregateAgentRuntime):
+        scope_id = request.get("scope_id")
+        exposed_scope_ids = {
+            account.get("scope", {}).get("id")
+            for account in agent.bootstrap.get("accounts", [])
+            if isinstance(account, dict)
+        }
+        snapshot = agent.sources.get(scope_id) if isinstance(scope_id, str) else None
+        if snapshot is None or scope_id not in exposed_scope_ids:
+            raise AuditConversationError(
+                "workbook_inspection scope_id는 aggregate bootstrap의 exact source여야 합니다."
+            )
+        if canonical["sheet"] != snapshot.scope.sheet:
+            raise AuditConversationError(
+                "workbook_inspection은 aggregate source sheet를 바꿀 수 없습니다."
+            )
+        return canonical, snapshot.scope, scope_id
+    if request.get("scope_id") is not None:
+        raise AuditConversationError(
+            "일반 workbook_inspection에는 aggregate scope_id를 사용할 수 없습니다."
+        )
+    if agent.scope.kind == "sheet" and canonical["sheet"] != agent.scope.sheet:
+        raise AuditConversationError(
+            "workbook_inspection sheet가 committed sheet scope와 다릅니다."
+        )
+    return canonical, agent.scope, None
+
+
+def _assert_inspection_ledger_first(
+    request: dict,
+    prior_observations: list[dict],
+) -> None:
+    if not isinstance(request, dict):
+        raise AuditConversationError("workbook_inspection input이 유효하지 않습니다.")
+    parameters = request.get("parameters")
+    if (
+        request.get("operation") != "inspect_range"
+        or not isinstance(parameters, dict)
+        or parameters.get("source") != "raw"
+    ):
+        return
+    for observation in prior_observations:
+        if observation.get("tool") != "workbook_inspection":
+            continue
+        prior_request = observation.get("input")
+        result = observation.get("result")
+        prior_parameters = (
+            prior_request.get("parameters")
+            if isinstance(prior_request, dict)
+            else None
+        )
+        if (
+            isinstance(prior_request, dict)
+            and isinstance(prior_parameters, dict)
+            and prior_request.get("operation") == "inspect_range"
+            and prior_request.get("sheet") == request.get("sheet")
+            and prior_request.get("range") == request.get("range")
+            and prior_request.get("scope_id") == request.get("scope_id")
+            and prior_parameters.get("source") == "ledger"
+            and isinstance(result, dict)
+            and result.get("schema_version") == INSPECTION_RESULT_SCHEMA
+            and result.get("source", {}).get("kind") == "package_ledger"
+        ):
+            return
+    raise AuditConversationError(
+        "raw workbook inspection 전에 같은 sheet/range의 package ledger 검사가 필요합니다."
+    )
+
+
+def _assert_inspection_scope_consistent(
+    request: dict,
+    prior_observations: list[dict],
+) -> None:
+    if not isinstance(request, dict):
+        raise AuditConversationError("workbook_inspection input이 유효하지 않습니다.")
+    for observation in prior_observations:
+        if observation.get("tool") != "workbook_inspection":
+            continue
+        result = observation.get("result")
+        prior = observation.get("input")
+        if (
+            not isinstance(result, dict)
+            or result.get("schema_version") != INSPECTION_RESULT_SCHEMA
+            or not isinstance(prior, dict)
+        ):
+            continue
+        if (
+            prior.get("sheet") != request.get("sheet")
+            or prior.get("scope_id") != request.get("scope_id")
+        ):
+            raise AuditConversationError(
+                "한 turn의 workbook_inspection은 하나의 exact source sheet에 고정됩니다."
+            )
+        return
+
+
+def _inspection_observation_result(
+    context: AuditConversationRuntime,
+    observation: object,
+    *,
+    expected_result: dict | None,
+) -> tuple[dict, bool]:
+    if (
+        not isinstance(observation, dict)
+        or set(observation) != {"tool", "input", "result"}
+        or observation.get("tool") != "workbook_inspection"
+        or not isinstance(observation.get("input"), dict)
+        or not isinstance(observation.get("result"), dict)
+    ):
+        raise AuditConversationError(
+            "workbook_inspection observation 형식이 유효하지 않습니다."
+        )
+    result = observation["result"]
+    if result.get("schema_version") == INSPECTION_RESULT_SCHEMA:
+        canonical, scope, scope_id = _inspection_binding(
+            context,
+            observation["input"],
+        )
+        try:
+            validated = validate_workbook_inspection_result(
+                result,
+                expected_scope=scope.identity(),
+                expected_scope_id=scope_id,
+            )
+        except WorkbookInspectionError as e:
+            raise AuditConversationError(
+                "workbook_inspection observation 계약이 유효하지 않습니다."
+            ) from e
+        if (
+            validated.get("operation") != canonical["operation"]
+            or validated.get("input") != canonical
+        ):
+            raise AuditConversationError(
+                "workbook_inspection observation binding이 요청과 다릅니다."
+            )
+        complete = True
+    else:
+        error = result.get("error")
+        if (
+            set(result) != {"error"}
+            or not isinstance(error, dict)
+            or set(error) != {"code", "message"}
+            or result != _inspection_error(str(error.get("code")))
+        ):
+            raise AuditConversationError(
+                "workbook_inspection error witness가 유효하지 않습니다."
+            )
+        validated = copy.deepcopy(result)
+        complete = False
+    if expected_result is not None and expected_result != validated:
+        raise AuditConversationError(
+            "workbook_inspection observation이 현재 invocation witness와 다릅니다."
+        )
+    return validated, complete
 
 
 def _planning_record_kind(source_kind: str, item: dict) -> str:
@@ -838,9 +1089,12 @@ def _base_observations_and_supplements(
     used_tools = list(bootstrap_tools)
     successful = 0
     successful_plans = 0
+    successful_inspections = 0
     seen_research_requests: dict[str, int] = {}
     seen_planning_requests: dict[str, int] = {}
+    seen_inspection_requests: dict[str, int] = {}
     available_research: dict[str, dict] = {}
+    available_inspections: dict[str, dict] = {}
     planning_witnesses: list[dict] = []
     for index, observation in enumerate(observations):
         tool = observation.get("tool") if isinstance(observation, dict) else None
@@ -903,6 +1157,54 @@ def _base_observations_and_supplements(
                 "base_prefix": copy.deepcopy(base),
                 "research": copy.deepcopy(available_research),
             })
+        elif tool == "workbook_inspection":
+            if (
+                isinstance(observation.get("result"), dict)
+                and observation["result"].get("schema_version")
+                == INSPECTION_RESULT_SCHEMA
+            ):
+                _assert_inspection_scope_consistent(
+                    observation.get("input"),
+                    observations[:index],
+                )
+                _assert_inspection_ledger_first(
+                    observation.get("input"),
+                    observations[:index],
+                )
+            key = _inspection_request_key(observation.get("input"))
+            occurrence = seen_inspection_requests.get(key, 0)
+            seen_inspection_requests[key] = occurrence + 1
+            expected = None
+            if require_runtime_witness:
+                values = context._inspection_results.get(key, [])
+                if occurrence >= len(values):
+                    raise AuditConversationError(
+                        "workbook_inspection runtime witness가 누락되었습니다."
+                    )
+                expected = values[occurrence]
+            result, complete = _inspection_observation_result(
+                context,
+                observation,
+                expected_result=expected,
+            )
+            if result.get("schema_version") == INSPECTION_RESULT_SCHEMA:
+                successful_inspections += 1
+                try:
+                    current_records = inspection_records(result)
+                except WorkbookInspectionError as e:
+                    raise AuditConversationError(
+                        "workbook_inspection typed ref를 검증할 수 없습니다."
+                    ) from e
+                if set(available_inspections) & set(current_records):
+                    raise AuditConversationError(
+                        "workbook_inspection ref가 observation 사이에서 중복되었습니다."
+                    )
+                available_inspections.update(current_records)
+            if successful_inspections > MAX_INSPECTION_REQUESTS:
+                raise AuditConversationError(
+                    "한 turn에 성공한 workbook_inspection이 상한을 초과했습니다."
+                )
+            research_complete = research_complete and complete
         else:
             base.append(observation)
         if (
@@ -1041,7 +1343,9 @@ def _turn_state(
     if [
         tool
         for tool in replayed_full_tools
-        if tool not in {"standards_research", "procedure_planning"}
+        if tool not in {
+            "standards_research", "procedure_planning", "workbook_inspection",
+        }
     ] != replayed_tools:
         raise AuditConversationError(
             "conversation supplement tool replay 순서가 deterministic witness와 다릅니다."
@@ -1055,6 +1359,8 @@ def _turn_state(
             if item.get("tool") == "standards_research"
             else _planning_request_key(item["input"])
             if item.get("tool") == "procedure_planning"
+            else _inspection_request_key(item["input"])
+            if item.get("tool") == "workbook_inspection"
             else json.dumps(item["input"], ensure_ascii=False, sort_keys=True)
         )
         for item in observations[replay_start:]
@@ -1299,7 +1605,9 @@ def _response_from_ref(
                 )
             )
             supplement_turns = sum(
-                item.get("tool") in {"standards_research", "procedure_planning"}
+                item.get("tool") in {
+                    "standards_research", "procedure_planning", "workbook_inspection",
+                }
                 for item in observations
             )
             if (
@@ -1308,7 +1616,9 @@ def _response_from_ref(
                 or [
                     tool
                     for tool in full_tools
-                    if tool not in {"standards_research", "procedure_planning"}
+                    if tool not in {
+                        "standards_research", "procedure_planning", "workbook_inspection",
+                    }
                 ]
                 != tools_used
             ):
@@ -1396,6 +1706,21 @@ def _response_from_ref(
         raise AuditConversationError(
             "성공한 procedure_planning response summary가 누락되었습니다."
         )
+    inspection_supplement = validated.get("workbook_inspection")
+    if inspection_supplement is not None:
+        if observations is None:
+            raise AuditConversationError(
+                "workbook_inspection response에 observations witness가 없습니다."
+            )
+        try:
+            validate_workbook_inspection_summary(
+                inspection_supplement,
+                observations=observations,
+            )
+        except WorkbookInspectionError as e:
+            raise AuditConversationError(
+                "workbook_inspection response가 typed observation과 다릅니다."
+            ) from e
     return validated
 
 
@@ -2082,6 +2407,54 @@ def _run_planning_request(
             context._child_model_call_count += planning_client.calls
 
 
+def _run_inspection_request(
+    context: AuditConversationRuntime,
+    request: dict,
+    *,
+    prior_observations: list[dict],
+) -> dict:
+    if not context.workbook_inspection_enabled:
+        return _inspection_error("INSPECTION_DISABLED")
+    if context._inspection_request_count >= MAX_INSPECTION_REQUESTS:
+        return _inspection_error("INSPECTION_LIMIT_EXCEEDED")
+    context._inspection_request_count += 1
+    try:
+        _assert_inspection_scope_consistent(request, prior_observations)
+        _assert_inspection_ledger_first(request, prior_observations)
+        canonical, scope, scope_id = _inspection_binding(context, request)
+        _assert_runtime_bundle_current(context)
+        result = run_workbook_inspection(
+            context.package_path,
+            canonical,
+            scope=scope,
+            scope_id=scope_id,
+            source_provider=context.workbook_source_provider,
+        )
+        _assert_runtime_bundle_current(context)
+        return result
+    except WorkbookInspectionError as e:
+        mapped = {
+            "INVALID_INPUT": "INVALID_REQUEST",
+            "INVALID_REQUEST": "INVALID_REQUEST",
+            "LIMIT_EXCEEDED": "INVALID_REQUEST",
+            "SOURCE_UNAVAILABLE": "SOURCE_UNAVAILABLE",
+            "SOURCE_DIGEST_MISMATCH": "SOURCE_UNAVAILABLE",
+            "SOURCE_LIMIT_EXCEEDED": "SOURCE_UNAVAILABLE",
+            "INVALID_SOURCE_BINDING": "SOURCE_UNAVAILABLE",
+            "SOURCE_CONTRACT_MISMATCH": "SOURCE_UNAVAILABLE",
+            "RAW_FORMAT_UNSUPPORTED": "SOURCE_UNAVAILABLE",
+            "PACKAGE_INVALID": "CONTRACT_MISMATCH",
+            "CONTRACT_MISMATCH": "CONTRACT_MISMATCH",
+        }.get(e.code, "UPSTREAM_UNAVAILABLE")
+        return _inspection_error(mapped)
+    except AuditConversationBundleChangedError:
+        raise
+    except AuditConversationError:
+        return _inspection_error("INVALID_REQUEST")
+    except Exception:  # noqa: BLE001 - provider details must remain private
+        return _inspection_error("UPSTREAM_UNAVAILABLE")
+
+
 def _decide(state: AuditConversationState, runtime) -> dict:
     context = _context(runtime)
     agent = context.agent
@@ -2140,6 +2513,8 @@ def _decide(state: AuditConversationState, runtime) -> dict:
             route = "research"
         elif isinstance(request, dict) and request.get("name") == "procedure_planning":
             route = "planning"
+        elif isinstance(request, dict) and request.get("name") == "workbook_inspection":
+            route = "inspection"
         else:
             route = "tool"
     return {
@@ -2155,6 +2530,8 @@ def _after_decide(state: AuditConversationState) -> str:
         return "execute_research"
     if state.get("route") == "planning":
         return "execute_plan"
+    if state.get("route") == "inspection":
+        return "execute_inspection"
     return "execute_tool" if state.get("route") == "tool" else "finalize"
 
 
@@ -2316,6 +2693,59 @@ def _execute_plan(state: AuditConversationState, runtime) -> dict:
     }
 
 
+def _execute_inspection(state: AuditConversationState, runtime) -> dict:
+    context = _context(runtime)
+    turn_state = _turn_state(context, state)
+    decision = _decision(context, state)
+    request = decision.get("tool")
+    if (
+        decision.get("action") != "tool"
+        or not isinstance(request, dict)
+        or request.get("name") != "workbook_inspection"
+    ):
+        raise AuditConversationError(
+            "inspection node에는 workbook_inspection 요청이 필요합니다."
+        )
+    request_key = _inspection_request_key(request)
+    if request_key in turn_state.seen_tool_requests:
+        result = _inspection_error("DUPLICATE_REQUEST")
+    else:
+        turn_state.seen_tool_requests.add(request_key)
+        result = _run_inspection_request(
+            context,
+            request,
+            prior_observations=turn_state.observations,
+        )
+    context._inspection_results.setdefault(request_key, []).append(
+        copy.deepcopy(result)
+    )
+    turn_state.observations.append({
+        "tool": "workbook_inspection",
+        "input": copy.deepcopy(request),
+        "result": copy.deepcopy(result),
+    })
+    turn_state.used_tools.append("workbook_inspection")
+    turn_state.discovery_complete = (
+        turn_state.discovery_complete
+        and result.get("schema_version") == INSPECTION_RESULT_SCHEMA
+    )
+    observations_ref = _write_invocation_payload(
+        context,
+        state,
+        kind="observations",
+        schema=OBSERVATIONS_SCHEMA,
+        value=turn_state.observations,
+    )
+    return {
+        "observations_ref": observations_ref,
+        "decision_ref": None,
+        "observed_ids": _observed_json(turn_state.observed),
+        "used_tools": turn_state.used_tools,
+        "discovery_complete": turn_state.discovery_complete,
+        "status": "deciding",
+    }
+
+
 def _finalize(state: AuditConversationState, runtime) -> dict:
     context = _context(runtime)
     agent = context.agent
@@ -2329,6 +2759,7 @@ def _finalize(state: AuditConversationState, runtime) -> dict:
     final_plan = decision.get("final")
     research_refs: list[str] = []
     plan_refs: list[str] = []
+    inspection_refs: list[str] = []
     if isinstance(final_plan, dict):
         raw_refs = final_plan.get("research_refs", [])
         if not isinstance(raw_refs, list) or any(
@@ -2342,18 +2773,25 @@ def _finalize(state: AuditConversationState, runtime) -> dict:
         ):
             raise AuditConversationError("final plan_refs가 유효하지 않습니다.")
         plan_refs = list(raw_plan_refs)
+        raw_inspection_refs = final_plan.get("inspection_refs", [])
+        if not isinstance(raw_inspection_refs, list) or any(
+            not isinstance(ref, str) for ref in raw_inspection_refs
+        ):
+            raise AuditConversationError("final inspection_refs가 유효하지 않습니다.")
+        inspection_refs = list(raw_inspection_refs)
     base_decision = copy.deepcopy(decision)
     base_final = base_decision.get("final")
     if isinstance(base_final, dict):
         base_final.pop("research_refs", None)
         base_final.pop("plan_refs", None)
+        base_final.pop("inspection_refs", None)
         if (
-            (research_refs or plan_refs)
+            (research_refs or plan_refs or inspection_refs)
             and not base_final.get("selections")
             and base_final.get("abstained") is False
         ):
-            # Research/planning supplements never become committed workpaper evidence.  The inner
-            # evidence answer therefore remains explicitly abstained when they are the only output.
+            # Research/planning/inspection supplements never become committed workpaper evidence.
+            # The inner evidence answer remains explicitly abstained when they are the only output.
             base_final["abstained"] = True
             base_final["abstention_code"] = "insufficient_evidence"
     try:
@@ -2401,6 +2839,34 @@ def _finalize(state: AuditConversationState, runtime) -> dict:
             if supplement is not None:
                 response = copy.deepcopy(response)
                 response["standards_research"] = supplement
+                response = (
+                    _validated_aggregate_response(agent, response)
+                    if isinstance(agent, _AuditAggregateAgentRuntime)
+                    else _validated_response(response)
+                )
+    if response is not None:
+        try:
+            inspection_supplement = inspection_summary(
+                turn_state.observations,
+                selected_refs=inspection_refs,
+            )
+        except WorkbookInspectionError:
+            turn_state.observations.append({
+                "tool": "answer_validation",
+                "result": {
+                    "error": {
+                        "code": "UNGROUNDED_INSPECTION_FINAL",
+                        "message": (
+                            "선택한 inspection ref가 현재 turn의 typed 결과와 다릅니다."
+                        ),
+                    }
+                },
+            })
+            response = None
+        else:
+            if inspection_supplement is not None:
+                response = copy.deepcopy(response)
+                response["workbook_inspection"] = inspection_supplement
                 response = (
                     _validated_aggregate_response(agent, response)
                     if isinstance(agent, _AuditAggregateAgentRuntime)
@@ -2713,6 +3179,10 @@ def build_audit_conversation_graph(checkpointer):
         "execute_plan",
         _checkpoint_safe_node("execute_plan", _execute_plan),
     )
+    builder.add_node(
+        "execute_inspection",
+        _checkpoint_safe_node("execute_inspection", _execute_inspection),
+    )
     builder.add_node("finalize", _checkpoint_safe_node("finalize", _finalize))
     builder.add_node(
         "store_blocked",
@@ -2736,12 +3206,14 @@ def build_audit_conversation_graph(checkpointer):
             "execute_tool": "execute_tool",
             "execute_research": "execute_research",
             "execute_plan": "execute_plan",
+            "execute_inspection": "execute_inspection",
             "finalize": "finalize",
         },
     )
     builder.add_edge("execute_tool", "decide")
     builder.add_edge("execute_research", "decide")
     builder.add_edge("execute_plan", "decide")
+    builder.add_edge("execute_inspection", "decide")
     builder.add_conditional_edges(
         "finalize",
         _after_finalize,
@@ -2963,8 +3435,10 @@ def run_audit_conversation_turn(
     client_factory=None,
     standards_research: bool = False,
     procedure_planning: bool = False,
+    workbook_inspection: bool = False,
     standards_retriever=None,
     standards_retriever_factory=None,
+    workbook_source_provider=None,
     checkpointer=None,
     runtime_root: Path | str | None = None,
     eprint=None,
@@ -2979,6 +3453,8 @@ def run_audit_conversation_turn(
         raise AuditConversationError("standards_research는 boolean이어야 합니다.")
     if not isinstance(procedure_planning, bool):
         raise AuditConversationError("procedure_planning은 boolean이어야 합니다.")
+    if not isinstance(workbook_inspection, bool):
+        raise AuditConversationError("workbook_inspection은 boolean이어야 합니다.")
     try:
         if aggregate_id is not None:
             agent = _prepare_audit_aggregate_agent_runtime(
@@ -3038,8 +3514,10 @@ def run_audit_conversation_turn(
         client_factory=client_factory,
         standards_research_enabled=standards_research,
         procedure_planning_enabled=procedure_planning,
+        workbook_inspection_enabled=workbook_inspection,
         standards_retriever=standards_retriever,
         standards_retriever_factory=standards_retriever_factory,
+        workbook_source_provider=workbook_source_provider,
         eprint=eprint,
     )
     thread_digest = _thread_digest(selected_thread)
@@ -3254,15 +3732,73 @@ def render_audit_conversation_markdown(result: dict) -> str:
                 plan_markdown += f"### {label}\n\n"
                 plan_markdown += "".join(f"- {clean(item)}\n" for item in values)
                 plan_markdown += "\n"
+    inspection = response.get("workbook_inspection")
+    inspection_markdown = ""
+    if isinstance(inspection, dict):
+        inspection_markdown = (
+            "## Workbook 추가 검사 (미검토 계산)\n\n"
+            "> 이 결과는 `computed / unreviewed / not_documented` 상태인 현재 turn의 "
+            "보조 관찰입니다. 조서에 기록된 사실이나 수행된 감사절차가 아닙니다.\n\n"
+        )
+
+        def inspection_text(value: object) -> str:
+            escaped = html.escape(" ".join(str(value or "").split()), quote=False)
+            return re.sub(r"([\\`*\[\]])", r"\\\1", escaped)
+
+        for item in inspection.get("inspections", []):
+            if not isinstance(item, dict):
+                continue
+            request = item.get("input", {})
+            source = item.get("source", {})
+            computed = item.get("result", {})
+            if not isinstance(request, dict) or not isinstance(computed, dict):
+                continue
+            inspection_markdown += (
+                f"### {inspection_text(item.get('operation'))} · "
+                f"{inspection_text(request.get('sheet'))}!"
+                f"{inspection_text(request.get('range'))}\n\n"
+                f"- source: `{inspection_text(source.get('kind') if isinstance(source, dict) else None)}`\n"
+                f"- ref: `{inspection_text(item.get('inspection_ref'))}`\n"
+            )
+            metric_keys = (
+                "range_area", "returned", "total_records", "total_dependencies",
+                "row_count", "data_row_count", "column_count", "total_groups",
+                "total_duplicate_rows", "numeric_count", "total_outliers", "truncated",
+            )
+            metrics = [
+                f"{key}={inspection_text(computed.get(key))}"
+                for key in metric_keys if key in computed
+            ]
+            if metrics:
+                inspection_markdown += "- 결과 요약: " + "; ".join(metrics) + "\n"
+            for key in ("cells", "dependencies", "columns", "groups", "outliers"):
+                values = computed.get(key)
+                if not isinstance(values, list) or not values:
+                    continue
+                inspection_markdown += f"- {key} (최대 10건 표시):\n"
+                for value in values[:10]:
+                    compact = json.dumps(
+                        value,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    inspection_markdown += f"  - {inspection_text(compact)}\n"
+            inspection_markdown += "\n"
     if response.get("schema_version") == "audit_main_agent_response.v1":
         return (
             header
             + research_markdown
             + plan_markdown
+            + inspection_markdown
             + render_audit_aggregate_agent_markdown(response)
         )
-    return header + research_markdown + plan_markdown + render_audit_agent_markdown(
-        _validated_response(response)
+    return (
+        header
+        + research_markdown
+        + plan_markdown
+        + inspection_markdown
+        + render_audit_agent_markdown(_validated_response(response))
     )
 
 

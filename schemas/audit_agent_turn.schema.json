@@ -54,7 +54,7 @@
     },
     "toolRequest": {
       "type": "object",
-      "description": "For standards_research set query, kind=\"audit_standard\" for KSA or kind=\"accounting_standard\" for K-IFRS, item_id=null, and limit=1..5. For procedure_planning set query, kind=null, item_id=null, limit=3..5, and include fact_ids, relation_ids, standard_citation_ids, and research_refs. IDs merely linked inside a brief statement are not observed records: trace or search/get first so each selected fact, relation, and citation appears as its own typed result. Copy refs only from typed observations; do not write proposed procedure prose here.",
+      "description": "For standards_research set query, kind=\"audit_standard\" for KSA or kind=\"accounting_standard\" for K-IFRS, item_id=null, and limit=1..5. For procedure_planning set query, kind=null, item_id=null, limit=3..5, and include fact_ids, relation_ids, standard_citation_ids, and research_refs. For workbook_inspection set query/kind/item_id null, limit=1, and provide one exact sheet/range, operation, and its strict parameters. IDs merely linked inside a brief statement are not observed records: trace or search/get first so each selected fact, relation, and citation appears as its own typed result. Copy refs only from typed observations; do not write proposed procedure prose here.",
       "additionalProperties": false,
       "required": ["name", "query", "kind", "item_id", "limit"],
       "properties": {
@@ -65,7 +65,8 @@
             "assertion_procedures",
             "trace",
             "standards_research",
-            "procedure_planning"
+            "procedure_planning",
+            "workbook_inspection"
           ]
         },
         "query": {
@@ -126,9 +127,38 @@
             "type": "string",
             "pattern": "^research:[0-9a-f]{64}$"
           }
-        }
+        },
+        "operation": {
+          "enum": [
+            "inspect_range", "inspect_formula_dependencies", "profile_table",
+            "find_duplicates", "find_outliers"
+          ]
+        },
+        "sheet": {"type": "string", "minLength": 1, "maxLength": 31},
+        "range": {
+          "type": "string",
+          "pattern": "^[A-Za-z]{1,3}[1-9][0-9]{0,6}(:[A-Za-z]{1,3}[1-9][0-9]{0,6})?$",
+          "maxLength": 25
+        },
+        "parameters": {"$ref": "#/definitions/inspectionParameters"}
       },
       "allOf": [
+        {
+          "if": {
+            "properties": {"name": {"const": "workbook_inspection"}},
+            "required": ["name"]
+          },
+          "then": {
+            "required": ["operation", "sheet", "range", "parameters"],
+            "properties": {
+              "query": {"type": "null"},
+              "kind": {"type": "null"},
+              "item_id": {"type": "null"},
+              "limit": {"const": 1}
+            }
+          }
+        }
+        ,
         {
           "if": {
             "properties": {"name": {"const": "procedure_planning"}},
@@ -145,6 +175,52 @@
               "limit": {"type": "integer", "minimum": 3, "maximum": 5},
               "fact_ids": {"minItems": 1}
             }
+          }
+        }
+      ]
+    },
+    "inspectionParameters": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["source", "limit"],
+          "properties": {
+            "source": {"enum": ["ledger", "raw"]},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["direction", "limit"],
+          "properties": {
+            "direction": {"enum": ["precedents", "dependents", "both"]},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["header"],
+          "properties": {"header": {"type": "boolean"}}
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["header", "columns", "limit"],
+          "properties": {
+            "header": {"type": "boolean"},
+            "columns": {
+              "type": "array", "minItems": 1, "maxItems": 10, "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^[A-Za-z]{1,3}$"}
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["header", "column", "limit"],
+          "properties": {
+            "header": {"type": "boolean"},
+            "column": {"type": "string", "pattern": "^[A-Za-z]{1,3}$"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50}
           }
         }
       ]
@@ -210,6 +286,15 @@
           "items": {
             "type": "string",
             "pattern": "^procedure-plan:[0-9a-f]{64}$"
+          }
+        },
+        "inspection_refs": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^inspection:[0-9a-f]{64}$"
           }
         }
       }

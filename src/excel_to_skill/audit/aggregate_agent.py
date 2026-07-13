@@ -292,6 +292,7 @@ def _provider_turn_schema(
     *,
     include_research: bool = False,
     include_planning: bool = False,
+    include_inspection: bool = False,
 ) -> dict:
     schema = copy.deepcopy(strict_schema)
     schema.pop("allOf", None)
@@ -319,6 +320,33 @@ def _provider_turn_schema(
         schema["definitions"]["finalResponse"]["properties"].pop(
             "plan_refs", None
         )
+    if not include_inspection:
+        tool["properties"]["name"]["enum"] = [
+            value for value in tool["properties"]["name"]["enum"]
+            if value != "workbook_inspection"
+        ]
+        for name in ("operation", "sheet", "range", "parameters"):
+            tool["properties"].pop(name, None)
+        schema["definitions"].pop("inspectionParameters", None)
+        schema["definitions"]["finalResponse"]["properties"].pop(
+            "inspection_refs", None
+        )
+    else:
+        schema["definitions"]["inspectionParameters"] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "source": {"type": ["string", "null"]},
+                "limit": {"type": ["integer", "null"]},
+                "direction": {"type": ["string", "null"]},
+                "header": {"type": ["boolean", "null"]},
+                "columns": {
+                    "type": ["array", "null"],
+                    "items": {"type": "string"},
+                },
+                "column": {"type": ["string", "null"]},
+            },
+        }
     tool["properties"]["item_ref"] = {
         "type": ["string", "null"],
         "pattern": "^(record|source):[0-9a-f]{64}$",
@@ -643,6 +671,10 @@ def _request_audit_aggregate_agent_model_turn(
             isinstance(capabilities, dict)
             and capabilities.get("procedure_planning", {}).get("enabled") is True
         )
+        inspection_enabled = (
+            isinstance(capabilities, dict)
+            and capabilities.get("workbook_inspection", {}).get("enabled") is True
+        )
         return call_json(
             client,
             system=runtime.prompt,
@@ -652,8 +684,9 @@ def _request_audit_aggregate_agent_model_turn(
                     runtime.schema,
                     include_research=research_enabled,
                     include_planning=planning_enabled,
+                    include_inspection=inspection_enabled,
                 )
-                if research_enabled or planning_enabled
+                if research_enabled or planning_enabled or inspection_enabled
                 else runtime.provider_schema
             ),
             validation_schema=runtime.schema,

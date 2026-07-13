@@ -1079,6 +1079,7 @@ def _cmd_audit_chat(
         )
     )
     research_enabled = bool(getattr(args, "standards_research", False))
+    inspection_enabled = bool(getattr(args, "workbook_inspection", False))
     research_top_k = getattr(args, "standards_research_top_k", 5)
     research_definitions = getattr(args, "standards_research_definitions", 1)
     if research_enabled and (
@@ -1170,6 +1171,7 @@ def _cmd_audit_chat(
             standards_research=research_enabled,
             standards_retriever_factory=make_research,
             procedure_planning=planning_enabled,
+            workbook_inspection=inspection_enabled,
             eprint=_eprint,
         )
     except (AuditConversationError, AuditConsumeError, RuntimeError) as e:
@@ -1477,6 +1479,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--procedure-planning",
         action="store_true",
         help="관찰된 위험·주장에 대해 3~5개 미검토 감사 test 후보와 조합안 생성 허용",
+    )
+    ac.add_argument(
+        "--workbook-inspection",
+        action="store_true",
+        help="현재 bundle의 정확한 시트·범위에 대한 turn-scoped 결정론 inspection 허용",
     )
     ac.add_argument(
         "--standards-research-top-k",

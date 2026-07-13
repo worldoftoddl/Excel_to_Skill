@@ -183,6 +183,19 @@ def test_audit_chat_parser_accepts_opt_in_procedure_planning() -> None:
     assert parsed.procedure_planning is True
 
 
+def test_audit_chat_parser_accepts_opt_in_workbook_inspection() -> None:
+    parser = _build_parser()
+    parsed = parser.parse_args([
+        "audit-chat",
+        "/tmp/package",
+        "--question",
+        "이 범위의 중복과 이상치를 확인해줘",
+        "--workbook-inspection",
+    ])
+
+    assert parsed.workbook_inspection is True
+
+
 @pytest.mark.parametrize(
     ("planning_enabled", "expected_max_tokens"),
     [(False, 8192), (True, 16384)],
@@ -320,6 +333,35 @@ def test_audit_chat_cli_forwards_opt_in_procedure_planning(
 
     assert json.loads(capsys.readouterr().out) == {"planning_forwarded": True}
     assert captured["procedure_planning"] is True
+
+
+def test_audit_chat_cli_forwards_opt_in_workbook_inspection(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    pkg, _, _, _ = _write_committed_bundle(tmp_path)
+    captured: dict = {}
+
+    def fake_run(path, **kwargs):
+        captured["path"] = path
+        captured.update(kwargs)
+        return {"inspection_forwarded": True}
+
+    monkeypatch.setattr(
+        "excel_to_skill.audit.conversation.run_audit_conversation_turn",
+        fake_run,
+    )
+    args = _args(pkg, thread="inspection-cli", json_output=True)
+    args.workbook_inspection = True
+
+    assert _cmd_audit_chat(
+        args,
+        client_factory=lambda: StubClient([]),
+    ) == 0
+
+    assert json.loads(capsys.readouterr().out) == {"inspection_forwarded": True}
+    assert captured["workbook_inspection"] is True
 
 
 def test_audit_chat_default_research_factory_is_lazy_and_budgets_definitions(
