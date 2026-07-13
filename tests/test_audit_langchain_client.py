@@ -84,3 +84,41 @@ def test_langchain_client_forces_structured_tool_and_records_usage(monkeypatch) 
     }
     assert client.usage_events[0]["total_tokens"] == 25
     assert "test-only-key" not in repr(client.usage_events)
+
+
+def test_langchain_client_records_provider_usage_before_parse_failure(monkeypatch) -> None:
+    pytest.importorskip("langchain_anthropic")
+    import langchain_anthropic
+
+    class Runnable:
+        def invoke(self, messages):
+            return {
+                "raw": SimpleNamespace(usage_metadata={
+                    "input_tokens": 30,
+                    "output_tokens": 5,
+                    "total_tokens": 35,
+                }),
+                "parsed": None,
+                "parsing_error": ValueError("invalid structured output"),
+            }
+
+    class FakeChatAnthropic:
+        def __init__(self, **kwargs):
+            pass
+
+        def with_structured_output(self, tool, **kwargs):
+            return Runnable()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only-key")
+    monkeypatch.setattr(langchain_anthropic, "ChatAnthropic", FakeChatAnthropic)
+    client = LangChainAnthropicClient(model="stub-model")
+
+    with pytest.raises(LangChainClientError, match="파싱 실패"):
+        client(
+            system="system prompt",
+            user="user payload",
+            schema={"type": "object"},
+        )
+
+    assert len(client.usage_events) == 1
+    assert client.usage_events[0]["total_tokens"] == 35

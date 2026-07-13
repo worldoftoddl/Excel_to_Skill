@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import html
 import json
 import os
 import re
@@ -62,6 +63,15 @@ from .conversation_store import (
 )
 from .llm import AuditLLMError, load_schema
 from .scope import AuditScopeError, resolve_scope
+from .standards_research import (
+    RESEARCH_RESULT_SCHEMA,
+    StandardsResearchError,
+    StandardsResearchRuntime,
+    research_summary,
+    run_standards_research,
+    validate_research_result,
+    validate_research_summary,
+)
 
 
 CONVERSATION_VERSION = "0.1.0"
@@ -78,6 +88,7 @@ RESULT_SCHEMA = "audit_conversation_turn_result.schema.json"
 MAX_HISTORY_TURNS = 100
 MAX_FOCUS_TURNS = 3
 MAX_FOCUS_RECORDS = 40
+MAX_RESEARCH_REQUESTS = 1
 
 _THREAD_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _OBSERVED_KINDS = (
@@ -139,6 +150,18 @@ class ConversationOutput(TypedDict):
 
 
 @dataclass
+class _ResearchModelClient:
+    """Count only child-model calls that actually cross the client boundary."""
+
+    client: object
+    calls: int = 0
+
+    def __call__(self, **kwargs):
+        self.calls += 1
+        return self.client(**kwargs)
+
+
+@dataclass
 class AuditConversationRuntime:
     """Non-checkpointed dependencies and validated package snapshot for one invocation."""
 
@@ -151,9 +174,24 @@ class AuditConversationRuntime:
     aggregate_id: str | None = None
     client: object | None = None
     client_factory: object | None = None
+    standards_research_enabled: bool = False
+    standards_retriever: object | None = None
+    standards_retriever_factory: object | None = None
     eprint: object | None = None
     _resolved_client: object | None = field(default=None, init=False, repr=False)
     _usage_start: int = field(default=0, init=False, repr=False)
+    _research_retrievers: dict[str, object] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _research_results: dict[str, list[dict]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _research_request_count: int = field(default=0, init=False, repr=False)
+    _research_model_call_count: int = field(default=0, init=False, repr=False)
     _node_failure: tuple[str, Exception] | None = field(
         default=None,
         init=False,
@@ -204,6 +242,58 @@ class AuditConversationRuntime:
 
     def record_node_failure(self, node: str, error: Exception) -> None:
         self._node_failure = (node, error)
+
+    def capabilities(self) -> dict:
+        return {
+            "standards_research": {
+                "enabled": self.standards_research_enabled,
+                "max_requests": MAX_RESEARCH_REQUESTS,
+                "max_candidates": 5,
+                "max_selected": 3,
+                "result_status": "ephemeral_unreviewed_turn_scoped",
+            }
+        }
+
+    def research_retriever(self, expected_collection: str):
+        cached = self._research_retrievers.get(expected_collection)
+        if cached is not None:
+            return cached
+        selected = self.standards_retriever
+        if selected is None:
+            if not callable(self.standards_retriever_factory):
+                raise StandardsResearchError(
+                    "UPSTREAM_UNAVAILABLE",
+                    "동적 기준서 조회 retriever가 설정되지 않았습니다."
+                )
+            try:
+                selected = self.standards_retriever_factory(expected_collection)
+            except Exception as e:  # noqa: BLE001 - lazy MCP factory boundary
+                raise StandardsResearchError(
+                    "UPSTREAM_UNAVAILABLE",
+                    "동적 기준서 조회 연결을 준비하지 못했습니다."
+                ) from e
+        if not callable(getattr(selected, "search", None)) or not callable(
+            getattr(selected, "get_verified_paragraph", None)
+        ):
+            raise StandardsResearchError(
+                "CONTRACT_MISMATCH",
+                "동적 기준서 retriever 계약이 유효하지 않습니다."
+            )
+        self._research_retrievers[expected_collection] = selected
+        return selected
+
+    def close_research(self) -> None:
+        closed: set[int] = set()
+        for value in [*self._research_retrievers.values(), self.standards_retriever_factory]:
+            if value is None or id(value) in closed:
+                continue
+            closed.add(id(value))
+            close = getattr(value, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - best-effort external cleanup
+                    pass
 
 
 def _assert_runtime_bundle_current(context: AuditConversationRuntime) -> None:
@@ -387,6 +477,157 @@ def _load_observations(
     return copy.deepcopy(value)
 
 
+def _research_request_key(value: object) -> str:
+    if not isinstance(value, dict):
+        raise AuditConversationError("standards_research input이 유효하지 않습니다.")
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _research_error(code: str) -> dict:
+    allowed = {
+        "RESEARCH_DISABLED",
+        "RESEARCH_LIMIT_EXCEEDED",
+        "INVALID_REQUEST",
+        "CORPUS_DRIFT",
+        "UPSTREAM_UNAVAILABLE",
+        "CONTRACT_MISMATCH",
+        "NO_RESULTS",
+        "LIMIT_EXCEEDED",
+    }
+    selected = code if code in allowed else "UPSTREAM_UNAVAILABLE"
+    return {
+        "error": {
+            "code": selected,
+            "message": "동적 기준서 조회를 완료하지 못했습니다.",
+        }
+    }
+
+
+def _research_observation_result(
+    context: AuditConversationRuntime,
+    observation: object,
+    *,
+    expected_result: dict | None,
+) -> tuple[dict, bool]:
+    if (
+        not isinstance(observation, dict)
+        or set(observation) != {"tool", "input", "result"}
+        or observation.get("tool") != "standards_research"
+        or not isinstance(observation.get("input"), dict)
+        or not isinstance(observation.get("result"), dict)
+    ):
+        raise AuditConversationError(
+            "standards_research observation 형식이 유효하지 않습니다."
+        )
+    result = observation["result"]
+    if result.get("schema_version") == RESEARCH_RESULT_SCHEMA:
+        try:
+            validated = validate_research_result(result)
+        except StandardsResearchError as e:
+            raise AuditConversationError(
+                "standards_research observation 계약이 유효하지 않습니다."
+            ) from e
+        canonical, collection, scope = _research_binding(
+            context,
+            observation["input"],
+        )
+        expected_request = {
+            key: canonical[key]
+            for key in ("domain", "framework", "scope_id", "limit")
+        }
+        if (
+            validated.get("collection") != collection
+            or validated.get("scope") != scope
+            or validated.get("request") != expected_request
+            or any(
+                record.get("collection") != collection
+                or record.get("scope") != scope
+                or record.get("domain") != canonical["domain"]
+                or record.get("framework") != canonical["framework"]
+                for record in validated.get("records", [])
+            )
+        ):
+            raise AuditConversationError(
+                "standards_research observation binding이 committed scope와 다릅니다."
+            )
+        complete = validated["status"] in {"completed", "no_results"}
+    else:
+        error = result.get("error")
+        if (
+            set(result) != {"error"}
+            or not isinstance(error, dict)
+            or set(error) != {"code", "message"}
+            or result != _research_error(str(error.get("code")))
+        ):
+            raise AuditConversationError(
+                "standards_research error witness가 유효하지 않습니다."
+            )
+        validated = copy.deepcopy(result)
+        complete = False
+    if expected_result is not None and expected_result != validated:
+        raise AuditConversationError(
+            "standards_research observation이 현재 invocation witness와 다릅니다."
+        )
+    return validated, complete
+
+
+def _base_observations_and_research(
+    context: AuditConversationRuntime,
+    observations: list[dict],
+    *,
+    require_runtime_witness: bool,
+) -> tuple[list[dict], bool, list[str]]:
+    agent = context.agent
+    if agent is None:
+        raise AuditConversationError("research observation을 검증할 agent가 없습니다.")
+    bootstrap_tools = (
+        ["aggregate_brief"]
+        if isinstance(agent, _AuditAggregateAgentRuntime)
+        else ["brief", "assertion_procedures"]
+    )
+    start = len(bootstrap_tools)
+    base: list[dict] = []
+    research_complete = True
+    used_tools = list(bootstrap_tools)
+    successful = 0
+    seen_requests: dict[str, int] = {}
+    for index, observation in enumerate(observations):
+        tool = observation.get("tool") if isinstance(observation, dict) else None
+        if tool == "standards_research":
+            key = _research_request_key(observation.get("input"))
+            occurrence = seen_requests.get(key, 0)
+            seen_requests[key] = occurrence + 1
+            expected = None
+            if require_runtime_witness:
+                values = context._research_results.get(key, [])
+                if occurrence >= len(values):
+                    raise AuditConversationError(
+                        "standards_research runtime witness가 누락되었습니다."
+                    )
+                expected = values[occurrence]
+            result, complete = _research_observation_result(
+                context,
+                observation,
+                expected_result=expected,
+            )
+            if result.get("schema_version") == RESEARCH_RESULT_SCHEMA:
+                successful += 1
+            if successful > MAX_RESEARCH_REQUESTS:
+                raise AuditConversationError(
+                    "한 turn에 성공한 standards_research가 상한을 초과했습니다."
+                )
+            research_complete = research_complete and complete
+        else:
+            base.append(observation)
+        if (
+            index >= start
+            and isinstance(tool, str)
+            and tool not in {"conversation_focus", "answer_validation", "agent_protocol"}
+        ):
+            used_tools.append(tool)
+    return base, research_complete, used_tools
+
+
 def _turn_state(
     context: AuditConversationRuntime,
     state: AuditConversationState,
@@ -397,6 +638,15 @@ def _turn_state(
     observations = _load_observations(context, state)
     try:
         expected_focus, _ = _focus_observation(context, state.get("history_ref"))
+        (
+            base_observations,
+            research_complete,
+            replayed_full_tools,
+        ) = _base_observations_and_research(
+            context,
+            observations,
+            require_runtime_witness=True,
+        )
         if isinstance(agent, _AuditAggregateAgentRuntime):
             (
                 replayed_discovery,
@@ -405,7 +655,7 @@ def _turn_state(
                 _,
             ) = _aggregate_observation_witness(
                 agent,
-                observations,
+                base_observations,
                 expected_limit=agent.limit,
                 expected_focus=expected_focus,
             )
@@ -416,16 +666,28 @@ def _turn_state(
                 replayed_tools,
             ) = _audit_agent_observation_witness(
                 agent,
-                observations,
+                base_observations,
                 expected_focus=expected_focus,
             )
     except (AuditAgentError, AuditAggregateAgentError) as e:
         raise AuditConversationError(
             "conversation observations deterministic replay가 실패했습니다."
         ) from e
+    if [
+        tool for tool in replayed_full_tools if tool != "standards_research"
+    ] != replayed_tools:
+        raise AuditConversationError(
+            "conversation research tool replay 순서가 deterministic witness와 다릅니다."
+        )
+    replayed_tools = replayed_full_tools
+    replayed_discovery = replayed_discovery and research_complete
     replay_start = 1 if isinstance(agent, _AuditAggregateAgentRuntime) else 2
     seen_requests = {
-        json.dumps(item["input"], ensure_ascii=False, sort_keys=True)
+        (
+            _research_request_key(item["input"])
+            if item.get("tool") == "standards_research"
+            else json.dumps(item["input"], ensure_ascii=False, sort_keys=True)
+        )
         for item in observations[replay_start:]
         if isinstance(item.get("input"), dict)
         and item.get("tool") != "conversation_focus"
@@ -629,32 +891,58 @@ def _response_from_ref(
     response = payload.get("value")
     if not isinstance(response, dict):
         raise AuditConversationError("conversation response 본문이 유효하지 않습니다.")
+    observations: list[dict] | None = None
+    if isinstance(observations_ref, dict):
+        loaded_observations = _invocation_payload(
+            context,
+            {"invocation_id": invocation_id},
+            observations_ref,
+            kind="observations",
+            schema=OBSERVATIONS_SCHEMA,
+        )
+        if not isinstance(loaded_observations, list) or any(
+            not isinstance(item, dict) for item in loaded_observations
+        ):
+            raise AuditConversationError(
+                "conversation response observations witness가 유효하지 않습니다."
+            )
+        observations = loaded_observations
     if isinstance(context.agent, _AuditAggregateAgentRuntime):
         try:
             execution = _execution_witness(expected_execution)
-            observations = _invocation_payload(
-                context,
-                {"invocation_id": invocation_id},
-                observations_ref,
-                kind="observations",
-                schema=OBSERVATIONS_SCHEMA,
+            if observations is None:
+                raise AuditAggregateAgentError(
+                    "aggregate observations witness가 없습니다."
+                )
+            base_observations, research_complete, full_tools = (
+                _base_observations_and_research(
+                    context,
+                    observations,
+                    require_runtime_witness=False,
+                )
             )
             discovery_complete, observed, tools_used, turns = (
                 _aggregate_observation_witness(
                     context.agent,
-                    observations,
+                    base_observations,
                     expected_limit=execution["limit"],
                     expected_focus=expected_focus,
                 )
             )
+            research_turns = sum(
+                item.get("tool") == "standards_research" for item in observations
+            )
             if (
-                execution["turns"] != turns
-                or execution["tools_used"] != tools_used
+                execution["turns"] != turns + research_turns
+                or execution["tools_used"] != full_tools
+                or [tool for tool in full_tools if tool != "standards_research"]
+                != tools_used
             ):
                 raise AuditAggregateAgentError(
                     "aggregate observations replay가 turn execution witness와 다릅니다."
                 )
-            return _validated_aggregate_response(
+            discovery_complete = discovery_complete and research_complete
+            validated = _validated_aggregate_response(
                 context.agent,
                 response,
                 expected_discovery_complete=discovery_complete,
@@ -665,7 +953,31 @@ def _response_from_ref(
             raise AuditConversationError(
                 f"aggregate conversation response 검증 실패: {e}"
             ) from e
-    return _validated_response(response)
+    else:
+        validated = _validated_response(response)
+    successful_research = bool(observations) and any(
+        item.get("tool") == "standards_research"
+        and isinstance(item.get("result"), dict)
+        and item["result"].get("schema_version") == RESEARCH_RESULT_SCHEMA
+        for item in observations
+    )
+    summary = validated.get("standards_research")
+    if summary is not None:
+        if observations is None:
+            raise AuditConversationError(
+                "standards_research response에 observations witness가 없습니다."
+            )
+        try:
+            validate_research_summary(summary, observations=observations)
+        except StandardsResearchError as e:
+            raise AuditConversationError(
+                "standards_research response가 typed observation과 다릅니다."
+            ) from e
+    elif successful_research:
+        raise AuditConversationError(
+            "성공한 standards_research response summary가 누락되었습니다."
+        )
+    return validated
 
 
 def _aggregate_focus_projection(
@@ -944,6 +1256,118 @@ def _bootstrap(state: AuditConversationState, runtime) -> dict:
     }
 
 
+def _research_binding(
+    context: AuditConversationRuntime,
+    request: dict,
+) -> tuple[dict, str, dict]:
+    agent = context.agent
+    if agent is None:
+        raise AuditConversationError("차단된 conversation은 standards research를 사용할 수 없습니다.")
+    query = request.get("query")
+    kind = request.get("kind")
+    limit = request.get("limit")
+    if not isinstance(query, str) or not query.strip() or len(query) > 500:
+        raise AuditConversationError("standards_research query는 1~500자여야 합니다.")
+    domain_framework = {
+        "audit_standard": ("audit", "KSA"),
+        "accounting_standard": ("accounting", "K-IFRS"),
+    }.get(kind)
+    if domain_framework is None:
+        raise AuditConversationError("standards_research kind가 유효하지 않습니다.")
+    if (
+        not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 1 <= limit <= 5
+    ):
+        raise AuditConversationError("standards_research limit은 1~5여야 합니다.")
+    domain, framework = domain_framework
+    if isinstance(agent, _AuditAggregateAgentRuntime):
+        if request.get("item_ref") is not None:
+            raise AuditConversationError("standards_research에는 item_ref를 사용할 수 없습니다.")
+        scope_id = request.get("scope_id")
+        exposed_scope_ids = {
+            account.get("scope", {}).get("id")
+            for account in agent.bootstrap.get("accounts", [])
+            if isinstance(account, dict)
+        }
+        snapshot = agent.sources.get(scope_id) if isinstance(scope_id, str) else None
+        if snapshot is None or scope_id not in exposed_scope_ids:
+            raise AuditConversationError(
+                "standards_research scope_id는 aggregate bootstrap의 정확한 source여야 합니다."
+            )
+        retriever = snapshot.standards.get("retriever")
+        expected_collection = (
+            retriever.get("corpus_version") if isinstance(retriever, dict) else None
+        )
+        scope = snapshot.scope.identity()
+    else:
+        if request.get("item_id") is not None:
+            raise AuditConversationError("standards_research에는 item_id를 사용할 수 없습니다.")
+        scope_id = None
+        expected_collection = agent.bundle.get("standards_corpus_version")
+        scope = agent.scope.identity()
+    if not isinstance(expected_collection, str) or not expected_collection:
+        raise AuditConversationError(
+            "committed standards collection을 research에 고정할 수 없습니다."
+        )
+    canonical = {
+        "query": " ".join(query.split()),
+        "domain": domain,
+        "framework": framework,
+        "scope_id": scope_id,
+        "limit": limit,
+    }
+    return canonical, expected_collection, scope
+
+
+def _run_research_request(
+    context: AuditConversationRuntime,
+    request: dict,
+    *,
+    invocation_id: str,
+) -> dict:
+    if not context.standards_research_enabled:
+        return _research_error("RESEARCH_DISABLED")
+    if context._research_request_count >= MAX_RESEARCH_REQUESTS:
+        return _research_error("RESEARCH_LIMIT_EXCEEDED")
+    context._research_request_count += 1
+    research_client: _ResearchModelClient | None = None
+    try:
+        canonical, collection, scope = _research_binding(context, request)
+        retriever = context.research_retriever(collection)
+        bundle_sha256 = hashlib.sha256(
+            json.dumps(
+                context.bundle,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        research_client = _ResearchModelClient(context.model_client())
+        return run_standards_research(
+            canonical,
+            runtime=StandardsResearchRuntime(
+                retriever=retriever,
+                client=research_client,
+                model=context.agent.model,
+                expected_collection=collection,
+                invocation_id=invocation_id,
+                bundle_sha256=bundle_sha256,
+                scope=scope,
+                eprint=context.eprint,
+            ),
+        )
+    except StandardsResearchError as e:
+        return _research_error(e.code)
+    except AuditConversationError:
+        return _research_error("INVALID_REQUEST")
+    except Exception:  # noqa: BLE001 - no provider detail may reach model/checkpoint
+        return _research_error("UPSTREAM_UNAVAILABLE")
+    finally:
+        if research_client is not None:
+            context._research_model_call_count += research_client.calls
+
+
 def _decide(state: AuditConversationState, runtime) -> dict:
     context = _context(runtime)
     agent = context.agent
@@ -952,9 +1376,10 @@ def _decide(state: AuditConversationState, runtime) -> dict:
     step = state.get("step")
     if not isinstance(step, int) or step < 0:
         raise AuditConversationError("checkpoint step이 유효하지 않습니다.")
-    if step >= agent.max_steps:
+    if step + context._research_model_call_count >= agent.max_steps:
         raise AuditConversationError(
-            f"{agent.max_steps}회 안에 근거가 검증된 최종 답변을 만들지 못했습니다."
+            f"{agent.max_steps}회 안에 근거가 검증된 최종 답변을 만들지 못했습니다. "
+            "이 상한에는 child research 모델 호출도 포함됩니다."
         )
     turn_state = _turn_state(context, state)
     try:
@@ -964,6 +1389,7 @@ def _decide(state: AuditConversationState, runtime) -> dict:
                 turn_state,
                 client=context.model_client(),
                 step=step + 1,
+                capabilities=context.capabilities(),
                 eprint=context.eprint,
             )
         else:
@@ -972,6 +1398,7 @@ def _decide(state: AuditConversationState, runtime) -> dict:
                 turn_state,
                 client=context.model_client(),
                 step=step + 1,
+                capabilities=context.capabilities(),
                 eprint=context.eprint,
             )
     except (AuditAgentError, AuditAggregateAgentError) as e:
@@ -990,15 +1417,26 @@ def _decide(state: AuditConversationState, runtime) -> dict:
         schema=DECISION_SCHEMA,
         value=decision,
     )
+    route = "finalize"
+    if decision.get("action") == "tool":
+        request = decision.get("tool")
+        route = (
+            "research"
+            if isinstance(request, dict)
+            and request.get("name") == "standards_research"
+            else "tool"
+        )
     return {
         "decision_ref": decision_ref,
         "step": step + 1,
-        "route": "tool" if decision.get("action") == "tool" else "finalize",
+        "route": route,
         "status": "executing",
     }
 
 
 def _after_decide(state: AuditConversationState) -> str:
+    if state.get("route") == "research":
+        return "execute_research"
     return "execute_tool" if state.get("route") == "tool" else "finalize"
 
 
@@ -1050,6 +1488,63 @@ def _execute_tool(state: AuditConversationState, runtime) -> dict:
     }
 
 
+def _execute_research(state: AuditConversationState, runtime) -> dict:
+    context = _context(runtime)
+    if context.agent is None:
+        raise AuditConversationError("research node에 agent runtime이 없습니다.")
+    turn_state = _turn_state(context, state)
+    decision = _decision(context, state)
+    request = decision.get("tool")
+    if (
+        decision.get("action") != "tool"
+        or not isinstance(request, dict)
+        or request.get("name") != "standards_research"
+        or decision.get("final") is not None
+    ):
+        raise AuditConversationError(
+            "research node decision 계약이 유효하지 않습니다."
+        )
+    request_key = _research_request_key(request)
+    invocation_id = state.get("invocation_id")
+    if not isinstance(invocation_id, str) or not invocation_id:
+        raise AuditConversationError("research invocation_id가 유효하지 않습니다.")
+    if request_key in turn_state.seen_tool_requests:
+        result = _research_error("RESEARCH_LIMIT_EXCEEDED")
+    else:
+        turn_state.seen_tool_requests.add(request_key)
+        result = _run_research_request(
+            context,
+            request,
+            invocation_id=invocation_id,
+        )
+    context._research_results.setdefault(request_key, []).append(copy.deepcopy(result))
+    turn_state.observations.append({
+        "tool": "standards_research",
+        "input": copy.deepcopy(request),
+        "result": copy.deepcopy(result),
+    })
+    turn_state.used_tools.append("standards_research")
+    turn_state.discovery_complete = (
+        turn_state.discovery_complete
+        and result.get("schema_version") == RESEARCH_RESULT_SCHEMA
+    )
+    observations_ref = _write_invocation_payload(
+        context,
+        state,
+        kind="observations",
+        schema=OBSERVATIONS_SCHEMA,
+        value=turn_state.observations,
+    )
+    return {
+        "observations_ref": observations_ref,
+        "decision_ref": None,
+        "observed_ids": _observed_json(turn_state.observed),
+        "used_tools": turn_state.used_tools,
+        "discovery_complete": turn_state.discovery_complete,
+        "status": "deciding",
+    }
+
+
 def _finalize(state: AuditConversationState, runtime) -> dict:
     context = _context(runtime)
     agent = context.agent
@@ -1059,19 +1554,42 @@ def _finalize(state: AuditConversationState, runtime) -> dict:
     step = state.get("step")
     if not isinstance(step, int) or step < 1:
         raise AuditConversationError("finalize step이 유효하지 않습니다.")
+    decision = _decision(context, state)
+    final_plan = decision.get("final")
+    research_refs: list[str] = []
+    if isinstance(final_plan, dict):
+        raw_refs = final_plan.get("research_refs", [])
+        if not isinstance(raw_refs, list) or any(
+            not isinstance(ref, str) for ref in raw_refs
+        ):
+            raise AuditConversationError("final research_refs가 유효하지 않습니다.")
+        research_refs = list(raw_refs)
+    base_decision = copy.deepcopy(decision)
+    base_final = base_decision.get("final")
+    if isinstance(base_final, dict):
+        base_final.pop("research_refs", None)
+        if (
+            research_refs
+            and not base_final.get("selections")
+            and base_final.get("abstained") is False
+        ):
+            # Ephemeral research supplements the turn but is never promoted into the committed
+            # workpaper answer.  The inner audit response therefore remains explicitly abstained.
+            base_final["abstained"] = True
+            base_final["abstention_code"] = "insufficient_evidence"
     try:
         if isinstance(agent, _AuditAggregateAgentRuntime):
             response = _finalize_audit_aggregate_agent_turn(
                 agent,
                 turn_state,
-                _decision(context, state),
+                base_decision,
                 step=step,
             )
         else:
             response = _finalize_audit_agent_turn(
                 agent,
                 turn_state,
-                _decision(context, state),
+                base_decision,
                 step=step,
             )
     except (AuditAgentError, AuditAggregateAgentError) as e:
@@ -1083,6 +1601,32 @@ def _finalize(state: AuditConversationState, runtime) -> dict:
                 "audit-chat 실행 중 committed audit bundle이 변경되었습니다."
             ) from e
         raise AuditConversationError("audit-chat 최종 근거 검증에 실패했습니다.") from e
+    if response is not None:
+        try:
+            supplement = research_summary(
+                turn_state.observations,
+                selected_refs=research_refs,
+            )
+        except StandardsResearchError:
+            turn_state.observations.append({
+                "tool": "answer_validation",
+                "result": {
+                    "error": {
+                        "code": "UNGROUNDED_RESEARCH_FINAL",
+                        "message": "선택한 동적 기준서 ref가 현재 turn의 typed 결과와 다릅니다.",
+                    }
+                },
+            })
+            response = None
+        else:
+            if supplement is not None:
+                response = copy.deepcopy(response)
+                response["standards_research"] = supplement
+                response = (
+                    _validated_aggregate_response(agent, response)
+                    if isinstance(agent, _AuditAggregateAgentRuntime)
+                    else _validated_response(response)
+                )
     observations_ref = _write_invocation_payload(
         context,
         state,
@@ -1343,6 +1887,10 @@ def build_audit_conversation_graph(checkpointer):
         "execute_tool",
         _checkpoint_safe_node("execute_tool", _execute_tool),
     )
+    builder.add_node(
+        "execute_research",
+        _checkpoint_safe_node("execute_research", _execute_research),
+    )
     builder.add_node("finalize", _checkpoint_safe_node("finalize", _finalize))
     builder.add_node(
         "store_blocked",
@@ -1362,9 +1910,14 @@ def build_audit_conversation_graph(checkpointer):
     builder.add_conditional_edges(
         "decide",
         _after_decide,
-        {"execute_tool": "execute_tool", "finalize": "finalize"},
+        {
+            "execute_tool": "execute_tool",
+            "execute_research": "execute_research",
+            "finalize": "finalize",
+        },
     )
     builder.add_edge("execute_tool", "decide")
+    builder.add_edge("execute_research", "decide")
     builder.add_conditional_edges(
         "finalize",
         _after_finalize,
@@ -1584,6 +2137,9 @@ def run_audit_conversation_turn(
     max_steps: int = 6,
     client=None,
     client_factory=None,
+    standards_research: bool = False,
+    standards_retriever=None,
+    standards_retriever_factory=None,
     checkpointer=None,
     runtime_root: Path | str | None = None,
     eprint=None,
@@ -1594,6 +2150,8 @@ def run_audit_conversation_turn(
         raise AuditConversationError("audit-chat question이 비어 있습니다.")
     if sheet is not None and aggregate_id is not None:
         raise AuditConversationError("sheet와 aggregate_id는 함께 사용할 수 없습니다.")
+    if not isinstance(standards_research, bool):
+        raise AuditConversationError("standards_research는 boolean이어야 합니다.")
     try:
         if aggregate_id is not None:
             agent = _prepare_audit_aggregate_agent_runtime(
@@ -1651,31 +2209,37 @@ def run_audit_conversation_turn(
         aggregate_id=aggregate_id,
         client=client,
         client_factory=client_factory,
+        standards_research_enabled=standards_research,
+        standards_retriever=standards_retriever,
+        standards_retriever_factory=standards_retriever_factory,
         eprint=eprint,
     )
     thread_digest = _thread_digest(selected_thread)
-    with cache.package_lock(store.root / "threads" / thread_digest):
-        if checkpointer is not None:
-            graph_result = _invoke_graph(
-                checkpointer=checkpointer,
-                context=context,
-                question_ref=question_ref,
-                invocation_id=invocation_id,
-            )
-        else:
-            with _sqlite_saver(store.root) as saver:
+    try:
+        with cache.package_lock(store.root / "threads" / thread_digest):
+            if checkpointer is not None:
                 graph_result = _invoke_graph(
-                    checkpointer=saver,
+                    checkpointer=checkpointer,
                     context=context,
                     question_ref=question_ref,
                     invocation_id=invocation_id,
                 )
-        return _turn_result(
-            context,
-            graph_result,
-            invocation_id=invocation_id,
-            question_ref=question_ref,
-        )
+            else:
+                with _sqlite_saver(store.root) as saver:
+                    graph_result = _invoke_graph(
+                        checkpointer=saver,
+                        context=context,
+                        question_ref=question_ref,
+                        invocation_id=invocation_id,
+                    )
+            return _turn_result(
+                context,
+                graph_result,
+                invocation_id=invocation_id,
+                question_ref=question_ref,
+            )
+    finally:
+        context.close_research()
 
 
 def render_audit_conversation_markdown(result: dict) -> str:
@@ -1692,9 +2256,36 @@ def render_audit_conversation_markdown(result: dict) -> str:
         f"> LLM 요청 {usage.get('request_count', 0)}회 · "
         f"input {usage.get('input_tokens', 0)} / output {usage.get('output_tokens', 0)} tokens\n\n"
     )
+    research = response.get("standards_research")
+    research_markdown = ""
+    if isinstance(research, dict):
+        citations = research.get("citations", [])
+        research_markdown = (
+            "## 동적 기준서 조사 (미검토)\n\n"
+            "> 이 내용은 현재 turn에만 유효한 ephemeral 보조 근거이며 prepared bundle의 "
+            "일부가 아닙니다. 시행일 적합성도 검증되지 않았습니다.\n\n"
+        )
+        if citations:
+            for citation in citations:
+                if not isinstance(citation, dict):
+                    continue
+                title = html.escape(str(citation.get("standard_title", "기준서")))
+                cid = html.escape(str(citation.get("cid", "")))
+                collection = html.escape(str(citation.get("collection", "")))
+                text = html.escape(str(citation.get("text", "")), quote=False)
+                text = re.sub(r"([\\`*\[\]])", r"\\\1", " ".join(text.split()))
+                research_markdown += (
+                    f"- **{title}** · `{cid}` · collection `{collection}`\n"
+                    f"  - {text}\n"
+                )
+            research_markdown += "\n"
+        else:
+            research_markdown += "관련성이 충분한 검증 문단을 선택하지 못했습니다.\n\n"
     if response.get("schema_version") == "audit_main_agent_response.v1":
-        return header + render_audit_aggregate_agent_markdown(response)
-    return header + render_audit_agent_markdown(_validated_response(response))
+        return header + research_markdown + render_audit_aggregate_agent_markdown(response)
+    return header + research_markdown + render_audit_agent_markdown(
+        _validated_response(response)
+    )
 
 
 __all__ = [

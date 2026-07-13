@@ -121,12 +121,27 @@ class _AuditAgentTurnState:
     seen_tool_requests: set[str]
 
 
-def _provider_turn_schema(strict_schema: dict) -> dict:
+def _provider_turn_schema(
+    strict_schema: dict,
+    *,
+    include_research: bool = False,
+) -> dict:
     """Flatten nullable unions for Anthropic while retaining strict local validation."""
     schema = copy.deepcopy(strict_schema)
     schema.pop("allOf", None)
     definitions = schema["definitions"]
     identifier = definitions["identifier"]
+    if not include_research:
+        tool = definitions["toolRequest"]
+        tool["properties"]["name"]["enum"] = [
+            value for value in tool["properties"]["name"]["enum"]
+            if value != "standards_research"
+        ]
+        tool["properties"]["kind"]["enum"] = [
+            value for value in tool["properties"]["kind"]["enum"]
+            if value not in {"audit_standard", "accounting_standard"}
+        ]
+        definitions["finalResponse"]["properties"].pop("research_refs", None)
     definitions["toolRequest"]["properties"]["item_id"] = {
         "type": ["string", "null"],
         "pattern": identifier["pattern"],
@@ -1289,6 +1304,7 @@ def _request_audit_agent_model_turn(
     *,
     client,
     step: int,
+    capabilities: dict | None = None,
     eprint=None,
 ) -> dict:
     """Request and locally validate one provider action."""
@@ -1306,6 +1322,8 @@ def _request_audit_agent_model_turn(
         "remaining_turns": runtime.max_steps - step,
         "observations": state.observations,
     }
+    if capabilities is not None:
+        payload["capabilities"] = copy.deepcopy(capabilities)
     if runtime.analysis_scope is not None:
         payload["analysis_scope"] = runtime.analysis_scope
     try:
@@ -1313,7 +1331,12 @@ def _request_audit_agent_model_turn(
             client,
             system=runtime.prompt,
             user=_serialize_model_payload(payload),
-            schema=runtime.provider_schema,
+            schema=(
+                _provider_turn_schema(runtime.schema, include_research=True)
+                if isinstance(capabilities, dict)
+                and capabilities.get("standards_research", {}).get("enabled") is True
+                else runtime.provider_schema
+            ),
             validation_schema=runtime.schema,
             label="audit briefing agent",
             retries=0,

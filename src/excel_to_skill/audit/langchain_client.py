@@ -133,6 +133,13 @@ class LangChainAnthropicClient:
             raise LangChainClientError(f"LangChain Anthropic 호출 실패: {e}") from e
         if not isinstance(result, dict):
             raise LangChainClientError("LangChain structured output 결과가 객체가 아닙니다.")
+        raw = result.get("raw")
+        usage = getattr(raw, "usage_metadata", None)
+        self._usage_events.append(_usage_event(
+            usage,
+            event_id=f"request:{len(self._usage_events) + 1}",
+            model=self.model,
+        ))
         parsing_error = result.get("parsing_error")
         parsed = result.get("parsed")
         if parsing_error is not None:
@@ -141,13 +148,6 @@ class LangChainAnthropicClient:
             )
         if not isinstance(parsed, dict):
             raise LangChainClientError("LangChain structured output parsed 결과가 객체가 아닙니다.")
-        raw = result.get("raw")
-        usage = getattr(raw, "usage_metadata", None)
-        self._usage_events.append(_usage_event(
-            usage,
-            event_id=f"request:{len(self._usage_events) + 1}",
-            model=self.model,
-        ))
         return parsed
 
 

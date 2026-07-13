@@ -287,10 +287,26 @@ def _source_record_registry(
     return records, lookup, known
 
 
-def _provider_turn_schema(strict_schema: dict) -> dict:
+def _provider_turn_schema(
+    strict_schema: dict,
+    *,
+    include_research: bool = False,
+) -> dict:
     schema = copy.deepcopy(strict_schema)
     schema.pop("allOf", None)
     tool = schema["definitions"]["toolRequest"]
+    if not include_research:
+        tool["properties"]["name"]["enum"] = [
+            value for value in tool["properties"]["name"]["enum"]
+            if value != "standards_research"
+        ]
+        tool["properties"]["kind"]["enum"] = [
+            value for value in tool["properties"]["kind"]["enum"]
+            if value not in {"audit_standard", "accounting_standard"}
+        ]
+        schema["definitions"]["finalResponse"]["properties"].pop(
+            "research_refs", None
+        )
     tool["properties"]["item_ref"] = {
         "type": ["string", "null"],
         "pattern": "^(record|source):[0-9a-f]{64}$",
@@ -583,6 +599,7 @@ def _request_audit_aggregate_agent_model_turn(
     *,
     client,
     step: int,
+    capabilities: dict | None = None,
     eprint=None,
 ) -> dict:
     payload = {
@@ -597,12 +614,19 @@ def _request_audit_aggregate_agent_model_turn(
         "remaining_turns": runtime.max_steps - step,
         "observations": state.observations,
     }
+    if capabilities is not None:
+        payload["capabilities"] = copy.deepcopy(capabilities)
     try:
         return call_json(
             client,
             system=runtime.prompt,
             user=_serialize_payload(payload),
-            schema=runtime.provider_schema,
+            schema=(
+                _provider_turn_schema(runtime.schema, include_research=True)
+                if isinstance(capabilities, dict)
+                and capabilities.get("standards_research", {}).get("enabled") is True
+                else runtime.provider_schema
+            ),
             validation_schema=runtime.schema,
             label="audit aggregate main agent",
             retries=0,

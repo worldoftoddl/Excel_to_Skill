@@ -642,6 +642,22 @@ class AuditpaperStandardsRetriever:
         self._write_persistent_paragraph(collection, cid, target)
         return dict(target)
 
+    def get_verified_paragraph(self, cid: str) -> dict:
+        """Return one exact, collection-pinned paragraph for dynamic research.
+
+        The same strict ``standards_get_paragraph(context=0)`` contract and content-addressed
+        collection+CID cache used by ``search`` applies here.  Exposing this small public boundary
+        lets application code resolve a child model's opaque candidate selection without trusting
+        any paragraph text authored or copied by that model.
+        """
+        if not isinstance(cid, str) or _CID_RE.fullmatch(cid) is None:
+            raise StandardsRetrievalFatalError(
+                f"auditpaper CID 형식 불일치: {cid!r}"
+            )
+        if self._collection is None:
+            self.discover_collection()
+        return self._get_verified_paragraph(cid)
+
     def _paragraph_cache_path(self, collection: str, cid: str) -> Path | None:
         if self._paragraph_cache_dir is None:
             return None

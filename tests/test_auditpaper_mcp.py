@@ -196,6 +196,24 @@ def test_adapter_discovers_collection_maps_filters_and_verifies_every_cid() -> N
     ]
 
 
+def test_public_selected_cid_verification_uses_exact_context_zero_and_cache() -> None:
+    caller = _success_caller()
+    retriever = AuditpaperStandardsRetriever(
+        caller,
+        policy=RetrievalPolicy(upstream_retries=0),
+        expected_collection=COLLECTION,
+    )
+
+    first = retriever.get_verified_paragraph("KSA::315::12")
+    second = retriever.get_verified_paragraph("KSA::315::12")
+
+    assert first == second
+    assert first["cid"] == "KSA::315::12"
+    assert [
+        args for name, args in caller.calls if name == "standards_get_paragraph"
+    ] == [{"cid": "KSA::315::12", "context": 0}]
+
+
 def test_definition_excerpt_is_replaced_with_verified_full_paragraph() -> None:
     caller = _success_caller()
     search = caller.responses["standards_search"]

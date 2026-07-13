@@ -1049,7 +1049,12 @@ def _cmd_audit_agent(args: argparse.Namespace, *, client_factory=None) -> int:
     return 0
 
 
-def _cmd_audit_chat(args: argparse.Namespace, *, client_factory=None) -> int:
+def _cmd_audit_chat(
+    args: argparse.Namespace,
+    *,
+    client_factory=None,
+    standards_retriever_factory=None,
+) -> int:
     """Run or resume a compiled, persistent audit-workpaper conversation."""
     from .annotator import DEFAULT_MODEL
     from .audit.consume import AuditConsumeError
@@ -1072,6 +1077,80 @@ def _cmd_audit_chat(args: argparse.Namespace, *, client_factory=None) -> int:
             purpose="audit-chat",
         )
     )
+    research_enabled = bool(getattr(args, "standards_research", False))
+    research_top_k = getattr(args, "standards_research_top_k", 5)
+    research_definitions = getattr(args, "standards_research_definitions", 1)
+    if research_enabled and (
+        isinstance(research_top_k, bool)
+        or not isinstance(research_top_k, int)
+        or not 1 <= research_top_k <= 5
+        or isinstance(research_definitions, bool)
+        or not isinstance(research_definitions, int)
+        or not 0 <= research_definitions <= 2
+    ):
+        _eprint(
+            "[audit-chat 실패] standards research 후보는 1~5, 정의는 0~2여야 합니다."
+        )
+        return 1
+    make_research = standards_retriever_factory
+    if research_enabled and make_research is None:
+        from .audit.auditpaper_mcp import (
+            AuditpaperStandardsRetriever,
+            FastMCPHTTPCaller,
+            RetrievalPolicy,
+            load_mcp_connection,
+        )
+
+        config_path = getattr(args, "mcp_config", None)
+        mcp_url = getattr(args, "mcp_url", None)
+        if (
+            config_path is None
+            and mcp_url is None
+            and not os.environ.get("AUDITPAPER_MCP_URL")
+            and Path(".mcp.json").is_file()
+        ):
+            config_path = ".mcp.json"
+
+        class _LazyResearchRetrieverFactory:
+            def __init__(self) -> None:
+                self.caller = None
+
+            def __call__(self, expected_collection: str):
+                if self.caller is None:
+                    connection = load_mcp_connection(
+                        config_path=config_path,
+                        server_name=getattr(
+                            args, "mcp_server", "auditpaper-standards"
+                        ),
+                        url=mcp_url,
+                        token_env=getattr(args, "mcp_token_env", "MCP_AUTH_TOKEN"),
+                    )
+                    self.caller = FastMCPHTTPCaller(
+                        connection,
+                        init_timeout=getattr(args, "mcp_init_timeout", 90.0),
+                        call_timeout=getattr(args, "mcp_call_timeout", 90.0),
+                    )
+                return AuditpaperStandardsRetriever(
+                    self.caller,
+                    policy=RetrievalPolicy(
+                        top_k=research_top_k,
+                        max_definitions=research_definitions,
+                        max_total_chars=60_000,
+                        max_citations=research_top_k + research_definitions,
+                        max_run_text_chars=60_000,
+                        upstream_retries=1,
+                        retry_delays=(0.5,),
+                    ),
+                    expected_collection=expected_collection,
+                    paragraph_cache_dir=pkg.parent / ".auditpaper_standards_cache",
+                )
+
+            def close(self) -> None:
+                close = getattr(self.caller, "close", None)
+                if callable(close):
+                    close()
+
+        make_research = _LazyResearchRetrieverFactory()
     aggregate_id = getattr(args, "aggregate_id", None)
     aggregate_selection = (
         {"aggregate_id": aggregate_id} if aggregate_id is not None else {}
@@ -1087,6 +1166,8 @@ def _cmd_audit_chat(args: argparse.Namespace, *, client_factory=None) -> int:
             **aggregate_selection,
             limit=args.limit,
             max_steps=args.max_steps,
+            standards_research=research_enabled,
+            standards_retriever_factory=make_research,
             eprint=_eprint,
         )
     except (AuditConversationError, AuditConsumeError, RuntimeError) as e:
@@ -1384,6 +1465,55 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=6,
         help="한 turn의 모델 도구 선택·최종화 최대 회수(1~12, 기본 6)",
+    )
+    ac.add_argument(
+        "--standards-research",
+        action="store_true",
+        help="committed 문맥이 부족할 때 turn-scoped 기준서 MCP research 허용",
+    )
+    ac.add_argument(
+        "--standards-research-top-k",
+        type=int,
+        default=5,
+        help="동적 기준서 검색 후보 수(1~5, 기본 5)",
+    )
+    ac.add_argument(
+        "--standards-research-definitions",
+        type=int,
+        default=1,
+        help="동적 검색에 포함할 정의 후보 수(0~2, 기본 1)",
+    )
+    ac.add_argument(
+        "--mcp-config",
+        default=None,
+        help="동적 기준서 research MCP 설정 JSON",
+    )
+    ac.add_argument(
+        "--mcp-server",
+        default="auditpaper-standards",
+        help="동적 research MCP 서버명",
+    )
+    ac.add_argument(
+        "--mcp-url",
+        default=None,
+        help="동적 research 원격 /mcp URL",
+    )
+    ac.add_argument(
+        "--mcp-token-env",
+        default="MCP_AUTH_TOKEN",
+        help="동적 research Bearer token 환경변수명",
+    )
+    ac.add_argument(
+        "--mcp-init-timeout",
+        type=float,
+        default=90.0,
+        help="동적 research MCP initialize timeout 초(기본 90)",
+    )
+    ac.add_argument(
+        "--mcp-call-timeout",
+        type=float,
+        default=90.0,
+        help="동적 research MCP tool timeout 초(기본 90)",
     )
     ac.add_argument(
         "--json",

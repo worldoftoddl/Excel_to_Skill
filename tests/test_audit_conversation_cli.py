@@ -147,6 +147,29 @@ def test_audit_chat_parser_makes_sheet_and_aggregate_mutually_exclusive() -> Non
         ])
 
 
+def test_audit_chat_parser_accepts_opt_in_research_without_literal_token() -> None:
+    parser = _build_parser()
+    parsed = parser.parse_args([
+        "audit-chat",
+        "/tmp/package",
+        "--question",
+        "외부조회 기준은?",
+        "--standards-research",
+        "--standards-research-top-k",
+        "4",
+        "--standards-research-definitions",
+        "2",
+        "--mcp-token-env",
+        "CUSTOM_MCP_TOKEN",
+    ])
+
+    assert parsed.standards_research is True
+    assert parsed.standards_research_top_k == 4
+    assert parsed.standards_research_definitions == 2
+    assert parsed.mcp_token_env == "CUSTOM_MCP_TOKEN"
+    assert not hasattr(parsed, "mcp_token")
+
+
 def test_audit_chat_cli_forwards_aggregate_id(
     tmp_path: Path,
     capsys,
@@ -180,6 +203,102 @@ def test_audit_chat_cli_forwards_aggregate_id(
     assert captured["path"] == pkg
     assert captured["sheet"] is None
     assert captured["aggregate_id"] == aggregate_id
+
+
+def test_audit_chat_cli_forwards_opt_in_research_factory(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    pkg, _, _, _ = _write_committed_bundle(tmp_path)
+    captured: dict = {}
+    sentinel_factory = object()
+
+    def fake_run(path, **kwargs):
+        captured["path"] = path
+        captured.update(kwargs)
+        return {"research_forwarded": True}
+
+    monkeypatch.setattr(
+        "excel_to_skill.audit.conversation.run_audit_conversation_turn",
+        fake_run,
+    )
+    args = _args(pkg, thread="research-cli", json_output=True)
+    args.standards_research = True
+    args.standards_research_top_k = 5
+    args.standards_research_definitions = 1
+
+    assert _cmd_audit_chat(
+        args,
+        client_factory=lambda: StubClient([]),
+        standards_retriever_factory=sentinel_factory,
+    ) == 0
+
+    assert json.loads(capsys.readouterr().out) == {"research_forwarded": True}
+    assert captured["standards_research"] is True
+    assert captured["standards_retriever_factory"] is sentinel_factory
+
+
+def test_audit_chat_default_research_factory_is_lazy_and_budgets_definitions(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    pkg, _, _, _ = _write_committed_bundle(tmp_path)
+    connection_calls: list[dict] = []
+    created: dict = {}
+
+    def fake_load_mcp_connection(**kwargs):
+        connection_calls.append(kwargs)
+        return "connection"
+
+    class FakeCaller:
+        def __init__(self, connection, **kwargs) -> None:
+            created["caller"] = {"connection": connection, **kwargs}
+
+    class FakeRetriever:
+        def __init__(self, caller, **kwargs) -> None:
+            created["retriever"] = {"caller": caller, **kwargs}
+
+    def fake_run(_path, **kwargs):
+        assert connection_calls == []
+        retriever = kwargs["standards_retriever_factory"]("collection-1")
+        assert isinstance(retriever, FakeRetriever)
+        return {"lazy_default": True}
+
+    monkeypatch.setattr(
+        "excel_to_skill.audit.auditpaper_mcp.load_mcp_connection",
+        fake_load_mcp_connection,
+    )
+    monkeypatch.setattr(
+        "excel_to_skill.audit.auditpaper_mcp.FastMCPHTTPCaller",
+        FakeCaller,
+    )
+    monkeypatch.setattr(
+        "excel_to_skill.audit.auditpaper_mcp.AuditpaperStandardsRetriever",
+        FakeRetriever,
+    )
+    monkeypatch.setattr(
+        "excel_to_skill.audit.conversation.run_audit_conversation_turn",
+        fake_run,
+    )
+    args = _args(pkg, thread="research-lazy", json_output=True)
+    args.standards_research = True
+    args.standards_research_top_k = 4
+    args.standards_research_definitions = 2
+
+    assert _cmd_audit_chat(
+        args,
+        client_factory=lambda: StubClient([]),
+    ) == 0
+
+    assert json.loads(capsys.readouterr().out) == {"lazy_default": True}
+    assert len(connection_calls) == 1
+    policy = created["retriever"]["policy"]
+    assert policy.top_k == 4
+    assert policy.max_definitions == 2
+    assert policy.max_citations == 6
+    assert created["retriever"]["expected_collection"] == "collection-1"
 
 
 def test_audit_chat_cli_rejects_non_package_before_client_factory(

@@ -62,7 +62,8 @@
             "audit_search",
             "audit_get",
             "assertion_procedures",
-            "trace"
+            "trace",
+            "standards_research"
           ]
         },
         "query": {
@@ -78,7 +79,8 @@
             "procedure", "result", "finding", "conclusion", "open_item", "signoff",
             "documented_fact", "authoritative_context", "synthesis", "gap",
             "identity_scope", "risks_assertions", "controls", "procedures", "results",
-            "findings", "conclusions", "open_items", "signoffs", "standards"
+            "findings", "conclusions", "open_items", "signoffs", "standards",
+            "audit_standard", "accounting_standard"
           ]
         },
         "item_id": {
@@ -138,6 +140,15 @@
           "type": "array",
           "items": {"$ref": "#/definitions/selection"},
           "maxItems": 30
+        },
+        "research_refs": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^research:[0-9a-f]{64}$"
+          }
         }
       }
     }

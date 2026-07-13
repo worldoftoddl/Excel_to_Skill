@@ -35,7 +35,8 @@
     "package_limitations": {
       "type": "array",
       "items": {"type": "object"}
-    }
+    },
+    "standards_research": {"$ref": "#/definitions/standardsResearch"}
   },
   "allOf": [
     {
@@ -364,6 +365,72 @@
         "code": {"type": "string", "minLength": 1},
         "severity": {"enum": ["high", "moderate", "low"]},
         "text": {"type": "string", "minLength": 1}
+      }
+    },
+    "ephemeralStandard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "typed_kind", "research_ref", "status", "review_status", "turn_scoped",
+        "outside_prepared_bundle", "effective_date_verified", "scope", "collection",
+        "cid", "domain", "framework", "source_type", "standard_no", "standard_title",
+        "para_no", "para_type", "section_path", "text", "text_sha256", "source_uri",
+        "verified_by"
+      ],
+      "properties": {
+        "typed_kind": {"const": "ephemeral_standard"},
+        "research_ref": {"type": "string", "pattern": "^research:[0-9a-f]{64}$"},
+        "status": {"const": "ephemeral"},
+        "review_status": {"const": "unreviewed"},
+        "turn_scoped": {"const": true},
+        "outside_prepared_bundle": {"const": true},
+        "effective_date_verified": {"const": false},
+        "scope": {"$ref": "#/definitions/scope"},
+        "collection": {"type": "string", "minLength": 1},
+        "cid": {"type": "string", "pattern": "^(KSA|KIFRS)::[^:]+::.+$"},
+        "domain": {"enum": ["audit", "accounting"]},
+        "framework": {"enum": ["KSA", "K-IFRS"]},
+        "source_type": {"enum": ["감사기준", "회계기준"]},
+        "standard_no": {"type": "string", "minLength": 1},
+        "standard_title": {"type": "string", "minLength": 1},
+        "para_no": {"type": "string", "minLength": 1},
+        "para_type": {"enum": ["정의", "참조", "부록", "요구사항", "적용지침", "본문"]},
+        "section_path": {"type": ["string", "null"]},
+        "text": {"type": "string", "minLength": 1, "maxLength": 40000},
+        "text_sha256": {"$ref": "#/definitions/sha256"},
+        "source_uri": {"type": "string", "minLength": 1},
+        "verified_by": {"const": "standards_get_paragraph"}
+      }
+    },
+    "standardsResearch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "evidence_status", "review_status", "turn_scoped",
+        "outside_prepared_bundle", "effective_date_verified", "scope", "collection",
+        "selected_refs", "citations", "limitations"
+      ],
+      "properties": {
+        "status": {"enum": ["completed", "no_results"]},
+        "evidence_status": {"const": "ephemeral"},
+        "review_status": {"const": "unreviewed"},
+        "turn_scoped": {"const": true},
+        "outside_prepared_bundle": {"const": true},
+        "effective_date_verified": {"const": false},
+        "scope": {"$ref": "#/definitions/scope"},
+        "collection": {"type": "string", "minLength": 1},
+        "selected_refs": {
+          "type": "array", "maxItems": 3, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^research:[0-9a-f]{64}$"}
+        },
+        "citations": {
+          "type": "array", "maxItems": 3,
+          "items": {"$ref": "#/definitions/ephemeralStandard"}
+        },
+        "limitations": {
+          "type": "array", "minItems": 3, "maxItems": 3,
+          "items": {"type": "string", "minLength": 1}
+        }
       }
     }
   }

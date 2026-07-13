@@ -107,6 +107,19 @@ def test_provider_turn_schema_has_no_combinators_but_local_schema_stays_strict()
 
     assert combinators(provider) == set()
     assert "allOf" in strict
+    assert "standards_research" not in provider["definitions"]["toolRequest"][
+        "properties"
+    ]["name"]["enum"]
+    assert "research_refs" not in provider["definitions"]["finalResponse"][
+        "properties"
+    ]
+    research_provider = _provider_turn_schema(strict, include_research=True)
+    assert "standards_research" in research_provider["definitions"]["toolRequest"][
+        "properties"
+    ]["name"]["enum"]
+    assert "research_refs" in research_provider["definitions"]["finalResponse"][
+        "properties"
+    ]
     jsonschema.validate(_grounded_final(), provider)
     jsonschema.validate(_grounded_final(), strict)
 
