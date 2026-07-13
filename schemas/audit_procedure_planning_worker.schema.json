@@ -1,0 +1,225 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "audit procedure planning worker output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "abstained", "abstention_code", "assumptions", "open_questions",
+    "candidates", "recommended_combinations"
+  ],
+  "properties": {
+    "abstained": {"type": "boolean"},
+    "abstention_code": {
+      "enum": [
+        "insufficient_basis", "ambiguous_target", "planning_not_supported", null
+      ]
+    },
+    "assumptions": {
+      "type": "array",
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 400}
+    },
+    "open_questions": {
+      "type": "array",
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 400}
+    },
+    "candidates": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {"$ref": "#/definitions/candidate"}
+    },
+    "recommended_combinations": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {"$ref": "#/definitions/combination"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"abstained": {"const": true}}},
+      "then": {
+        "properties": {
+          "abstention_code": {
+            "enum": [
+              "insufficient_basis", "ambiguous_target", "planning_not_supported"
+            ]
+          },
+          "candidates": {"maxItems": 0},
+          "recommended_combinations": {"maxItems": 0}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"abstained": {"const": false}}},
+      "then": {
+        "properties": {
+          "abstention_code": {"type": "null"},
+          "candidates": {"minItems": 3, "maxItems": 5},
+          "recommended_combinations": {"minItems": 1, "maxItems": 3}
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "workbookBasisRef": {
+      "type": "string",
+      "pattern": "^workbook-basis:[0-9a-f]{64}$"
+    },
+    "standardBasisRef": {
+      "type": "string",
+      "pattern": "^standard-basis:[0-9a-f]{64}$"
+    },
+    "boundedText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 400
+    },
+    "textList": {
+      "type": "array",
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {"$ref": "#/definitions/boundedText"}
+    },
+    "nonEmptyTextList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {"$ref": "#/definitions/boundedText"}
+    },
+    "shortNonEmptyTextList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {"$ref": "#/definitions/boundedText"}
+    },
+    "applicability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assessment", "conditions_for_use", "disqualifiers"],
+      "properties": {
+        "assessment": {
+          "enum": ["applicable_on_current_evidence", "conditional", "undetermined"]
+        },
+        "conditions_for_use": {"$ref": "#/definitions/nonEmptyTextList"},
+        "disqualifiers": {"$ref": "#/definitions/textList"}
+      }
+    },
+    "quantitativeDesign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_size", "amount_threshold", "selection_interval"],
+      "properties": {
+        "sample_size": {"const": "TBD"},
+        "amount_threshold": {"const": "TBD"},
+        "selection_interval": {"const": "TBD"}
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_key", "rank", "portfolio_role", "title", "objective",
+        "approach", "evidence_methods", "steps", "applicability",
+        "evidence_to_obtain", "strengths", "limitations", "prerequisites",
+        "open_questions", "relationship_to_documented",
+        "documented_procedure_basis_refs", "standard_support",
+        "workbook_basis_refs", "standards_basis_refs", "quantitative_design"
+      ],
+      "properties": {
+        "candidate_key": {"type": "string", "pattern": "^T[1-5]$"},
+        "rank": {"type": "integer", "minimum": 1, "maximum": 5},
+        "portfolio_role": {"enum": ["primary", "alternative", "complementary"]},
+        "title": {"type": "string", "minLength": 1, "maxLength": 160},
+        "objective": {"$ref": "#/definitions/boundedText"},
+        "approach": {
+          "enum": [
+            "test_of_controls", "substantive_analytical_procedure",
+            "test_of_details", "dual_purpose", "other"
+          ]
+        },
+        "evidence_methods": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "inspection", "observation", "external_confirmation",
+              "recalculation", "reperformance", "analytical_procedure",
+              "inquiry", "other"
+            ]
+          }
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {"$ref": "#/definitions/boundedText"}
+        },
+        "applicability": {"$ref": "#/definitions/applicability"},
+        "evidence_to_obtain": {"$ref": "#/definitions/nonEmptyTextList"},
+        "strengths": {"$ref": "#/definitions/shortNonEmptyTextList"},
+        "limitations": {"$ref": "#/definitions/shortNonEmptyTextList"},
+        "prerequisites": {"$ref": "#/definitions/textList"},
+        "open_questions": {"$ref": "#/definitions/textList"},
+        "relationship_to_documented": {
+          "enum": [
+            "new_option", "alternative_to_documented", "complements_documented",
+            "overlaps_documented", "unknown"
+          ]
+        },
+        "documented_procedure_basis_refs": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/definitions/workbookBasisRef"}
+        },
+        "standard_support": {
+          "enum": ["explicit_procedure", "principle_based", "none"]
+        },
+        "workbook_basis_refs": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 24,
+          "uniqueItems": true,
+          "items": {"$ref": "#/definitions/workbookBasisRef"}
+        },
+        "standards_basis_refs": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/definitions/standardBasisRef"}
+        },
+        "quantitative_design": {"$ref": "#/definitions/quantitativeDesign"}
+      }
+    },
+    "combination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["combination_key", "candidate_keys", "rationale", "tradeoffs"],
+      "properties": {
+        "combination_key": {"type": "string", "pattern": "^C[1-3]$"},
+        "candidate_keys": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^T[1-5]$"}
+        },
+        "rationale": {"$ref": "#/definitions/boundedText"},
+        "tradeoffs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {"$ref": "#/definitions/boundedText"}
+        }
+      }
+    }
+  }
+}

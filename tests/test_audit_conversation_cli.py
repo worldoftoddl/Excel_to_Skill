@@ -170,6 +170,60 @@ def test_audit_chat_parser_accepts_opt_in_research_without_literal_token() -> No
     assert not hasattr(parsed, "mcp_token")
 
 
+def test_audit_chat_parser_accepts_opt_in_procedure_planning() -> None:
+    parser = _build_parser()
+    parsed = parser.parse_args([
+        "audit-chat",
+        "/tmp/package",
+        "--question",
+        "이 위험에 어떤 테스트를 할 수 있어?",
+        "--procedure-planning",
+    ])
+
+    assert parsed.procedure_planning is True
+
+
+@pytest.mark.parametrize(
+    ("planning_enabled", "expected_max_tokens"),
+    [(False, 8192), (True, 16384)],
+)
+def test_audit_chat_default_client_reserves_output_budget_for_planning(
+    tmp_path: Path,
+    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    planning_enabled: bool,
+    expected_max_tokens: int,
+) -> None:
+    from excel_to_skill.audit import langchain_client as client_module
+
+    pkg, _, _, _ = _write_committed_bundle(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_builder(model: str, *, max_tokens: int, purpose: str):
+        captured.update({
+            "model": model,
+            "max_tokens": max_tokens,
+            "purpose": purpose,
+        })
+        return StubClient([_final()])
+
+    monkeypatch.setattr(
+        client_module,
+        "build_langchain_anthropic_client",
+        fake_builder,
+    )
+    args = _args(pkg, thread=None, json_output=True)
+    args.procedure_planning = planning_enabled
+
+    assert _cmd_audit_chat(args) == 0
+    capsys.readouterr()
+    assert captured == {
+        "model": "stub-model",
+        "max_tokens": expected_max_tokens,
+        "purpose": "audit-chat",
+    }
+
+
 def test_audit_chat_cli_forwards_aggregate_id(
     tmp_path: Path,
     capsys,
@@ -237,6 +291,35 @@ def test_audit_chat_cli_forwards_opt_in_research_factory(
     assert json.loads(capsys.readouterr().out) == {"research_forwarded": True}
     assert captured["standards_research"] is True
     assert captured["standards_retriever_factory"] is sentinel_factory
+
+
+def test_audit_chat_cli_forwards_opt_in_procedure_planning(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    pkg, _, _, _ = _write_committed_bundle(tmp_path)
+    captured: dict = {}
+
+    def fake_run(path, **kwargs):
+        captured["path"] = path
+        captured.update(kwargs)
+        return {"planning_forwarded": True}
+
+    monkeypatch.setattr(
+        "excel_to_skill.audit.conversation.run_audit_conversation_turn",
+        fake_run,
+    )
+    args = _args(pkg, thread="planning-cli", json_output=True)
+    args.procedure_planning = True
+
+    assert _cmd_audit_chat(
+        args,
+        client_factory=lambda: StubClient([]),
+    ) == 0
+
+    assert json.loads(capsys.readouterr().out) == {"planning_forwarded": True}
+    assert captured["procedure_planning"] is True
 
 
 def test_audit_chat_default_research_factory_is_lazy_and_budgets_definitions(

@@ -1070,10 +1070,11 @@ def _cmd_audit_chat(
         _eprint(f"[오류] 패키지 폴더가 아님(meta.json 없음): {pkg}")
         return 1
     model = args.model or DEFAULT_MODEL
+    planning_enabled = bool(getattr(args, "procedure_planning", False))
     make_client = client_factory or (
         lambda: build_langchain_anthropic_client(
             model,
-            max_tokens=8192,
+            max_tokens=16384 if planning_enabled else 8192,
             purpose="audit-chat",
         )
     )
@@ -1168,6 +1169,7 @@ def _cmd_audit_chat(
             max_steps=args.max_steps,
             standards_research=research_enabled,
             standards_retriever_factory=make_research,
+            procedure_planning=planning_enabled,
             eprint=_eprint,
         )
     except (AuditConversationError, AuditConsumeError, RuntimeError) as e:
@@ -1470,6 +1472,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--standards-research",
         action="store_true",
         help="committed 문맥이 부족할 때 turn-scoped 기준서 MCP research 허용",
+    )
+    ac.add_argument(
+        "--procedure-planning",
+        action="store_true",
+        help="관찰된 위험·주장에 대해 3~5개 미검토 감사 test 후보와 조합안 생성 허용",
     )
     ac.add_argument(
         "--standards-research-top-k",

@@ -22,6 +22,13 @@ workbook facts, standards context, and audit-brief observations through bounded 
   observations cannot answer an authoritative-standards question, request one concise KSA or
   K-IFRS query. The isolated worker sees no workbook cells or conversation history; returned
   `research_ref` records are turn-scoped, ephemeral, unreviewed, and outside the prepared bundle.
+  Set `kind="audit_standard"` for KSA or `kind="accounting_standard"` for K-IFRS; never set it
+  to null. Set `item_id=null` and `limit` between 1 and 5.
+- `procedure_planning`: only when `capabilities.procedure_planning.enabled=true` and the user asks
+  what tests could be performed for one specific risk and assertion. Supply only currently
+  observed typed fact/relation/standard IDs plus any current-turn `research_ref`. The isolated
+  worker proposes three to five distinct options and a recommended combination; it never records
+  that a procedure was performed.
 
 The application supplies `brief` and `assertion_procedures` bootstrap observations on every
 turn. Return a tool action only when those observations and the typed conversation focus are
@@ -43,6 +50,22 @@ duplicate an already committed standards citation.
 - Copy `research_ref` only from a typed `ephemeral_standard` record returned in this turn. Put
   selected refs in `final.research_refs`; they supplement the answer but never become prepared
   `standard_citation` evidence and are not available in a later turn.
+- A planning request must identify exactly one observed risk fact and one observed assertion fact.
+  Include an observed account fact when available, existing procedure facts and relevant relations
+  when they help detect overlap, and only standards records actually exposed this turn. Never infer
+  a missing risk/assertion relation merely to make the request complete.
+- A fact, relation, or citation ID merely linked inside a brief statement or mapping summary is not
+  yet an observed typed record. Before planning, call `trace` on the observed statement or use the
+  bounded search/get tools so every selected fact, relation, and citation appears as its own typed
+  result. Do not copy linked IDs directly from a statement.
+- Before requesting a plan, ensure at least one verified prepared standards citation or one
+  current-turn `research_ref` is available. If neither exists and standards research is enabled,
+  call `standards_research` first. A `RESEARCH_REQUIRED` planning result does not consume the one
+  successful planning opportunity; research and retry planning with the returned ref.
+- Copy a returned `plan_ref` only from the typed `procedure_planning` observation into
+  `final.plan_refs`. The plan is a non-exhaustive `proposed / unreviewed / not_evidenced`
+  supplement. It is not a fact, a performed procedure, a `tests` or `addresses` relation, or
+  evidence of compliance. It is not automatically authorized in a later turn.
 - To report a documentation gap, select an observed brief statement whose type is `gap`. A search
   miss or a general standard is not evidence of a gap, and absence is not proof of non-compliance.
 - Copy every selected ID exactly from an observed typed record. IDs that appear only inside cell
@@ -67,7 +90,8 @@ Return exactly one object matching the supplied schema:
 - To finish: `action="final"`, `tool=null`, and a structured `final` response.
 
 For a final response, return only `abstained`, `abstention_code`, ordered `selections`, and optional
-`research_refs`. When research is the only useful material, leave committed selections empty and
-abstain from a workpaper-evidence answer; the application renders the separate research supplement.
+`research_refs` and `plan_refs`. When research or a proposed plan is the only useful material,
+leave committed selections empty and abstain from a workpaper-evidence answer; the application
+renders each separate supplement.
 Do not add a title, reason, summary, finding text, claim text, or suggested question; the
 application owns all user-facing wording.

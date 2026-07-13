@@ -291,10 +291,12 @@ def _provider_turn_schema(
     strict_schema: dict,
     *,
     include_research: bool = False,
+    include_planning: bool = False,
 ) -> dict:
     schema = copy.deepcopy(strict_schema)
     schema.pop("allOf", None)
     tool = schema["definitions"]["toolRequest"]
+    tool.pop("allOf", None)
     if not include_research:
         tool["properties"]["name"]["enum"] = [
             value for value in tool["properties"]["name"]["enum"]
@@ -306,6 +308,16 @@ def _provider_turn_schema(
         ]
         schema["definitions"]["finalResponse"]["properties"].pop(
             "research_refs", None
+        )
+    if not include_planning:
+        tool["properties"]["name"]["enum"] = [
+            value for value in tool["properties"]["name"]["enum"]
+            if value != "procedure_planning"
+        ]
+        for name in ("source_refs", "research_refs"):
+            tool["properties"].pop(name, None)
+        schema["definitions"]["finalResponse"]["properties"].pop(
+            "plan_refs", None
         )
     tool["properties"]["item_ref"] = {
         "type": ["string", "null"],
@@ -599,9 +611,14 @@ def _request_audit_aggregate_agent_model_turn(
     *,
     client,
     step: int,
+    child_model_calls: int = 0,
     capabilities: dict | None = None,
     eprint=None,
 ) -> dict:
+    remaining_model_calls = max(
+        0,
+        runtime.max_steps - step - child_model_calls,
+    )
     payload = {
         "request": {"mode": "answer", "question": runtime.question},
         "context": runtime.context,
@@ -611,20 +628,32 @@ def _request_audit_aggregate_agent_model_turn(
             "readiness": runtime.aggregate["readiness"],
         },
         "turn": step,
-        "remaining_turns": runtime.max_steps - step,
+        "remaining_turns": remaining_model_calls,
+        "remaining_model_calls": remaining_model_calls,
         "observations": state.observations,
     }
     if capabilities is not None:
         payload["capabilities"] = copy.deepcopy(capabilities)
     try:
+        research_enabled = (
+            isinstance(capabilities, dict)
+            and capabilities.get("standards_research", {}).get("enabled") is True
+        )
+        planning_enabled = (
+            isinstance(capabilities, dict)
+            and capabilities.get("procedure_planning", {}).get("enabled") is True
+        )
         return call_json(
             client,
             system=runtime.prompt,
             user=_serialize_payload(payload),
             schema=(
-                _provider_turn_schema(runtime.schema, include_research=True)
-                if isinstance(capabilities, dict)
-                and capabilities.get("standards_research", {}).get("enabled") is True
+                _provider_turn_schema(
+                    runtime.schema,
+                    include_research=research_enabled,
+                    include_planning=planning_enabled,
+                )
+                if research_enabled or planning_enabled
                 else runtime.provider_schema
             ),
             validation_schema=runtime.schema,

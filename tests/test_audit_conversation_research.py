@@ -174,6 +174,100 @@ def test_workbook_conversation_runs_research_lazily_and_keeps_it_supplemental(
     assert len(client.calls) == 3
 
 
+def test_collection_drift_fails_closed_before_child_selection(
+    tmp_path: Path,
+) -> None:
+    pkg, _, standards, _ = _write_committed_bundle(tmp_path)
+    expected_collection = standards["retriever"]["corpus_version"]
+    actual_collection = f"{expected_collection}-drifted"
+    retriever = ResearchRetriever(actual_collection)
+
+    class CorpusDriftClient:
+        usage_events: list[dict] = []
+
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self.main_calls = 0
+            self.child_calls = 0
+            self.research_observation: dict | None = None
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            payload = json.loads(kwargs["user"])
+            if "candidates" in payload:
+                self.child_calls += 1
+                raise AssertionError(
+                    "collection drift must fail before child candidate selection"
+                )
+            self.main_calls += 1
+            if self.main_calls == 1:
+                return {
+                    "action": "tool",
+                    "tool": {
+                        "name": "standards_research",
+                        "query": "외부조회 절차의 감사기준 요구사항",
+                        "kind": "audit_standard",
+                        "item_id": None,
+                        "limit": 3,
+                    },
+                    "final": None,
+                }
+            self.research_observation = next(
+                item for item in payload["observations"]
+                if item.get("tool") == "standards_research"
+            )
+            assert self.research_observation["result"] == {
+                "error": {
+                    "code": "CORPUS_DRIFT",
+                    "message": "동적 기준서 조회를 완료하지 못했습니다.",
+                }
+            }
+            return {
+                "action": "final",
+                "tool": None,
+                "final": {
+                    "abstained": True,
+                    "abstention_code": "retrieval_incomplete",
+                    "selections": [],
+                    "research_refs": [],
+                },
+            }
+
+    client = CorpusDriftClient()
+    result = run_audit_conversation_turn(
+        pkg,
+        model="stub-model",
+        question="외부조회 관련 기준을 다시 확인해줘",
+        client=client,
+        checkpointer=InMemorySaver(),
+        runtime_root=tmp_path / "runtime",
+        max_steps=2,
+        standards_research=True,
+        standards_retriever=retriever,
+    )
+
+    assert expected_collection != actual_collection
+    assert client.main_calls == 2
+    assert client.child_calls == 0
+    assert len(client.calls) == 2
+    assert client.research_observation is not None
+    assert retriever.search_calls == []
+    assert retriever.get_calls == []
+    assert retriever.closed is True
+    response = result["response"]
+    assert response["answer"]["abstained"] is True
+    assert response["answer"]["abstention_reason"] == (
+        "근거 조회가 불완전하여 답변을 보류합니다."
+    )
+    assert response["coverage"]["discovery_complete"] is False
+    assert response["generator"]["tools_used"] == [
+        "brief",
+        "assertion_procedures",
+        "standards_research",
+    ]
+    assert "standards_research" not in response
+
+
 def test_empty_research_does_not_consume_a_child_model_step(tmp_path: Path) -> None:
     pkg, _, standards, _ = _write_committed_bundle(tmp_path)
 

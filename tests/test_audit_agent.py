@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import copy
 import json
 from argparse import Namespace
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import jsonschema
 
 import excel_to_skill.audit.agent as agent_module
+import excel_to_skill.audit.aggregate_agent as aggregate_agent_module
+from excel_to_skill.audit.aggregate_agent import (
+    _provider_turn_schema as _aggregate_provider_turn_schema,
+)
 from excel_to_skill.audit.agent import (
     AuditAgentError,
     _observed_from_result,
@@ -110,7 +116,13 @@ def test_provider_turn_schema_has_no_combinators_but_local_schema_stays_strict()
     assert "standards_research" not in provider["definitions"]["toolRequest"][
         "properties"
     ]["name"]["enum"]
+    assert "procedure_planning" not in provider["definitions"]["toolRequest"][
+        "properties"
+    ]["name"]["enum"]
     assert "research_refs" not in provider["definitions"]["finalResponse"][
+        "properties"
+    ]
+    assert "plan_refs" not in provider["definitions"]["finalResponse"][
         "properties"
     ]
     research_provider = _provider_turn_schema(strict, include_research=True)
@@ -120,8 +132,216 @@ def test_provider_turn_schema_has_no_combinators_but_local_schema_stays_strict()
     assert "research_refs" in research_provider["definitions"]["finalResponse"][
         "properties"
     ]
+    assert "procedure_planning" not in research_provider["definitions"][
+        "toolRequest"
+    ]["properties"]["name"]["enum"]
+    assert "plan_refs" not in research_provider["definitions"]["finalResponse"][
+        "properties"
+    ]
     jsonschema.validate(_grounded_final(), provider)
     jsonschema.validate(_grounded_final(), strict)
+
+
+@pytest.mark.parametrize(
+    ("include_research", "include_planning"),
+    ((False, False), (True, False), (False, True), (True, True)),
+)
+def test_provider_turn_capabilities_are_independent(
+    include_research: bool,
+    include_planning: bool,
+) -> None:
+    cases = (
+        (
+            load_schema("audit_agent_turn.schema.json"),
+            _provider_turn_schema,
+            ("fact_ids", "relation_ids", "standard_citation_ids", "research_refs"),
+        ),
+        (
+            load_schema("audit_aggregate_agent_turn.schema.json"),
+            _aggregate_provider_turn_schema,
+            ("source_refs", "research_refs"),
+        ),
+    )
+    for strict, factory, planning_fields in cases:
+        provider = factory(
+            strict,
+            include_research=include_research,
+            include_planning=include_planning,
+        )
+        tool = provider["definitions"]["toolRequest"]
+        final = provider["definitions"]["finalResponse"]
+        names = tool["properties"]["name"]["enum"]
+        kinds = tool["properties"]["kind"]["enum"]
+
+        assert ("standards_research" in names) is include_research
+        assert ("audit_standard" in kinds) is include_research
+        assert ("accounting_standard" in kinds) is include_research
+        assert ("research_refs" in final["properties"]) is include_research
+        assert ("procedure_planning" in names) is include_planning
+        assert ("plan_refs" in final["properties"]) is include_planning
+        for field_name in planning_fields:
+            assert (field_name in tool["properties"]) is include_planning
+
+
+def test_planning_turn_contracts_accept_refs_only_and_preserve_legacy_tools() -> None:
+    workbook = load_schema("audit_agent_turn.schema.json")
+    aggregate = load_schema("audit_aggregate_agent_turn.schema.json")
+    legacy = {
+        "action": "tool",
+        "tool": {
+            "name": "audit_search",
+            "query": "매출 위험",
+            "kind": "risk",
+            "item_id": None,
+            "limit": 5,
+        },
+        "final": None,
+    }
+    workbook_planning = {
+        "action": "tool",
+        "tool": {
+            "name": "procedure_planning",
+            "query": "실재성 위험에 가능한 테스트를 제안해줘",
+            "kind": None,
+            "item_id": None,
+            "limit": 5,
+            "fact_ids": ["fact:risk", "fact:assertion"],
+            "relation_ids": ["relation:asserts_over"],
+            "standard_citation_ids": ["citation:1"],
+            "research_refs": ["research:" + "a" * 64],
+        },
+        "final": None,
+    }
+    aggregate_planning = {
+        "action": "tool",
+        "tool": {
+            "name": "procedure_planning",
+            "query": "이 source 위험에 가능한 테스트를 제안해줘",
+            "kind": None,
+            "item_ref": None,
+            "scope_id": "b" * 64,
+            "limit": 3,
+            "source_refs": ["source:" + "c" * 64],
+            "research_refs": [],
+        },
+        "final": None,
+    }
+    workbook_final = copy.deepcopy(_grounded_final())
+    workbook_final["final"]["plan_refs"] = ["procedure-plan:" + "d" * 64]
+    aggregate_final = {
+        "action": "final",
+        "tool": None,
+        "final": {
+            "abstained": True,
+            "abstention_code": "insufficient_evidence",
+            "selections": [],
+            "plan_refs": ["procedure-plan:" + "e" * 64],
+        },
+    }
+
+    jsonschema.validate(legacy, workbook)
+    jsonschema.validate(workbook_planning, workbook)
+    jsonschema.validate(aggregate_planning, aggregate)
+    jsonschema.validate(workbook_final, workbook)
+    jsonschema.validate(aggregate_final, aggregate)
+
+    for invalid_limit in (2, 6):
+        invalid = copy.deepcopy(workbook_planning)
+        invalid["tool"]["limit"] = invalid_limit
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(invalid, workbook)
+        invalid = copy.deepcopy(aggregate_planning)
+        invalid["tool"]["limit"] = invalid_limit
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(invalid, aggregate)
+
+    missing_refs = copy.deepcopy(workbook_planning)
+    missing_refs["tool"].pop("fact_ids")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(missing_refs, workbook)
+
+    duplicate_plans = copy.deepcopy(workbook_final)
+    duplicate_plans["final"]["plan_refs"] *= 2
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(duplicate_plans, workbook)
+
+
+@pytest.mark.parametrize(
+    ("research_enabled", "planning_enabled"),
+    ((False, False), (True, False), (False, True), (True, True)),
+)
+def test_model_turn_projects_only_enabled_conversation_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    research_enabled: bool,
+    planning_enabled: bool,
+) -> None:
+    captured: list[dict] = []
+
+    def fake_call_json(*_args, **kwargs):
+        captured.append(kwargs)
+        return _grounded_final()
+
+    monkeypatch.setattr(agent_module, "call_json", fake_call_json)
+    monkeypatch.setattr(aggregate_agent_module, "call_json", fake_call_json)
+    capabilities = {
+        "standards_research": {"enabled": research_enabled},
+        "procedure_planning": {"enabled": planning_enabled},
+    }
+    workbook_schema = load_schema("audit_agent_turn.schema.json")
+    workbook_runtime = SimpleNamespace(
+        question="어떤 테스트가 가능한가?",
+        briefing={},
+        max_steps=6,
+        analysis_scope=None,
+        prompt="prompt",
+        schema=workbook_schema,
+        provider_schema=_provider_turn_schema(workbook_schema),
+    )
+    aggregate_schema = load_schema("audit_aggregate_agent_turn.schema.json")
+    aggregate_runtime = SimpleNamespace(
+        question="어떤 테스트가 가능한가?",
+        context={},
+        aggregate={
+            "review": {"status": "draft"},
+            "trust": {"source_unreviewed": True},
+            "readiness": {"status": "partial"},
+        },
+        max_steps=6,
+        prompt="prompt",
+        schema=aggregate_schema,
+        provider_schema=_aggregate_provider_turn_schema(aggregate_schema),
+    )
+    state = SimpleNamespace(observations=[])
+
+    agent_module._request_audit_agent_model_turn(
+        workbook_runtime,
+        state,
+        client=object(),
+        step=1,
+        capabilities=capabilities,
+    )
+    aggregate_agent_module._request_audit_aggregate_agent_model_turn(
+        aggregate_runtime,
+        state,
+        client=object(),
+        step=1,
+        capabilities=capabilities,
+    )
+
+    assert len(captured) == 2
+    for call in captured:
+        tool = call["schema"]["definitions"]["toolRequest"]
+        final = call["schema"]["definitions"]["finalResponse"]
+        names = tool["properties"]["name"]["enum"]
+        assert ("standards_research" in names) is research_enabled
+        assert ("procedure_planning" in names) is planning_enabled
+        assert ("research_refs" in final["properties"]) is research_enabled
+        assert ("plan_refs" in final["properties"]) is planning_enabled
+        if research_enabled:
+            assert 'kind="audit_standard"' in tool["description"]
+            assert 'kind="accounting_standard"' in tool["description"]
+        if planning_enabled:
+            assert "not observed" in tool["description"]
 
 
 def test_agent_briefing_hydrates_cells_and_standards_and_marks_draft(

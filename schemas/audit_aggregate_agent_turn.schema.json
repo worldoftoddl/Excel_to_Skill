@@ -47,13 +47,15 @@
     },
     "toolRequest": {
       "type": "object",
+      "description": "For standards_research set query, kind=\"audit_standard\" for KSA or kind=\"accounting_standard\" for K-IFRS, item_ref=null, one exact source scope_id, and limit=1..5. For procedure_planning set query, kind=null, item_ref=null, one exact source scope_id, limit=3..5, and include source_refs and research_refs. Refs merely linked inside an aggregate record are not observed source records: resolve them with source search/get/trace first. Copy refs only from typed observations; do not write proposed procedure prose here.",
       "additionalProperties": false,
       "required": ["name", "query", "kind", "item_ref", "scope_id", "limit"],
       "properties": {
         "name": {
           "enum": [
             "aggregate_search", "aggregate_get", "source_search",
-            "assertion_procedures", "source_get", "trace", "standards_research"
+            "assertion_procedures", "source_get", "trace", "standards_research",
+            "procedure_planning"
           ]
         },
         "query": {
@@ -84,8 +86,44 @@
             {"$ref": "#/definitions/sha256"}
           ]
         },
-        "limit": {"type": "integer", "minimum": 1, "maximum": 200}
-      }
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+        "source_refs": {
+          "type": "array",
+          "description": "Observed source refs from one exact aggregate source scope for one risk and one assertion.",
+          "items": {"$ref": "#/definitions/opaqueRef"},
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "research_refs": {
+          "type": "array",
+          "description": "Current-turn ephemeral research refs from the same source scope; otherwise an empty array.",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^research:[0-9a-f]{64}$"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"name": {"const": "procedure_planning"}},
+            "required": ["name"]
+          },
+          "then": {
+            "required": ["source_refs", "research_refs"],
+            "properties": {
+              "query": {"type": "string", "minLength": 1, "maxLength": 500},
+              "kind": {"type": "null"},
+              "item_ref": {"type": "null"},
+              "scope_id": {"$ref": "#/definitions/sha256"},
+              "limit": {"type": "integer", "minimum": 3, "maximum": 5},
+              "source_refs": {"minItems": 1}
+            }
+          }
+        }
+      ]
     },
     "selection": {
       "type": "object",
@@ -125,6 +163,15 @@
           "items": {
             "type": "string",
             "pattern": "^research:[0-9a-f]{64}$"
+          }
+        },
+        "plan_refs": {
+          "type": "array",
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^procedure-plan:[0-9a-f]{64}$"
           }
         }
       }

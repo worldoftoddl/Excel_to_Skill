@@ -62,11 +62,24 @@ from .conversation_store import (
     ConversationArtifactStoreError,
 )
 from .llm import AuditLLMError, load_schema
+from .model import AuditModelError
+from .procedure_planning import (
+    PLANNING_RESULT_SCHEMA,
+    ProcedurePlanningError,
+    ProcedurePlanningRuntime,
+    procedure_plan_summary,
+    run_procedure_planning,
+    standard_basis_ref,
+    validate_procedure_plan,
+    validate_procedure_plan_summary,
+    workbook_basis_ref,
+)
 from .scope import AuditScopeError, resolve_scope
 from .standards_research import (
     RESEARCH_RESULT_SCHEMA,
     StandardsResearchError,
     StandardsResearchRuntime,
+    research_records,
     research_summary,
     run_standards_research,
     validate_research_result,
@@ -89,6 +102,7 @@ MAX_HISTORY_TURNS = 100
 MAX_FOCUS_TURNS = 3
 MAX_FOCUS_RECORDS = 40
 MAX_RESEARCH_REQUESTS = 1
+MAX_PLANNING_REQUESTS = 1
 
 _THREAD_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _OBSERVED_KINDS = (
@@ -150,7 +164,7 @@ class ConversationOutput(TypedDict):
 
 
 @dataclass
-class _ResearchModelClient:
+class _CountedChildModelClient:
     """Count only child-model calls that actually cross the client boundary."""
 
     client: object
@@ -175,6 +189,7 @@ class AuditConversationRuntime:
     client: object | None = None
     client_factory: object | None = None
     standards_research_enabled: bool = False
+    procedure_planning_enabled: bool = False
     standards_retriever: object | None = None
     standards_retriever_factory: object | None = None
     eprint: object | None = None
@@ -191,7 +206,13 @@ class AuditConversationRuntime:
         repr=False,
     )
     _research_request_count: int = field(default=0, init=False, repr=False)
-    _research_model_call_count: int = field(default=0, init=False, repr=False)
+    _planning_results: dict[str, list[dict]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _planning_request_count: int = field(default=0, init=False, repr=False)
+    _child_model_call_count: int = field(default=0, init=False, repr=False)
     _node_failure: tuple[str, Exception] | None = field(
         default=None,
         init=False,
@@ -251,7 +272,14 @@ class AuditConversationRuntime:
                 "max_candidates": 5,
                 "max_selected": 3,
                 "result_status": "ephemeral_unreviewed_turn_scoped",
-            }
+            },
+            "procedure_planning": {
+                "enabled": self.procedure_planning_enabled,
+                "max_requests": MAX_PLANNING_REQUESTS,
+                "min_candidates": 3,
+                "max_candidates": 5,
+                "result_status": "proposed_unreviewed_not_evidenced",
+            },
         }
 
     def research_retriever(self, expected_collection: str):
@@ -503,6 +531,168 @@ def _research_error(code: str) -> dict:
     }
 
 
+def _planning_request_key(value: object) -> str:
+    if not isinstance(value, dict):
+        raise AuditConversationError("procedure_planning input이 유효하지 않습니다.")
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _planning_error(code: str) -> dict:
+    allowed = {
+        "PLANNING_DISABLED",
+        "PLANNING_LIMIT_EXCEEDED",
+        "RESEARCH_REQUIRED",
+        "INVALID_REQUEST",
+        "UPSTREAM_UNAVAILABLE",
+        "CONTRACT_MISMATCH",
+        "LIMIT_EXCEEDED",
+    }
+    selected = code if code in allowed else "UPSTREAM_UNAVAILABLE"
+    return {
+        "error": {
+            "code": selected,
+            "message": "감사 test 후보 계획을 완료하지 못했습니다.",
+        }
+    }
+
+
+def _planning_record_kind(source_kind: str, item: dict) -> str:
+    if source_kind == "fact":
+        kind = item.get("type")
+        if kind in {"account", "risk", "assertion", "procedure"}:
+            return str(kind)
+        if kind == "open_item":
+            return "gap"
+    if source_kind == "relation":
+        return "relation"
+    if source_kind == "statement" and item.get("type") == "gap":
+        return "gap"
+    return "other"
+
+
+def _planning_record_text(source_kind: str, item: dict) -> str:
+    if source_kind == "relation":
+        return " ".join(
+            str(value)
+            for value in (
+                item.get("type"),
+                item.get("from_fact_id"),
+                "->",
+                item.get("to_fact_id"),
+                item.get("status"),
+            )
+            if value is not None
+        )[:8_000]
+    if source_kind == "statement":
+        value = item.get("text")
+    else:
+        value = item.get("description") or item.get("value")
+    text = " ".join(str(value or "").split())
+    return text[:8_000] or f"typed {source_kind} record"
+
+
+def _planning_workbook_basis(
+    *,
+    scope: dict,
+    source_kind: str,
+    source_ref: str,
+    item: dict,
+    aggregate_source: bool = False,
+) -> dict:
+    record = {
+        "typed_kind": "planning_workbook_basis",
+        "basis_ref": "",
+        "scope": copy.deepcopy(scope),
+        "source_kind": "source_record" if aggregate_source else source_kind,
+        "record_kind": _planning_record_kind(source_kind, item),
+        "source_ref": source_ref,
+        "text": _planning_record_text(source_kind, item),
+        "status": item.get("status") if isinstance(item.get("status"), str) else None,
+        "confidence": (
+            item.get("confidence")
+            if isinstance(item.get("confidence"), (int, float))
+            and not isinstance(item.get("confidence"), bool)
+            else None
+        ),
+    }
+    record["basis_ref"] = workbook_basis_ref(record)
+    return record
+
+
+def _planning_prepared_standard_basis(
+    *,
+    scope: dict,
+    source_ref: str,
+    citation: dict,
+    expected_collection: str,
+) -> dict | None:
+    metadata = citation.get("provider_metadata")
+    cid = citation.get("document_id")
+    text = citation.get("snippet")
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("verified_by") != "standards_get_paragraph"
+        or metadata.get("source_cid") != cid
+        or citation.get("corpus_version") != expected_collection
+        or not isinstance(cid, str)
+        or not isinstance(text, str)
+        or not text.strip()
+    ):
+        return None
+    record = {
+        "typed_kind": "planning_standard_basis",
+        "basis_ref": "",
+        "scope": copy.deepcopy(scope),
+        "origin": "prepared_citation",
+        "source_ref": source_ref,
+        "collection": expected_collection,
+        "cid": cid,
+        "domain": citation.get("domain"),
+        "framework": citation.get("framework"),
+        "source_type": metadata.get("source_type"),
+        "standard_no": str(metadata.get("standard_no")),
+        "standard_title": citation.get("title"),
+        "para_no": str(citation.get("paragraph")),
+        "para_type": metadata.get("para_type"),
+        "section_path": metadata.get("section_path"),
+        "text": text,
+        "text_sha256": citation.get("snippet_sha256"),
+        "effective_date_verified": False,
+        "verified_by": "standards_get_paragraph",
+    }
+    try:
+        record["basis_ref"] = standard_basis_ref(record)
+    except (ProcedurePlanningError, AuditModelError):
+        return None
+    return record
+
+
+def _planning_research_standard_basis(record: dict) -> dict:
+    basis = {
+        "typed_kind": "planning_standard_basis",
+        "basis_ref": "",
+        "scope": copy.deepcopy(record["scope"]),
+        "origin": "ephemeral_research",
+        "source_ref": record["research_ref"],
+        "collection": record["collection"],
+        "cid": record["cid"],
+        "domain": record["domain"],
+        "framework": record["framework"],
+        "source_type": record["source_type"],
+        "standard_no": record["standard_no"],
+        "standard_title": record["standard_title"],
+        "para_no": record["para_no"],
+        "para_type": record["para_type"],
+        "section_path": record["section_path"],
+        "text": record["text"],
+        "text_sha256": record["text_sha256"],
+        "effective_date_verified": record["effective_date_verified"],
+        "verified_by": record["verified_by"],
+    }
+    basis["basis_ref"] = standard_basis_ref(basis)
+    return basis
+
+
 def _research_observation_result(
     context: AuditConversationRuntime,
     observation: object,
@@ -571,12 +761,69 @@ def _research_observation_result(
     return validated, complete
 
 
-def _base_observations_and_research(
+def _planning_observation_result(
+    observation: object,
+    *,
+    expected_result: dict | None,
+) -> dict:
+    if (
+        not isinstance(observation, dict)
+        or set(observation) != {"tool", "input", "result"}
+        or observation.get("tool") != "procedure_planning"
+        or not isinstance(observation.get("input"), dict)
+        or not isinstance(observation.get("result"), dict)
+    ):
+        raise AuditConversationError(
+            "procedure_planning observation 형식이 유효하지 않습니다."
+        )
+    result = observation["result"]
+    if result.get("schema_version") == PLANNING_RESULT_SCHEMA:
+        try:
+            validated = validate_procedure_plan(result)
+        except ProcedurePlanningError as e:
+            raise AuditConversationError(
+                "procedure_planning observation 계약이 유효하지 않습니다."
+            ) from e
+    else:
+        error = result.get("error")
+        if (
+            set(result) != {"error"}
+            or not isinstance(error, dict)
+            or set(error) != {"code", "message"}
+            or result != _planning_error(str(error.get("code")))
+        ):
+            raise AuditConversationError(
+                "procedure_planning error witness가 유효하지 않습니다."
+            )
+        validated = copy.deepcopy(result)
+    if expected_result is not None and expected_result != validated:
+        raise AuditConversationError(
+            "procedure_planning observation이 현재 invocation witness와 다릅니다."
+        )
+    return validated
+
+
+def _planning_request_witness(request: dict) -> dict:
+    return {
+        "objective": request["objective"],
+        "target": copy.deepcopy(request["target"]),
+        "candidate_count": request["candidate_count"],
+        "existing_procedure_refs": list(request["existing_procedure_refs"]),
+        "workbook_basis_refs": [
+            item["basis_ref"] for item in request["workbook_basis"]
+        ],
+        "standards_basis_refs": [
+            item["basis_ref"] for item in request["standards_basis"]
+        ],
+    }
+
+
+def _base_observations_and_supplements(
     context: AuditConversationRuntime,
     observations: list[dict],
     *,
     require_runtime_witness: bool,
-) -> tuple[list[dict], bool, list[str]]:
+) -> tuple[list[dict], bool, list[str], list[dict]]:
     agent = context.agent
     if agent is None:
         raise AuditConversationError("research observation을 검증할 agent가 없습니다.")
@@ -590,13 +837,17 @@ def _base_observations_and_research(
     research_complete = True
     used_tools = list(bootstrap_tools)
     successful = 0
-    seen_requests: dict[str, int] = {}
+    successful_plans = 0
+    seen_research_requests: dict[str, int] = {}
+    seen_planning_requests: dict[str, int] = {}
+    available_research: dict[str, dict] = {}
+    planning_witnesses: list[dict] = []
     for index, observation in enumerate(observations):
         tool = observation.get("tool") if isinstance(observation, dict) else None
         if tool == "standards_research":
             key = _research_request_key(observation.get("input"))
-            occurrence = seen_requests.get(key, 0)
-            seen_requests[key] = occurrence + 1
+            occurrence = seen_research_requests.get(key, 0)
+            seen_research_requests[key] = occurrence + 1
             expected = None
             if require_runtime_witness:
                 values = context._research_results.get(key, [])
@@ -617,6 +868,41 @@ def _base_observations_and_research(
                     "한 turn에 성공한 standards_research가 상한을 초과했습니다."
                 )
             research_complete = research_complete and complete
+            if result.get("schema_version") == RESEARCH_RESULT_SCHEMA:
+                current_records = research_records(result)
+                if set(available_research) & set(current_records):
+                    raise AuditConversationError(
+                        "standards_research ref가 observation 사이에서 중복되었습니다."
+                    )
+                available_research.update(current_records)
+        elif tool == "procedure_planning":
+            key = _planning_request_key(observation.get("input"))
+            occurrence = seen_planning_requests.get(key, 0)
+            seen_planning_requests[key] = occurrence + 1
+            expected = None
+            if require_runtime_witness:
+                values = context._planning_results.get(key, [])
+                if occurrence >= len(values):
+                    raise AuditConversationError(
+                        "procedure_planning runtime witness가 누락되었습니다."
+                    )
+                expected = values[occurrence]
+            result = _planning_observation_result(
+                observation,
+                expected_result=expected,
+            )
+            if result.get("schema_version") == PLANNING_RESULT_SCHEMA:
+                successful_plans += 1
+            if successful_plans > MAX_PLANNING_REQUESTS:
+                raise AuditConversationError(
+                    "한 turn에 성공한 procedure_planning이 상한을 초과했습니다."
+                )
+            planning_witnesses.append({
+                "observation": copy.deepcopy(observation),
+                "result": result,
+                "base_prefix": copy.deepcopy(base),
+                "research": copy.deepcopy(available_research),
+            })
         else:
             base.append(observation)
         if (
@@ -625,7 +911,78 @@ def _base_observations_and_research(
             and tool not in {"conversation_focus", "answer_validation", "agent_protocol"}
         ):
             used_tools.append(tool)
-    return base, research_complete, used_tools
+    return base, research_complete, used_tools, planning_witnesses
+
+
+def _validate_planning_prefixes(
+    context: AuditConversationRuntime,
+    witnesses: list[dict],
+    *,
+    expected_focus: dict | None,
+    expected_model: str,
+    expected_invocation_id: str,
+) -> None:
+    agent = context.agent
+    if agent is None:
+        raise AuditConversationError("procedure planning prefix를 검증할 agent가 없습니다.")
+    if not isinstance(expected_invocation_id, str) or not expected_invocation_id:
+        raise AuditConversationError("procedure planning invocation witness가 없습니다.")
+    for witness in witnesses:
+        result = witness["result"]
+        if result.get("schema_version") != PLANNING_RESULT_SCHEMA:
+            continue
+        try:
+            if isinstance(agent, _AuditAggregateAgentRuntime):
+                _, observed, _, _ = _aggregate_observation_witness(
+                    agent,
+                    witness["base_prefix"],
+                    expected_limit=agent.limit,
+                    expected_focus=expected_focus,
+                )
+            else:
+                _, observed, _ = _audit_agent_observation_witness(
+                    agent,
+                    witness["base_prefix"],
+                    expected_focus=expected_focus,
+                )
+            canonical, scope = _planning_binding(
+                context,
+                witness["observation"]["input"],
+                observed=observed,
+                research=witness["research"],
+            )
+        except (
+            AuditAgentError,
+            AuditAggregateAgentError,
+            AuditConversationError,
+            ProcedurePlanningError,
+        ) as e:
+            raise AuditConversationError(
+                "procedure_planning 요청 시점의 typed 근거 권한을 재생할 수 없습니다."
+            ) from e
+        if (
+            result.get("scope") != scope
+            or result.get("binding", {}).get("bundle_sha256")
+            != hashlib.sha256(
+                json.dumps(
+                    context.bundle,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            or result.get("binding", {}).get("invocation_sha256")
+            != hashlib.sha256(expected_invocation_id.encode("utf-8")).hexdigest()
+            or result.get("request") != _planning_request_witness(canonical)
+            or result.get("basis_catalog") != {
+                "workbook": canonical["workbook_basis"],
+                "standards": canonical["standards_basis"],
+            }
+            or result.get("worker", {}).get("model") != expected_model
+        ):
+            raise AuditConversationError(
+                "procedure_planning 결과 binding이 요청 시점의 근거와 다릅니다."
+            )
 
 
 def _turn_state(
@@ -642,7 +999,8 @@ def _turn_state(
             base_observations,
             research_complete,
             replayed_full_tools,
-        ) = _base_observations_and_research(
+            planning_witnesses,
+        ) = _base_observations_and_supplements(
             context,
             observations,
             require_runtime_witness=True,
@@ -673,11 +1031,20 @@ def _turn_state(
         raise AuditConversationError(
             "conversation observations deterministic replay가 실패했습니다."
         ) from e
+    _validate_planning_prefixes(
+        context,
+        planning_witnesses,
+        expected_focus=expected_focus,
+        expected_model=agent.model,
+        expected_invocation_id=state.get("invocation_id"),
+    )
     if [
-        tool for tool in replayed_full_tools if tool != "standards_research"
+        tool
+        for tool in replayed_full_tools
+        if tool not in {"standards_research", "procedure_planning"}
     ] != replayed_tools:
         raise AuditConversationError(
-            "conversation research tool replay 순서가 deterministic witness와 다릅니다."
+            "conversation supplement tool replay 순서가 deterministic witness와 다릅니다."
         )
     replayed_tools = replayed_full_tools
     replayed_discovery = replayed_discovery and research_complete
@@ -686,6 +1053,8 @@ def _turn_state(
         (
             _research_request_key(item["input"])
             if item.get("tool") == "standards_research"
+            else _planning_request_key(item["input"])
+            if item.get("tool") == "procedure_planning"
             else json.dumps(item["input"], ensure_ascii=False, sort_keys=True)
         )
         for item in observations[replay_start:]
@@ -914,8 +1283,8 @@ def _response_from_ref(
                 raise AuditAggregateAgentError(
                     "aggregate observations witness가 없습니다."
                 )
-            base_observations, research_complete, full_tools = (
-                _base_observations_and_research(
+            base_observations, research_complete, full_tools, planning_witnesses = (
+                _base_observations_and_supplements(
                     context,
                     observations,
                     require_runtime_witness=False,
@@ -929,13 +1298,18 @@ def _response_from_ref(
                     expected_focus=expected_focus,
                 )
             )
-            research_turns = sum(
-                item.get("tool") == "standards_research" for item in observations
+            supplement_turns = sum(
+                item.get("tool") in {"standards_research", "procedure_planning"}
+                for item in observations
             )
             if (
-                execution["turns"] != turns + research_turns
+                execution["turns"] != turns + supplement_turns
                 or execution["tools_used"] != full_tools
-                or [tool for tool in full_tools if tool != "standards_research"]
+                or [
+                    tool
+                    for tool in full_tools
+                    if tool not in {"standards_research", "procedure_planning"}
+                ]
                 != tools_used
             ):
                 raise AuditAggregateAgentError(
@@ -953,8 +1327,28 @@ def _response_from_ref(
             raise AuditConversationError(
                 f"aggregate conversation response 검증 실패: {e}"
             ) from e
+        _validate_planning_prefixes(
+            context,
+            planning_witnesses,
+            expected_focus=expected_focus,
+            expected_model=validated["generator"]["model"],
+            expected_invocation_id=invocation_id,
+        )
     else:
         validated = _validated_response(response)
+        if observations is not None:
+            _, _, _, planning_witnesses = _base_observations_and_supplements(
+                context,
+                observations,
+                require_runtime_witness=False,
+            )
+            _validate_planning_prefixes(
+                context,
+                planning_witnesses,
+                expected_focus=expected_focus,
+                expected_model=validated["generator"]["model"],
+                expected_invocation_id=invocation_id,
+            )
     successful_research = bool(observations) and any(
         item.get("tool") == "standards_research"
         and isinstance(item.get("result"), dict)
@@ -976,6 +1370,31 @@ def _response_from_ref(
     elif successful_research:
         raise AuditConversationError(
             "성공한 standards_research response summary가 누락되었습니다."
+        )
+    successful_plan = bool(observations) and any(
+        item.get("tool") == "procedure_planning"
+        and isinstance(item.get("result"), dict)
+        and item["result"].get("schema_version") == PLANNING_RESULT_SCHEMA
+        for item in observations
+    )
+    plan_summary = validated.get("procedure_plan")
+    if plan_summary is not None:
+        if observations is None:
+            raise AuditConversationError(
+                "procedure_plan response에 observations witness가 없습니다."
+            )
+        try:
+            validate_procedure_plan_summary(
+                plan_summary,
+                observations=observations,
+            )
+        except ProcedurePlanningError as e:
+            raise AuditConversationError(
+                "procedure_plan response가 typed observation과 다릅니다."
+            ) from e
+    elif successful_plan:
+        raise AuditConversationError(
+            "성공한 procedure_planning response summary가 누락되었습니다."
         )
     return validated
 
@@ -1320,6 +1739,247 @@ def _research_binding(
     return canonical, expected_collection, scope
 
 
+def _available_research_records(observations: list[dict]) -> dict[str, dict]:
+    records: dict[str, dict] = {}
+    for observation in observations:
+        if observation.get("tool") != "standards_research":
+            continue
+        result = observation.get("result")
+        if (
+            isinstance(result, dict)
+            and result.get("schema_version") == RESEARCH_RESULT_SCHEMA
+        ):
+            try:
+                current = research_records(result)
+            except StandardsResearchError as e:
+                raise AuditConversationError(
+                    "procedure_planning의 research basis를 검증할 수 없습니다."
+                ) from e
+            overlap = set(records) & set(current)
+            if overlap:
+                raise AuditConversationError(
+                    "procedure_planning research ref가 중복되었습니다."
+                )
+            records.update(current)
+    return records
+
+
+def _planning_target(workbook_basis: list[dict]) -> tuple[dict, list[str]]:
+    by_kind = {
+        kind: [item for item in workbook_basis if item["record_kind"] == kind]
+        for kind in ("account", "risk", "assertion", "procedure")
+    }
+    if len(by_kind["risk"]) != 1 or len(by_kind["assertion"]) != 1:
+        raise AuditConversationError(
+            "procedure_planning은 정확히 하나의 관찰된 risk와 assertion이 필요합니다."
+        )
+    if len(by_kind["account"]) > 1:
+        raise AuditConversationError(
+            "procedure_planning account 근거는 최대 하나여야 합니다."
+        )
+    target = {
+        "account_ref": (
+            by_kind["account"][0]["basis_ref"] if by_kind["account"] else None
+        ),
+        "risk_ref": by_kind["risk"][0]["basis_ref"],
+        "assertion_ref": by_kind["assertion"][0]["basis_ref"],
+    }
+    return target, [item["basis_ref"] for item in by_kind["procedure"]]
+
+
+def _planning_binding(
+    context: AuditConversationRuntime,
+    request: dict,
+    *,
+    observed: dict[str, set[str]],
+    research: dict[str, dict],
+) -> tuple[dict, dict]:
+    agent = context.agent
+    if agent is None:
+        raise AuditConversationError(
+            "차단된 conversation은 procedure planning을 사용할 수 없습니다."
+        )
+    query = request.get("query")
+    limit = request.get("limit")
+    if not isinstance(query, str) or not query.strip() or len(query) > 500:
+        raise AuditConversationError("procedure_planning query는 1~500자여야 합니다.")
+    if (
+        not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 3 <= limit <= 5
+    ):
+        raise AuditConversationError("procedure_planning limit은 3~5여야 합니다.")
+    research_refs = request.get("research_refs")
+    if (
+        not isinstance(research_refs, list)
+        or len(research_refs) > 3
+        or len(research_refs) != len(set(research_refs))
+        or any(not isinstance(ref, str) or ref not in research for ref in research_refs)
+    ):
+        raise AuditConversationError(
+            "procedure_planning research_refs가 현재 turn의 선행 결과와 다릅니다."
+        )
+
+    workbook_basis: list[dict] = []
+    standards_basis: list[dict] = []
+    if isinstance(agent, _AuditAggregateAgentRuntime):
+        source_refs = request.get("source_refs")
+        scope_id = request.get("scope_id")
+        observed_refs = set().union(*observed.values())
+        if (
+            not isinstance(source_refs, list)
+            or not source_refs
+            or len(source_refs) > 20
+            or len(source_refs) != len(set(source_refs))
+            or any(
+                not isinstance(ref, str)
+                or not ref.startswith("source:")
+                or ref not in observed_refs
+                or ref not in agent.source_records
+                for ref in source_refs
+            )
+        ):
+            raise AuditConversationError(
+                "procedure_planning source_refs가 관찰된 exact source record가 아닙니다."
+            )
+        snapshot = agent.sources.get(scope_id) if isinstance(scope_id, str) else None
+        exposed_scope_ids = {
+            account.get("scope", {}).get("id")
+            for account in agent.bootstrap.get("accounts", [])
+            if isinstance(account, dict)
+        }
+        if snapshot is None or scope_id not in exposed_scope_ids:
+            raise AuditConversationError(
+                "procedure_planning scope_id는 aggregate bootstrap의 exact source여야 합니다."
+            )
+        if any(agent.source_records[ref].scope.id != scope_id for ref in source_refs):
+            raise AuditConversationError(
+                "procedure_planning은 여러 source sheet를 결합할 수 없습니다."
+            )
+        scope = snapshot.scope.identity()
+        retriever = snapshot.standards.get("retriever")
+        expected_collection = (
+            retriever.get("corpus_version") if isinstance(retriever, dict) else None
+        )
+        if not isinstance(expected_collection, str) or not expected_collection:
+            raise AuditConversationError(
+                "procedure_planning standards collection을 source scope에 고정할 수 없습니다."
+            )
+        for ref in source_refs:
+            source = agent.source_records[ref]
+            if source.kind == "standard_citation":
+                basis = _planning_prepared_standard_basis(
+                    scope=scope,
+                    source_ref=ref,
+                    citation=source.item,
+                    expected_collection=expected_collection,
+                )
+                if basis is None:
+                    raise AuditConversationError(
+                        "선택한 prepared standard citation은 원문 검증 메타데이터가 부족합니다."
+                    )
+                standards_basis.append(basis)
+            else:
+                workbook_basis.append(_planning_workbook_basis(
+                    scope=scope,
+                    source_kind=source.kind,
+                    source_ref=ref,
+                    item=source.item,
+                    aggregate_source=True,
+                ))
+    else:
+        fact_ids = request.get("fact_ids")
+        relation_ids = request.get("relation_ids")
+        citation_ids = request.get("standard_citation_ids")
+        selected_groups = (
+            ("fact", fact_ids, 20),
+            ("relation", relation_ids, 20),
+            ("standard_citation", citation_ids, 10),
+        )
+        for kind, values, maximum in selected_groups:
+            if (
+                not isinstance(values, list)
+                or len(values) > maximum
+                or len(values) != len(set(values))
+                or any(
+                    not isinstance(item_id, str)
+                    or item_id not in observed[kind]
+                    for item_id in values
+                )
+            ):
+                raise AuditConversationError(
+                    f"procedure_planning {kind} IDs가 현재 typed 관찰과 다릅니다."
+                )
+        scope = agent.scope.identity()
+        expected_collection = agent.bundle.get("standards_corpus_version")
+        if not isinstance(expected_collection, str) or not expected_collection:
+            raise AuditConversationError(
+                "procedure_planning standards collection을 bundle에 고정할 수 없습니다."
+            )
+        fact_map = {item["id"]: item for item in agent.facts.get("facts", [])}
+        relation_map = {
+            item["id"]: item for item in agent.facts.get("relations", [])
+        }
+        citation_map = {
+            item["id"]: item for item in agent.context.get("citations", [])
+        }
+        for item_id in fact_ids:
+            item = fact_map.get(item_id)
+            if item is None:
+                raise AuditConversationError("planning fact가 committed bundle에 없습니다.")
+            workbook_basis.append(_planning_workbook_basis(
+                scope=scope,
+                source_kind="fact",
+                source_ref=item_id,
+                item=item,
+            ))
+        for item_id in relation_ids:
+            item = relation_map.get(item_id)
+            if item is None:
+                raise AuditConversationError("planning relation이 committed bundle에 없습니다.")
+            workbook_basis.append(_planning_workbook_basis(
+                scope=scope,
+                source_kind="relation",
+                source_ref=item_id,
+                item=item,
+            ))
+        for item_id in citation_ids:
+            citation = citation_map.get(item_id)
+            if citation is None:
+                raise AuditConversationError(
+                    "planning standard citation이 committed bundle에 없습니다."
+                )
+            basis = _planning_prepared_standard_basis(
+                scope=scope,
+                source_ref=item_id,
+                citation=citation,
+                expected_collection=expected_collection,
+            )
+            if basis is None:
+                raise AuditConversationError(
+                    "선택한 prepared standard citation은 원문 검증 메타데이터가 부족합니다."
+                )
+            standards_basis.append(basis)
+
+    for ref in research_refs:
+        record = research[ref]
+        if record.get("scope") != scope or record.get("collection") != expected_collection:
+            raise AuditConversationError(
+                "procedure_planning research ref가 target scope/collection과 다릅니다."
+            )
+        standards_basis.append(_planning_research_standard_basis(record))
+    target, existing = _planning_target(workbook_basis)
+    canonical = {
+        "objective": " ".join(query.split()),
+        "target": target,
+        "workbook_basis": workbook_basis,
+        "standards_basis": standards_basis,
+        "existing_procedure_refs": existing,
+        "candidate_count": limit,
+    }
+    return canonical, scope
+
+
 def _run_research_request(
     context: AuditConversationRuntime,
     request: dict,
@@ -1331,7 +1991,7 @@ def _run_research_request(
     if context._research_request_count >= MAX_RESEARCH_REQUESTS:
         return _research_error("RESEARCH_LIMIT_EXCEEDED")
     context._research_request_count += 1
-    research_client: _ResearchModelClient | None = None
+    research_client: _CountedChildModelClient | None = None
     try:
         canonical, collection, scope = _research_binding(context, request)
         retriever = context.research_retriever(collection)
@@ -1343,7 +2003,7 @@ def _run_research_request(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        research_client = _ResearchModelClient(context.model_client())
+        research_client = _CountedChildModelClient(context.model_client())
         return run_standards_research(
             canonical,
             runtime=StandardsResearchRuntime(
@@ -1365,7 +2025,61 @@ def _run_research_request(
         return _research_error("UPSTREAM_UNAVAILABLE")
     finally:
         if research_client is not None:
-            context._research_model_call_count += research_client.calls
+            context._child_model_call_count += research_client.calls
+
+
+def _run_planning_request(
+    context: AuditConversationRuntime,
+    request: dict,
+    *,
+    invocation_id: str,
+    observed: dict[str, set[str]],
+    observations: list[dict],
+) -> dict:
+    if not context.procedure_planning_enabled:
+        return _planning_error("PLANNING_DISABLED")
+    if context._planning_request_count >= MAX_PLANNING_REQUESTS:
+        return _planning_error("PLANNING_LIMIT_EXCEEDED")
+    planning_client: _CountedChildModelClient | None = None
+    try:
+        canonical, scope = _planning_binding(
+            context,
+            request,
+            observed=observed,
+            research=_available_research_records(observations),
+        )
+        if not canonical["standards_basis"] and context.standards_research_enabled:
+            return _planning_error("RESEARCH_REQUIRED")
+        context._planning_request_count += 1
+        bundle_sha256 = hashlib.sha256(
+            json.dumps(
+                context.bundle,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        planning_client = _CountedChildModelClient(context.model_client())
+        return run_procedure_planning(
+            canonical,
+            runtime=ProcedurePlanningRuntime(
+                client=planning_client,
+                model=context.agent.model,
+                invocation_id=invocation_id,
+                bundle_sha256=bundle_sha256,
+                scope=scope,
+                eprint=context.eprint,
+            ),
+        )
+    except ProcedurePlanningError as e:
+        return _planning_error(e.code)
+    except AuditConversationError:
+        return _planning_error("INVALID_REQUEST")
+    except Exception:  # noqa: BLE001 - no provider detail may reach model/checkpoint
+        return _planning_error("UPSTREAM_UNAVAILABLE")
+    finally:
+        if planning_client is not None:
+            context._child_model_call_count += planning_client.calls
 
 
 def _decide(state: AuditConversationState, runtime) -> dict:
@@ -1376,10 +2090,10 @@ def _decide(state: AuditConversationState, runtime) -> dict:
     step = state.get("step")
     if not isinstance(step, int) or step < 0:
         raise AuditConversationError("checkpoint step이 유효하지 않습니다.")
-    if step + context._research_model_call_count >= agent.max_steps:
+    if step + context._child_model_call_count >= agent.max_steps:
         raise AuditConversationError(
             f"{agent.max_steps}회 안에 근거가 검증된 최종 답변을 만들지 못했습니다. "
-            "이 상한에는 child research 모델 호출도 포함됩니다."
+            "이 상한에는 child research/planning 모델 호출도 포함됩니다."
         )
     turn_state = _turn_state(context, state)
     try:
@@ -1389,6 +2103,7 @@ def _decide(state: AuditConversationState, runtime) -> dict:
                 turn_state,
                 client=context.model_client(),
                 step=step + 1,
+                child_model_calls=context._child_model_call_count,
                 capabilities=context.capabilities(),
                 eprint=context.eprint,
             )
@@ -1398,6 +2113,7 @@ def _decide(state: AuditConversationState, runtime) -> dict:
                 turn_state,
                 client=context.model_client(),
                 step=step + 1,
+                child_model_calls=context._child_model_call_count,
                 capabilities=context.capabilities(),
                 eprint=context.eprint,
             )
@@ -1420,12 +2136,12 @@ def _decide(state: AuditConversationState, runtime) -> dict:
     route = "finalize"
     if decision.get("action") == "tool":
         request = decision.get("tool")
-        route = (
-            "research"
-            if isinstance(request, dict)
-            and request.get("name") == "standards_research"
-            else "tool"
-        )
+        if isinstance(request, dict) and request.get("name") == "standards_research":
+            route = "research"
+        elif isinstance(request, dict) and request.get("name") == "procedure_planning":
+            route = "planning"
+        else:
+            route = "tool"
     return {
         "decision_ref": decision_ref,
         "step": step + 1,
@@ -1437,6 +2153,8 @@ def _decide(state: AuditConversationState, runtime) -> dict:
 def _after_decide(state: AuditConversationState) -> str:
     if state.get("route") == "research":
         return "execute_research"
+    if state.get("route") == "planning":
+        return "execute_plan"
     return "execute_tool" if state.get("route") == "tool" else "finalize"
 
 
@@ -1545,6 +2263,59 @@ def _execute_research(state: AuditConversationState, runtime) -> dict:
     }
 
 
+def _execute_plan(state: AuditConversationState, runtime) -> dict:
+    context = _context(runtime)
+    if context.agent is None:
+        raise AuditConversationError("planning node에 agent runtime이 없습니다.")
+    turn_state = _turn_state(context, state)
+    decision = _decision(context, state)
+    request = decision.get("tool")
+    if (
+        decision.get("action") != "tool"
+        or not isinstance(request, dict)
+        or request.get("name") != "procedure_planning"
+        or decision.get("final") is not None
+    ):
+        raise AuditConversationError("planning node decision 계약이 유효하지 않습니다.")
+    request_key = _planning_request_key(request)
+    invocation_id = state.get("invocation_id")
+    if not isinstance(invocation_id, str) or not invocation_id:
+        raise AuditConversationError("planning invocation_id가 유효하지 않습니다.")
+    if request_key in turn_state.seen_tool_requests:
+        result = _planning_error("PLANNING_LIMIT_EXCEEDED")
+    else:
+        turn_state.seen_tool_requests.add(request_key)
+        result = _run_planning_request(
+            context,
+            request,
+            invocation_id=invocation_id,
+            observed=turn_state.observed,
+            observations=turn_state.observations,
+        )
+    context._planning_results.setdefault(request_key, []).append(copy.deepcopy(result))
+    turn_state.observations.append({
+        "tool": "procedure_planning",
+        "input": copy.deepcopy(request),
+        "result": copy.deepcopy(result),
+    })
+    turn_state.used_tools.append("procedure_planning")
+    observations_ref = _write_invocation_payload(
+        context,
+        state,
+        kind="observations",
+        schema=OBSERVATIONS_SCHEMA,
+        value=turn_state.observations,
+    )
+    return {
+        "observations_ref": observations_ref,
+        "decision_ref": None,
+        "observed_ids": _observed_json(turn_state.observed),
+        "used_tools": turn_state.used_tools,
+        "discovery_complete": turn_state.discovery_complete,
+        "status": "deciding",
+    }
+
+
 def _finalize(state: AuditConversationState, runtime) -> dict:
     context = _context(runtime)
     agent = context.agent
@@ -1557,6 +2328,7 @@ def _finalize(state: AuditConversationState, runtime) -> dict:
     decision = _decision(context, state)
     final_plan = decision.get("final")
     research_refs: list[str] = []
+    plan_refs: list[str] = []
     if isinstance(final_plan, dict):
         raw_refs = final_plan.get("research_refs", [])
         if not isinstance(raw_refs, list) or any(
@@ -1564,17 +2336,24 @@ def _finalize(state: AuditConversationState, runtime) -> dict:
         ):
             raise AuditConversationError("final research_refs가 유효하지 않습니다.")
         research_refs = list(raw_refs)
+        raw_plan_refs = final_plan.get("plan_refs", [])
+        if not isinstance(raw_plan_refs, list) or any(
+            not isinstance(ref, str) for ref in raw_plan_refs
+        ):
+            raise AuditConversationError("final plan_refs가 유효하지 않습니다.")
+        plan_refs = list(raw_plan_refs)
     base_decision = copy.deepcopy(decision)
     base_final = base_decision.get("final")
     if isinstance(base_final, dict):
         base_final.pop("research_refs", None)
+        base_final.pop("plan_refs", None)
         if (
-            research_refs
+            (research_refs or plan_refs)
             and not base_final.get("selections")
             and base_final.get("abstained") is False
         ):
-            # Ephemeral research supplements the turn but is never promoted into the committed
-            # workpaper answer.  The inner audit response therefore remains explicitly abstained.
+            # Research/planning supplements never become committed workpaper evidence.  The inner
+            # evidence answer therefore remains explicitly abstained when they are the only output.
             base_final["abstained"] = True
             base_final["abstention_code"] = "insufficient_evidence"
     try:
@@ -1622,6 +2401,45 @@ def _finalize(state: AuditConversationState, runtime) -> dict:
             if supplement is not None:
                 response = copy.deepcopy(response)
                 response["standards_research"] = supplement
+                response = (
+                    _validated_aggregate_response(agent, response)
+                    if isinstance(agent, _AuditAggregateAgentRuntime)
+                    else _validated_response(response)
+                )
+    if response is not None:
+        try:
+            plan_supplement = procedure_plan_summary(
+                turn_state.observations,
+                selected_refs=plan_refs,
+            )
+            successful_plan = any(
+                item.get("tool") == "procedure_planning"
+                and isinstance(item.get("result"), dict)
+                and item["result"].get("schema_version") == PLANNING_RESULT_SCHEMA
+                for item in turn_state.observations
+            )
+            if successful_plan and plan_supplement is None:
+                raise ProcedurePlanningError(
+                    "CONTRACT_MISMATCH",
+                    "생성된 procedure plan ref가 final에서 선택되지 않았습니다.",
+                )
+        except ProcedurePlanningError:
+            turn_state.observations.append({
+                "tool": "answer_validation",
+                "result": {
+                    "error": {
+                        "code": "UNGROUNDED_PLANNING_FINAL",
+                        "message": (
+                            "선택한 procedure plan ref가 현재 turn의 typed 결과와 다릅니다."
+                        ),
+                    }
+                },
+            })
+            response = None
+        else:
+            if plan_supplement is not None:
+                response = copy.deepcopy(response)
+                response["procedure_plan"] = plan_supplement
                 response = (
                     _validated_aggregate_response(agent, response)
                     if isinstance(agent, _AuditAggregateAgentRuntime)
@@ -1891,6 +2709,10 @@ def build_audit_conversation_graph(checkpointer):
         "execute_research",
         _checkpoint_safe_node("execute_research", _execute_research),
     )
+    builder.add_node(
+        "execute_plan",
+        _checkpoint_safe_node("execute_plan", _execute_plan),
+    )
     builder.add_node("finalize", _checkpoint_safe_node("finalize", _finalize))
     builder.add_node(
         "store_blocked",
@@ -1913,11 +2735,13 @@ def build_audit_conversation_graph(checkpointer):
         {
             "execute_tool": "execute_tool",
             "execute_research": "execute_research",
+            "execute_plan": "execute_plan",
             "finalize": "finalize",
         },
     )
     builder.add_edge("execute_tool", "decide")
     builder.add_edge("execute_research", "decide")
+    builder.add_edge("execute_plan", "decide")
     builder.add_conditional_edges(
         "finalize",
         _after_finalize,
@@ -2138,6 +2962,7 @@ def run_audit_conversation_turn(
     client=None,
     client_factory=None,
     standards_research: bool = False,
+    procedure_planning: bool = False,
     standards_retriever=None,
     standards_retriever_factory=None,
     checkpointer=None,
@@ -2152,6 +2977,8 @@ def run_audit_conversation_turn(
         raise AuditConversationError("sheet와 aggregate_id는 함께 사용할 수 없습니다.")
     if not isinstance(standards_research, bool):
         raise AuditConversationError("standards_research는 boolean이어야 합니다.")
+    if not isinstance(procedure_planning, bool):
+        raise AuditConversationError("procedure_planning은 boolean이어야 합니다.")
     try:
         if aggregate_id is not None:
             agent = _prepare_audit_aggregate_agent_runtime(
@@ -2210,6 +3037,7 @@ def run_audit_conversation_turn(
         client=client,
         client_factory=client_factory,
         standards_research_enabled=standards_research,
+        procedure_planning_enabled=procedure_planning,
         standards_retriever=standards_retriever,
         standards_retriever_factory=standards_retriever_factory,
         eprint=eprint,
@@ -2281,9 +3109,159 @@ def render_audit_conversation_markdown(result: dict) -> str:
             research_markdown += "\n"
         else:
             research_markdown += "관련성이 충분한 검증 문단을 선택하지 못했습니다.\n\n"
+    plan = response.get("procedure_plan")
+    plan_markdown = ""
+    if isinstance(plan, dict):
+        plan_markdown = (
+            "## 추천 감사 test 후보 (미검토 제안)\n\n"
+            "> 이 후보들은 `proposed / unreviewed / not_evidenced` 상태이며, 조서에 "
+            "수행됐다는 사실이나 필수 절차를 의미하지 않습니다. 표본 수·금액 기준·선정 "
+            "간격은 감사인이 별도로 설계해야 합니다.\n\n"
+        )
+
+        def clean(value: object) -> str:
+            escaped = html.escape(" ".join(str(value or "").split()), quote=False)
+            return re.sub(r"([\\`*\[\]])", r"\\\1", escaped)
+
+        candidates = plan.get("candidates", [])
+        if plan.get("status") == "no_plan" or not candidates:
+            plan_markdown += "현재 근거만으로 안전한 후보 묶음을 만들지 못했습니다.\n\n"
+        else:
+            request = plan.get("request", {})
+            catalog = plan.get("basis_catalog", {})
+            workbook_catalog = {
+                item.get("basis_ref"): item
+                for item in catalog.get("workbook", [])
+                if isinstance(item, dict) and isinstance(item.get("basis_ref"), str)
+            } if isinstance(catalog, dict) else {}
+            standards_catalog = {
+                item.get("basis_ref"): item
+                for item in catalog.get("standards", [])
+                if isinstance(item, dict) and isinstance(item.get("basis_ref"), str)
+            } if isinstance(catalog, dict) else {}
+            if isinstance(request, dict):
+                plan_markdown += f"- 계획 목적: {clean(request.get('objective'))}\n"
+                target = request.get("target", {})
+                if isinstance(target, dict):
+                    target_labels = (
+                        ("계정", "account_ref"),
+                        ("위험", "risk_ref"),
+                        ("주장", "assertion_ref"),
+                    )
+                    rendered_targets = []
+                    for label, key in target_labels:
+                        record = workbook_catalog.get(target.get(key))
+                        if isinstance(record, dict):
+                            rendered_targets.append(
+                                f"{label}: {clean(record.get('text'))}"
+                            )
+                    if rendered_targets:
+                        plan_markdown += "- 대상: " + "; ".join(rendered_targets) + "\n"
+                plan_markdown += "\n"
+            role_labels = {
+                "primary": "Primary",
+                "alternative": "Alternative",
+                "complementary": "Complementary",
+            }
+
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                role = role_labels.get(
+                    str(candidate.get("portfolio_role")),
+                    str(candidate.get("portfolio_role", "")),
+                )
+                plan_markdown += (
+                    f"### {candidate.get('rank')}. {clean(candidate.get('title'))} "
+                    f"— {clean(role)}\n\n"
+                    f"- 목적: {clean(candidate.get('objective'))}\n"
+                    f"- 접근법: {clean(candidate.get('approach'))}\n"
+                )
+                methods = candidate.get("evidence_methods", [])
+                if isinstance(methods, list) and methods:
+                    plan_markdown += "- 증거 획득 방법: " + "; ".join(
+                        clean(item) for item in methods
+                    ) + "\n"
+                steps = candidate.get("steps", [])
+                if isinstance(steps, list) and steps:
+                    plan_markdown += "- 수행 단계:\n" + "".join(
+                        f"  {index}. {clean(item)}\n"
+                        for index, item in enumerate(steps, start=1)
+                    )
+                applicability = candidate.get("applicability", {})
+                if isinstance(applicability, dict):
+                    conditions = applicability.get("conditions_for_use", [])
+                    disqualifiers = applicability.get("disqualifiers", [])
+                    assessment = clean(applicability.get("assessment"))
+                    plan_markdown += f"- 적용 판단: {assessment}\n"
+                    if conditions:
+                        plan_markdown += "- 적용 조건: " + "; ".join(
+                            clean(item) for item in conditions
+                        ) + "\n"
+                    if disqualifiers:
+                        plan_markdown += "- 적용 배제/제약 조건: " + "; ".join(
+                            clean(item) for item in disqualifiers
+                        ) + "\n"
+                for label, key in (
+                    ("필요 증거", "evidence_to_obtain"),
+                    ("장점", "strengths"),
+                    ("한계", "limitations"),
+                    ("전제조건", "prerequisites"),
+                    ("후속 확인사항", "open_questions"),
+                ):
+                    values = candidate.get(key, [])
+                    if isinstance(values, list) and values:
+                        plan_markdown += f"- {label}: " + "; ".join(
+                            clean(item) for item in values
+                        ) + "\n"
+                standard_records = [
+                    standards_catalog.get(ref)
+                    for ref in candidate.get("standards_basis_refs", [])
+                    if isinstance(ref, str)
+                ]
+                rendered_standards = [
+                    f"{clean(item.get('cid'))} ({clean(item.get('standard_title'))})"
+                    for item in standard_records
+                    if isinstance(item, dict)
+                ]
+                if rendered_standards:
+                    plan_markdown += "- 기준서 근거: " + "; ".join(
+                        rendered_standards
+                    ) + "\n"
+                plan_markdown += "\n"
+            combinations = plan.get("recommended_combinations", [])
+            if isinstance(combinations, list) and combinations:
+                plan_markdown += "### 권장 테스트 묶음\n\n"
+                for combination in combinations:
+                    if not isinstance(combination, dict):
+                        continue
+                    keys = ", ".join(
+                        clean(item) for item in combination.get("candidate_keys", [])
+                    )
+                    plan_markdown += (
+                        f"- `{clean(combination.get('combination_key'))}` ({keys}): "
+                        f"{clean(combination.get('rationale'))}\n"
+                    )
+                    tradeoffs = combination.get("tradeoffs", [])
+                    if isinstance(tradeoffs, list) and tradeoffs:
+                        plan_markdown += "  - 조합 trade-off: " + "; ".join(
+                            clean(item) for item in tradeoffs
+                        ) + "\n"
+                plan_markdown += "\n"
+        for label, key in (("가정", "assumptions"), ("확인할 사항", "open_questions")):
+            values = plan.get(key, [])
+            if isinstance(values, list) and values:
+                plan_markdown += f"### {label}\n\n"
+                plan_markdown += "".join(f"- {clean(item)}\n" for item in values)
+                plan_markdown += "\n"
     if response.get("schema_version") == "audit_main_agent_response.v1":
-        return header + research_markdown + render_audit_aggregate_agent_markdown(response)
-    return header + research_markdown + render_audit_agent_markdown(
+        return (
+            header
+            + research_markdown
+            + plan_markdown
+            + render_audit_aggregate_agent_markdown(response)
+        )
+    return header + research_markdown + plan_markdown + render_audit_agent_markdown(
         _validated_response(response)
     )
 

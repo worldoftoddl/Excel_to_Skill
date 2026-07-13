@@ -54,6 +54,7 @@
     },
     "toolRequest": {
       "type": "object",
+      "description": "For standards_research set query, kind=\"audit_standard\" for KSA or kind=\"accounting_standard\" for K-IFRS, item_id=null, and limit=1..5. For procedure_planning set query, kind=null, item_id=null, limit=3..5, and include fact_ids, relation_ids, standard_citation_ids, and research_refs. IDs merely linked inside a brief statement are not observed records: trace or search/get first so each selected fact, relation, and citation appears as its own typed result. Copy refs only from typed observations; do not write proposed procedure prose here.",
       "additionalProperties": false,
       "required": ["name", "query", "kind", "item_id", "limit"],
       "properties": {
@@ -63,7 +64,8 @@
             "audit_get",
             "assertion_procedures",
             "trace",
-            "standards_research"
+            "standards_research",
+            "procedure_planning"
           ]
         },
         "query": {
@@ -93,8 +95,59 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 200
+        },
+        "fact_ids": {
+          "type": "array",
+          "description": "Observed workbook fact IDs for one planning target; include exactly one risk and one assertion.",
+          "items": {"$ref": "#/definitions/identifier"},
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "relation_ids": {
+          "type": "array",
+          "description": "Observed relation IDs that ground the planning target or existing procedures.",
+          "items": {"$ref": "#/definitions/identifier"},
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "standard_citation_ids": {
+          "type": "array",
+          "description": "Observed prepared standards citation IDs relevant to the planning target.",
+          "items": {"$ref": "#/definitions/identifier"},
+          "maxItems": 10,
+          "uniqueItems": true
+        },
+        "research_refs": {
+          "type": "array",
+          "description": "Current-turn ephemeral research refs relevant to planning; otherwise an empty array.",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^research:[0-9a-f]{64}$"
+          }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"name": {"const": "procedure_planning"}},
+            "required": ["name"]
+          },
+          "then": {
+            "required": [
+              "fact_ids", "relation_ids", "standard_citation_ids", "research_refs"
+            ],
+            "properties": {
+              "query": {"type": "string", "minLength": 1, "maxLength": 500},
+              "kind": {"type": "null"},
+              "item_id": {"type": "null"},
+              "limit": {"type": "integer", "minimum": 3, "maximum": 5},
+              "fact_ids": {"minItems": 1}
+            }
+          }
+        }
+      ]
     },
     "selection": {
       "type": "object",
@@ -148,6 +201,15 @@
           "items": {
             "type": "string",
             "pattern": "^research:[0-9a-f]{64}$"
+          }
+        },
+        "plan_refs": {
+          "type": "array",
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^procedure-plan:[0-9a-f]{64}$"
           }
         }
       }

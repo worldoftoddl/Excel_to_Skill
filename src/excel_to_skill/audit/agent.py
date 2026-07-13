@@ -125,14 +125,16 @@ def _provider_turn_schema(
     strict_schema: dict,
     *,
     include_research: bool = False,
+    include_planning: bool = False,
 ) -> dict:
     """Flatten nullable unions for Anthropic while retaining strict local validation."""
     schema = copy.deepcopy(strict_schema)
     schema.pop("allOf", None)
     definitions = schema["definitions"]
     identifier = definitions["identifier"]
+    tool = definitions["toolRequest"]
+    tool.pop("allOf", None)
     if not include_research:
-        tool = definitions["toolRequest"]
         tool["properties"]["name"]["enum"] = [
             value for value in tool["properties"]["name"]["enum"]
             if value != "standards_research"
@@ -142,6 +144,16 @@ def _provider_turn_schema(
             if value not in {"audit_standard", "accounting_standard"}
         ]
         definitions["finalResponse"]["properties"].pop("research_refs", None)
+    if not include_planning:
+        tool["properties"]["name"]["enum"] = [
+            value for value in tool["properties"]["name"]["enum"]
+            if value != "procedure_planning"
+        ]
+        for name in (
+            "fact_ids", "relation_ids", "standard_citation_ids", "research_refs",
+        ):
+            tool["properties"].pop(name, None)
+        definitions["finalResponse"]["properties"].pop("plan_refs", None)
     definitions["toolRequest"]["properties"]["item_id"] = {
         "type": ["string", "null"],
         "pattern": identifier["pattern"],
@@ -1304,10 +1316,15 @@ def _request_audit_agent_model_turn(
     *,
     client,
     step: int,
+    child_model_calls: int = 0,
     capabilities: dict | None = None,
     eprint=None,
 ) -> dict:
     """Request and locally validate one provider action."""
+    remaining_model_calls = max(
+        0,
+        runtime.max_steps - step - child_model_calls,
+    )
     payload = {
         "request": {
             "mode": "answer" if runtime.question else "briefing",
@@ -1319,7 +1336,8 @@ def _request_audit_agent_model_turn(
             "readiness": runtime.briefing.get("readiness"),
         },
         "turn": step,
-        "remaining_turns": runtime.max_steps - step,
+        "remaining_turns": remaining_model_calls,
+        "remaining_model_calls": remaining_model_calls,
         "observations": state.observations,
     }
     if capabilities is not None:
@@ -1327,14 +1345,25 @@ def _request_audit_agent_model_turn(
     if runtime.analysis_scope is not None:
         payload["analysis_scope"] = runtime.analysis_scope
     try:
+        research_enabled = (
+            isinstance(capabilities, dict)
+            and capabilities.get("standards_research", {}).get("enabled") is True
+        )
+        planning_enabled = (
+            isinstance(capabilities, dict)
+            and capabilities.get("procedure_planning", {}).get("enabled") is True
+        )
         return call_json(
             client,
             system=runtime.prompt,
             user=_serialize_model_payload(payload),
             schema=(
-                _provider_turn_schema(runtime.schema, include_research=True)
-                if isinstance(capabilities, dict)
-                and capabilities.get("standards_research", {}).get("enabled") is True
+                _provider_turn_schema(
+                    runtime.schema,
+                    include_research=research_enabled,
+                    include_planning=planning_enabled,
+                )
+                if research_enabled or planning_enabled
                 else runtime.provider_schema
             ),
             validation_schema=runtime.schema,

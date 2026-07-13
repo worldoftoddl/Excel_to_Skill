@@ -20,7 +20,392 @@
     "coverage": {"$ref": "#/definitions/coverage"},
     "notices": {"type": "array", "items": {"$ref": "#/definitions/notice"}},
     "package_limitations": {"type": "array", "items": {"type": "object"}},
-    "standards_research": {"$ref": "#/definitions/standardsResearch"}
+    "standards_research": {"$ref": "#/definitions/standardsResearch"},
+    "procedure_plan": {"$ref": "#/$defs/procedurePlan"}
+  },
+  "$defs": {
+    "procedurePlanScope": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind"],
+          "properties": {"kind": {"const": "workbook"}}
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "sheet", "id"],
+          "properties": {
+            "kind": {"const": "sheet"},
+            "sheet": {"type": "string", "minLength": 1},
+            "id": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      ]
+    },
+    "procedurePlanWorkbookRef": {
+      "type": "string", "pattern": "^workbook-basis:[0-9a-f]{64}$"
+    },
+    "procedurePlanStandardRef": {
+      "type": "string", "pattern": "^standard-basis:[0-9a-f]{64}$"
+    },
+    "procedurePlanTarget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["account_ref", "risk_ref", "assertion_ref"],
+      "properties": {
+        "account_ref": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/procedurePlanWorkbookRef"}
+          ]
+        },
+        "risk_ref": {"$ref": "#/$defs/procedurePlanWorkbookRef"},
+        "assertion_ref": {"$ref": "#/$defs/procedurePlanWorkbookRef"}
+      }
+    },
+    "procedurePlanRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "objective", "target", "candidate_count", "existing_procedure_refs",
+        "workbook_basis_refs", "standards_basis_refs"
+      ],
+      "properties": {
+        "objective": {"type": "string", "minLength": 1, "maxLength": 500},
+        "target": {"$ref": "#/$defs/procedurePlanTarget"},
+        "candidate_count": {"type": "integer", "minimum": 3, "maximum": 5},
+        "existing_procedure_refs": {
+          "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/procedurePlanWorkbookRef"}
+        },
+        "workbook_basis_refs": {
+          "type": "array", "minItems": 2, "maxItems": 24, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/procedurePlanWorkbookRef"}
+        },
+        "standards_basis_refs": {
+          "type": "array", "maxItems": 8, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/procedurePlanStandardRef"}
+        }
+      }
+    },
+    "procedurePlanWorker": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "name", "version", "model", "prompt_sha256", "called", "abstained",
+        "abstention_code"
+      ],
+      "properties": {
+        "name": {"const": "excel_to_skill.audit.procedure_planning"},
+        "version": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "prompt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "called": {"type": "boolean"},
+        "abstained": {"type": "boolean"},
+        "abstention_code": {
+          "enum": [
+            "insufficient_basis", "ambiguous_target", "planning_not_supported", null
+          ]
+        }
+      }
+    },
+    "procedurePlanBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "invocation_sha256", "bundle_sha256", "worker_output_sha256",
+        "worker_witness_sha256"
+      ],
+      "properties": {
+        "invocation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "worker_output_sha256": {
+          "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"
+        },
+        "worker_witness_sha256": {
+          "type": "string", "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "procedurePlanWorkbookBasis": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "typed_kind", "basis_ref", "scope", "source_kind", "record_kind",
+        "source_ref", "text", "status", "confidence"
+      ],
+      "properties": {
+        "typed_kind": {"const": "planning_workbook_basis"},
+        "basis_ref": {"$ref": "#/$defs/procedurePlanWorkbookRef"},
+        "scope": {"$ref": "#/$defs/procedurePlanScope"},
+        "source_kind": {"enum": ["fact", "relation", "statement", "source_record"]},
+        "record_kind": {
+          "enum": ["account", "risk", "assertion", "procedure", "gap", "relation", "other"]
+        },
+        "source_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "text": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "status": {"type": ["string", "null"], "minLength": 1},
+        "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+      }
+    },
+    "procedurePlanStandardBasis": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "typed_kind", "basis_ref", "scope", "origin", "source_ref", "collection",
+        "cid", "domain", "framework", "source_type", "standard_no",
+        "standard_title", "para_no", "para_type", "section_path", "text",
+        "text_sha256", "effective_date_verified", "verified_by"
+      ],
+      "properties": {
+        "typed_kind": {"const": "planning_standard_basis"},
+        "basis_ref": {"$ref": "#/$defs/procedurePlanStandardRef"},
+        "scope": {"$ref": "#/$defs/procedurePlanScope"},
+        "origin": {"enum": ["prepared_citation", "ephemeral_research"]},
+        "source_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "collection": {"type": "string", "minLength": 1},
+        "cid": {"type": "string", "pattern": "^(KSA|KIFRS)::[^:]+::.+$"},
+        "domain": {"enum": ["audit", "accounting"]},
+        "framework": {"enum": ["KSA", "K-IFRS"]},
+        "source_type": {"enum": ["감사기준", "회계기준"]},
+        "standard_no": {"type": "string", "minLength": 1},
+        "standard_title": {"type": "string", "minLength": 1},
+        "para_no": {"type": "string", "minLength": 1},
+        "para_type": {"enum": ["정의", "참조", "부록", "요구사항", "적용지침", "본문"]},
+        "section_path": {"type": ["string", "null"]},
+        "text": {"type": "string", "minLength": 1, "maxLength": 40000},
+        "text_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "effective_date_verified": {"type": "boolean"},
+        "verified_by": {"const": "standards_get_paragraph"}
+      }
+    },
+    "procedurePlanBasisCatalog": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workbook", "standards"],
+      "properties": {
+        "workbook": {
+          "type": "array", "minItems": 2, "maxItems": 24,
+          "items": {"$ref": "#/$defs/procedurePlanWorkbookBasis"}
+        },
+        "standards": {
+          "type": "array", "maxItems": 8,
+          "items": {"$ref": "#/$defs/procedurePlanStandardBasis"}
+        }
+      }
+    },
+    "procedurePlanApplicability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["assessment", "conditions_for_use", "disqualifiers"],
+      "properties": {
+        "assessment": {
+          "enum": ["applicable_on_current_evidence", "conditional", "undetermined"]
+        },
+        "conditions_for_use": {
+          "type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 400}
+        },
+        "disqualifiers": {
+          "type": "array", "maxItems": 3, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 400}
+        }
+      }
+    },
+    "procedurePlanQuantitativeDesign": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sample_size", "amount_threshold", "selection_interval"],
+      "properties": {
+        "sample_size": {"const": "TBD"},
+        "amount_threshold": {"const": "TBD"},
+        "selection_interval": {"const": "TBD"}
+      }
+    },
+    "procedurePlanCandidate": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "typed_kind", "proposed_test_ref", "proposal_status", "review_status",
+        "execution_evidence_status", "candidate_key", "rank", "portfolio_role",
+        "title", "objective", "approach", "evidence_methods", "steps",
+        "applicability", "evidence_to_obtain", "strengths", "limitations",
+        "prerequisites", "open_questions", "relationship_to_documented",
+        "documented_procedure_basis_refs", "standard_support", "workbook_basis_refs",
+        "standards_basis_refs", "quantitative_design"
+      ],
+      "properties": {
+        "typed_kind": {"const": "proposed_test"},
+        "proposed_test_ref": {
+          "type": "string", "pattern": "^proposed-test:[0-9a-f]{64}$"
+        },
+        "proposal_status": {"const": "proposed"},
+        "review_status": {"const": "unreviewed"},
+        "execution_evidence_status": {"const": "not_evidenced"},
+        "candidate_key": {"type": "string", "pattern": "^T[1-5]$"},
+        "rank": {"type": "integer", "minimum": 1, "maximum": 5},
+        "portfolio_role": {"enum": ["primary", "alternative", "complementary"]},
+        "title": {"type": "string", "minLength": 1, "maxLength": 160},
+        "objective": {"type": "string", "minLength": 1, "maxLength": 400},
+        "approach": {
+          "enum": [
+            "test_of_controls", "substantive_analytical_procedure", "test_of_details",
+            "dual_purpose", "other"
+          ]
+        },
+        "evidence_methods": {
+          "type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true,
+          "items": {
+            "enum": [
+              "inspection", "observation", "external_confirmation", "recalculation",
+              "reperformance", "analytical_procedure", "inquiry", "other"
+            ]
+          }
+        },
+        "steps": {
+          "type": "array", "minItems": 1, "maxItems": 4,
+          "items": {"type": "string", "minLength": 1, "maxLength": 400}
+        },
+        "applicability": {"$ref": "#/$defs/procedurePlanApplicability"},
+        "evidence_to_obtain": {
+          "type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 400}
+        },
+        "strengths": {
+          "type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 400}
+        },
+        "limitations": {
+          "type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 400}
+        },
+        "prerequisites": {
+          "type": "array", "maxItems": 3, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 400}
+        },
+        "open_questions": {
+          "type": "array", "maxItems": 3, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 400}
+        },
+        "relationship_to_documented": {
+          "enum": [
+            "new_option", "alternative_to_documented", "complements_documented",
+            "overlaps_documented", "unknown"
+          ]
+        },
+        "documented_procedure_basis_refs": {
+          "type": "array", "maxItems": 8, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/procedurePlanWorkbookRef"}
+        },
+        "standard_support": {"enum": ["explicit_procedure", "principle_based", "none"]},
+        "workbook_basis_refs": {
+          "type": "array", "minItems": 2, "maxItems": 24, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/procedurePlanWorkbookRef"}
+        },
+        "standards_basis_refs": {
+          "type": "array", "maxItems": 8, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/procedurePlanStandardRef"}
+        },
+        "quantitative_design": {"$ref": "#/$defs/procedurePlanQuantitativeDesign"}
+      }
+    },
+    "procedurePlanCombination": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "combination_ref", "combination_key", "candidate_keys", "rationale",
+        "tradeoffs", "proposed_test_refs"
+      ],
+      "properties": {
+        "combination_ref": {
+          "type": "string", "pattern": "^test-combination:[0-9a-f]{64}$"
+        },
+        "combination_key": {"type": "string", "pattern": "^C[1-3]$"},
+        "candidate_keys": {
+          "type": "array", "minItems": 2, "maxItems": 3, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^T[1-5]$"}
+        },
+        "rationale": {"type": "string", "minLength": 1, "maxLength": 400},
+        "tradeoffs": {
+          "type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 400}
+        },
+        "proposed_test_refs": {
+          "type": "array", "minItems": 2, "maxItems": 3, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^proposed-test:[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "procedurePlan": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schema_version", "status", "plan_ref", "proposal_status", "review_status",
+        "execution_evidence_status", "candidate_set_status", "turn_scoped",
+        "outside_prepared_bundle", "scope", "binding", "request", "worker", "basis_catalog",
+        "candidates", "recommended_combinations", "assumptions", "open_questions",
+        "limitations"
+      ],
+      "properties": {
+        "schema_version": {"const": "audit_procedure_plan.v1"},
+        "status": {"enum": ["completed", "no_plan"]},
+        "plan_ref": {"type": "string", "pattern": "^procedure-plan:[0-9a-f]{64}$"},
+        "proposal_status": {"const": "proposed"},
+        "review_status": {"const": "unreviewed"},
+        "execution_evidence_status": {"const": "not_evidenced"},
+        "candidate_set_status": {"const": "non_exhaustive"},
+        "turn_scoped": {"const": true},
+        "outside_prepared_bundle": {"const": true},
+        "scope": {"$ref": "#/$defs/procedurePlanScope"},
+        "binding": {"$ref": "#/$defs/procedurePlanBinding"},
+        "request": {"$ref": "#/$defs/procedurePlanRequest"},
+        "worker": {"$ref": "#/$defs/procedurePlanWorker"},
+        "basis_catalog": {"$ref": "#/$defs/procedurePlanBasisCatalog"},
+        "candidates": {
+          "type": "array", "maxItems": 5,
+          "items": {"$ref": "#/$defs/procedurePlanCandidate"}
+        },
+        "recommended_combinations": {
+          "type": "array", "maxItems": 3,
+          "items": {"$ref": "#/$defs/procedurePlanCombination"}
+        },
+        "assumptions": {
+          "type": "array", "maxItems": 4, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 400}
+        },
+        "open_questions": {
+          "type": "array", "maxItems": 6, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 400}
+        },
+        "limitations": {
+          "type": "array", "minItems": 4, "maxItems": 4,
+          "items": {"type": "string", "minLength": 1}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "completed"}}},
+          "then": {
+            "properties": {
+              "candidates": {"minItems": 3},
+              "recommended_combinations": {"minItems": 1},
+              "worker": {
+                "properties": {
+                  "called": {"const": true}, "abstained": {"const": false},
+                  "abstention_code": {"type": "null"}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"status": {"const": "no_plan"}}},
+          "then": {
+            "properties": {
+              "candidates": {"maxItems": 0},
+              "recommended_combinations": {"maxItems": 0},
+              "worker": {
+                "properties": {
+                  "abstained": {"const": true},
+                  "abstention_code": {
+                    "enum": [
+                      "insufficient_basis", "ambiguous_target", "planning_not_supported"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
   },
   "definitions": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
