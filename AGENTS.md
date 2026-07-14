@@ -319,12 +319,12 @@ this automated E2E.
 
 ## Current Audit-RAG Status
 
-The audit-RAG path is now the local `main` direction. The last committed checkpoint is `9a899f8`;
-it makes complex workbook briefings use observed statements directly while application code
+The audit-RAG path is now the local `main` direction. The last committed checkpoint is `947a60e`;
+it makes workbook and aggregate briefings use observed statements directly while application code
 hydrates their committed linked evidence, avoiding redundant trace calls without weakening ID
-authority. The current working slice adds aggregate-agent parity, structurally final-only last
-model calls, and child research/planning budgets that preserve one main-agent final call. The
-former local main harness series remains only at
+authority. It also adds aggregate-agent parity, structurally final-only last model calls, and child
+research/planning budgets that preserve one main-agent final call. The former local main harness
+series remains only at
 `archive/harness-v1.20`. The current checkpoint includes region-wide
 fact extraction, remote auditpaper standards MCP retrieval, collection-pinned CID verification,
 persistent paragraph caching, agent-ready brief generation, commit-gated readers, canonical
@@ -379,10 +379,33 @@ inspection/publication suite is `85 passed`, the focused workbook-edit/publicati
 source-distribution builds pass.
 
 The adopted product default is provider-neutral web upload, not Microsoft 365. A normal user
-uploads XLSX to server-owned object storage, runs prepare/aggregate, chats over the committed
-bundle, reviews edit proposals, and receives a revised workbook copy. OneDrive/SharePoint plus the
-Office.js executor is an optional direct-edit integration for Microsoft 365 and coauthoring users;
-it is not a prerequisite for the web UI or the core audit briefing product.
+uploads XLSX to the server-owned local content store, runs prepare/aggregate, chats over the
+committed bundle, reviews edit proposals, and receives a revised workbook copy. OneDrive/SharePoint
+plus the Office.js executor is an optional direct-edit integration for Microsoft 365 and coauthoring
+users; it is not a prerequisite for the web UI or the core audit briefing product.
+
+The product is now explicitly scoped for one operator, not a multi-tenant or horizontally scaled
+service. Keep the existing principal, repository, idempotency, lease, and lock interfaces, but bind
+them to one fixed local principal and their SQLite/local-filesystem implementations. Do not build
+Redis/SQS-style distributed queues, multiple workers or autoscaling, distributed lock/fencing or
+work stealing, S3/MinIO storage, tenant isolation, per-user quotas/rate limits, Kubernetes, a
+production host-session registry, or complex distributed orphan reconciliation. A single local
+background worker remains optional only if browser-independent long-running processing becomes
+necessary; the current synchronous runner is the reference path. Retain XLSX validation,
+immutable source digests, commit-last publication, restart-safe SQLite job state, bundle-bound
+conversation, idempotency, evidence tracing, edit approval, and local backup/cleanup.
+
+The selected UI direction is a final-product `web-ui/` built with Next.js and assistant-ui Custom
+Runtime; Gradio and LangGraph Agent Chat UI are not intermediate product steps. Use
+`ExternalStoreRuntime` only behind a server-backed message projection (for example TanStack Query),
+not as a direct view of LangGraph checkpoints. The refs-only graph state remains private. The
+current backend still exposes upload, processing, and conversation as separate FastAPI apps, and
+conversation HTTP currently supports turn submit plus receipt fetch rather than a public thread
+history. Therefore the next vertical slice is: one same-origin single-user FastAPI host, a sanitized
+thread-history/read-model endpoint, then Next.js upload -> scope selection -> processing status ->
+bundle chat -> cell/CID evidence drawer. Start without token/state streaming; add
+AssistantTransport or SSE only if measured UX needs justify it. Procedure-plan comparison and edit
+approval cards follow after that core flow. None of this UI/host/read-model slice is implemented yet.
 
 The latest raw-upload smoke used the non-client 36-sheet 2025 K-IFRS account-procedure template.
 Its 352,145 bytes passed strict XLSX validation, immutable upload, SQLite restart, idempotent
@@ -426,15 +449,19 @@ The current orchestration plan is intentionally staged:
    sheet/range, two request attempts per turn, bounded deterministic analytics, opaque
    digest-bound raw source only when the host supplies it, refs-only checkpoints, and no
    later-turn authority.
-5. Stabilize the web service boundary around opaque bundle snapshots and repository interfaces.
+5. Stabilize the single-user web product around opaque bundle snapshots and repository interfaces.
    The current product slice now covers bounded XLSX upload, principal-scoped immutable raw
    snapshots, deterministic convert/verify and scope planning, exact scope selection,
    prepare/aggregate jobs, immutable package storage, commit-gated `BundleSnapshot` publication,
    and bundle-bound conversation entry. Keep the current SQLite/local-store runner as the reference
-   synchronous implementation. The next production slice is an async queue/worker adapter,
-   distributed workspace/lock and object store, terminal retry/reconciliation, and retention/GC for
-   abandoned staging and orphan immutable objects. Later provider-neutral slices may add server-copy
-   edit proposal/approval and a downloadable revised workbook.
+   synchronous implementation. The next product slice is a fixed-principal same-origin FastAPI host,
+   sanitized thread-history projection, and `web-ui/` Next.js application using assistant-ui
+   `ExternalStoreRuntime` over a server-backed store. Implement upload, scope selection, processing
+   status, bundle chat, and the cell/CID evidence drawer first. Add at most one local background
+   worker later if needed; do not build distributed queue/lock/object-storage infrastructure for the
+   single-user product. Use manual or simple bounded local retention for abandoned staging and
+   orphan objects. Later provider-neutral slices may add server-copy edit proposal/approval and a
+   downloadable revised workbook.
 6. Maintain the separate approved-edit backend and Office.js executor: propose bounded edits,
    preview an exact live-cell diff, bind human approval, atomically claim a workbook-level fence,
    apply only the immutable manifest, and verify the executor's reread without promoting it to
