@@ -1,0 +1,21 @@
+{
+  "actual_after_sha256": "ff9ef5c9198962b768e9a1056b9b27d9b40415a2af52a6009b7b65780a947f3b",
+  "application_status": "applied_session_verified",
+  "asset_persisted": false,
+  "before_matches": true,
+  "expected_after_matches": true,
+  "limitations": [
+    "proposal-local formula cycle만 검사하며 대상 밖 dependent cell 변화는 검증하지 않습니다.",
+    "executor가 보고한 Office readback이며 backend가 workbook 계산을 독립 재수행하지 않습니다.",
+    "session 검증은 asset 저장 또는 새 prepared bundle 생성을 의미하지 않습니다."
+  ],
+  "manifest_ref": "edit-manifest:f87791d28bffaa81341173e8c96462f23d06fe82c4ba127e3423a9c6105ae1b6",
+  "new_snapshot_required": true,
+  "outside_prepared_bundle": true,
+  "review_status": "unreviewed",
+  "schema_version": "audit_workbook_edit_verification.v1",
+  "status": "session_verified",
+  "verification_ref": "edit-verification:37edcc9190aed4859cf9d7367ce7d00ff5e31acf44a06f5c8c3d3026aa495ffd",
+  "verification_sha256": "37edcc9190aed4859cf9d7367ce7d00ff5e31acf44a06f5c8c3d3026aa495ffd",
+  "witness_ref": "edit-witness:3156444c4f15ba11c76d0b0287c2f7def8a369d7117075b6b08ad9f75aa847b1"
+}

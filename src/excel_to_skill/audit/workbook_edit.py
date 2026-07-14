@@ -233,6 +233,11 @@ def _json_equal(left: object, right: object) -> bool:
 def _literal_value(value: object) -> object:
     clean = _scalar(value, field="set_value.value", allow_null=False)
     if isinstance(clean, str):
+        if clean == "":
+            raise _fail(
+                "INVALID_INPUT",
+                "빈 문자열 literal은 Office.js에서 blank cell과 구분해 재현할 수 없습니다.",
+            )
         candidate = clean.lstrip(" \t\r\n")
         if candidate.startswith(("=", "+", "-", "@")):
             raise _fail(
@@ -1515,6 +1520,7 @@ def verify_execution_witness(
         }
         formula_results_observed = all(
             actual_by_cell[cell]["calculated_type"] in {"string", "number", "boolean"}
+            and actual_by_cell[cell]["calculated_value"] not in {None, ""}
             for cell in formula_targets
         )
         actual_authored = [

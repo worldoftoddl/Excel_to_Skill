@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Audit workbook editor">
+  <rect width="64" height="64" rx="12" fill="#176b34"/>
+  <path fill="#fff" d="M15 13h27l8 8v30H15zm5 6v26h24V25h-8V19z"/>
+  <path fill="#bce8c7" d="m25 34 5 5 10-12 4 4-14 16-9-9z"/>
+</svg>

@@ -193,6 +193,12 @@ def test_set_value_blocks_literal_formula_injection(value):
     assert _proposal([{"cell": "A1", "kind": "set_value", "value": "'=1+1"}])
 
 
+def test_set_value_rejects_empty_string_that_office_cannot_distinguish_from_blank():
+    with pytest.raises(WorkbookEditError) as caught:
+        _proposal([{"cell": "A1", "kind": "set_value", "value": ""}])
+    assert caught.value.code == "INVALID_INPUT"
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -617,7 +623,11 @@ def test_set_formula_applied_witness_requires_recalculation_and_nonempty_nonerro
         )
     assert no_recalculation.value.code == "CONTRACT_MISMATCH"
 
-    for calculated_value, calculated_type in ((None, "empty"), ("#REF!", "error")):
+    for calculated_value, calculated_type in (
+        (None, "empty"),
+        ("", "string"),
+        ("#REF!", "error"),
+    ):
         unreadable = _actual_after(preview)
         unreadable[1]["calculated_value"] = calculated_value
         unreadable[1]["calculated_type"] = calculated_type

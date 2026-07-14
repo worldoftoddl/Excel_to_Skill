@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self' https://appsforoffice.microsoft.com; connect-src 'self' https:; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self'; img-src 'self' data:;" />
+    <title>Audit Workbook Editor</title>
+    <link rel="stylesheet" href="/src/taskpane.css" />
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="/assets/icon.svg" alt="" width="36" height="36" />
+        <div>
+          <h1>감사조서 편집</h1>
+          <p>승인된 셀 변경만 현재 Excel 세션에 적용합니다.</p>
+        </div>
+      </header>
+
+      <section class="card" aria-labelledby="connection-title">
+        <h2 id="connection-title">연결</h2>
+        <label>
+          API 기준 URL
+          <input id="api-base-url" type="url" autocomplete="off" disabled />
+        </label>
+        <small id="api-mode" class="boundary"></small>
+        <label>
+          Workflow ID
+          <input id="workflow-id" type="text" maxlength="128" autocomplete="off" disabled />
+        </label>
+        <button id="load-workflow" type="button" disabled>Workflow 불러오기</button>
+      </section>
+
+      <section class="card" aria-labelledby="review-title">
+        <h2 id="review-title">정확한 변경 검토</h2>
+        <div id="workflow-summary" class="summary">Workflow를 먼저 불러오세요.</div>
+        <pre id="diff-preview" aria-live="polite"></pre>
+        <div class="actions">
+          <button id="create-preview" type="button" disabled>현재 셀 재조회</button>
+          <label class="confirm">
+            <input id="approval-confirmed" type="checkbox" disabled />
+            위 변경 범위를 확인했습니다.
+          </label>
+          <button id="approve-preview" type="button" disabled>이 Preview 승인</button>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="execute-title">
+        <h2 id="execute-title">적용 및 검증</h2>
+        <label class="confirm">
+          <input id="save-after-verify" type="checkbox" checked />
+          검증 성공 뒤 현재 workbook 저장
+        </label>
+        <button id="execute-edit" type="button" class="primary" disabled>승인된 변경 적용</button>
+        <p class="boundary">새 source snapshot 발행은 인증된 host callback이 연결된 경우에만 수행됩니다.</p>
+      </section>
+
+      <section class="card status-card" aria-labelledby="status-title">
+        <h2 id="status-title">상태</h2>
+        <output id="status" aria-live="polite">Office 초기화 대기 중…</output>
+      </section>
+    </main>
+    <script type="module" src="/src/taskpane.ts"></script>
+  </body>
+</html>

@@ -46,6 +46,11 @@ JSON contracts live in `schemas/`; model instructions live in `prompts/`. Automa
 output is under `tests/snapshots/`, and numbered notebooks provide supplemental manual checks.
 Keep generated packages in ignored `converted/` or `tests/_output/` directories.
 
+`office-addin/` is an independent TypeScript/Vite project for the ExcelApi 1.13 task pane. Its
+executor consumes only the approved backend manifest, rereads live cells before and after the
+write, and submits a bounded witness. The add-in's host callback is an integration contract; cloud
+asset reacquisition, snapshot publication, and authenticated bootstrap are not implemented here.
+
 ## Audit-RAG Contracts
 
 The prepared audit package intentionally separates three trust domains:
@@ -145,6 +150,9 @@ Preserve these invariants when changing the audit path:
   and return an exact after-state witness within the server-issued execution deadline. A stale
   precondition is a no-write terminal result; `verification_failed` and `indeterminate` quarantine
   the live workbook until host reconciliation.
+- Add-in mutation idempotency is scoped to one 128-bit client action and remains stable only for
+  that action's internal network retries. Never use a workflow-global deterministic key that can
+  replay a completed claim/start capability into another task pane or executor.
 - The host must register a stable `workbook_instance_id` shared by coauthoring sessions and
   distinct across workbook copies. Revision, sheet, and worksheet remain manifest preconditions,
   not ways to reset workbook-level fencing. Completed command replay and stored workflow reads do
@@ -152,8 +160,13 @@ Preserve these invariants when changing the audit path:
 - `session_verified` means a host-authenticated executor's bounded readback is internally
   consistent with the approved authored state. It does not mean the backend independently ran
   Excel, validated every formula result or dependent cell, persisted the file, or prepared a new
-  audit bundle. The actual Office.js Add-in, asset save flow, durable repository, distributed lock,
-  and failed/indeterminate reconciliation remain host/product integrations.
+  audit bundle. The Office.js executor exists under `office-addin/`, but authenticated session
+  bootstrap, cloud asset save/new-snapshot publication, durable repository, distributed lock, and
+  failed/indeterminate reconciliation remain host/product integrations.
+- Do not treat a snapshot callback as atomic publication. The current backend releases the active
+  execution at `session_verified`; a production host must retain a workbook-level publication
+  lease through asset reacquisition or enforce a base snapshot/revision CAS before linking the new
+  asset to that execution.
 
 ## Build, Test, and Development Commands
 
@@ -180,6 +193,9 @@ uv run --extra graph excel-to-skill audit-chat <prepared-package> --question "�
 uv run --extra graph --extra prepare excel-to-skill audit-chat <prepared-package> --question "기준을 확인하고 test들을 비교해줘" --standards-research --procedure-planning
 uv run --extra graph --extra inspection excel-to-skill audit-chat <prepared-package> --question "C시트 J열을 분석해줘" --workbook-inspection
 uv build                        # build wheel and source distributions with Hatchling
+cd office-addin && npm ci       # install the isolated Office.js development dependencies
+npm test && npm run build       # run Vitest and compile/build the task pane
+npm run validate:manifest      # validate the localhost development manifest
 ```
 
 Run `verify <package> --source <workbook>` when changing deterministic conversion behavior or
@@ -212,11 +228,15 @@ Workbook-edit tests must additionally cover exact preview digest binding, no-op/
 formula rejection, approval expiry and single use, stale-before-write, post-start retry denial,
 monotonic workbook-level fencing, cross-session/cross-sheet isolation, indeterminate quarantine,
 idempotent replay after session loss, repository fault atomicity, and executor reread verification.
+Add-in tests use fake Excel/HTTP ports and a Python-generated shared contract fixture; they must
+cover misrouted workflow responses, claim/start/verify uncertainty, request/response and witness
+bounds, coauthor drift rereads, formula recalculation, read-only workbooks, save/publication loss,
+and host callback validation. A real Excel Desktop/Web sideload smoke remains a manual host check.
 
 ## Current Audit-RAG Status
 
-The audit-RAG path is now the local `main` direction. The last committed checkpoint is `42b1309`;
-the current working slice adds the approved workbook-edit backend described below. The former local
+The audit-RAG path is now the local `main` direction. The Office.js executor and host integration
+contract described below were implemented on top of backend checkpoint `e574e19`. The former local
 main harness series remains only at `archive/harness-v1.20`. The current checkpoint includes region-wide
 fact extraction, remote auditpaper standards MCP retrieval, collection-pinned CID verification,
 persistent paragraph caching, agent-ready brief generation, commit-gated readers, canonical
@@ -247,10 +267,14 @@ lock are prototype implementations; durable multi-worker storage remains a host 
 The approved-edit backend now adds content-addressed proposals and exact live-cell previews,
 digest-bound human approval, one-use execution claims, workbook-level monotonic fencing, bounded
 formula and safe-number policy, execution leases, reread verification, failure quarantine, strict
-request/response schemas, and bounded FastAPI endpoints. It is not yet an actual Office.js Add-in
-or an asset-save pipeline. The current complete suite is `752 passed, 1 skipped`; the 132 focused
-edit tests, compileall, 17 edit-schema validations, lock consistency, diff/credential-pattern
-checks, and wheel/source-distribution builds pass.
+request/response schemas, and bounded FastAPI endpoints. The Add-in slice now provides
+an ExcelApi 1.13 task pane, exact cell and safety-constraint rereads, immutable manifest execution,
+worksheet recalculation, bounded witness submission, optional current-workbook save, and a validated
+host callback response contract. It still relies on host-owned session bootstrap, asset reacquisition,
+snapshot publication/resume, and reconciliation. The current complete Python suite is
+`754 passed, 1 skipped`; the focused Python workbook-edit suite is `134 passed`, the Add-in suite is
+`74 passed`, and TypeScript/Vite, compileall, wheel, and source-distribution builds pass. The
+Microsoft manifest validator still reports the unchanged localhost manifest as valid.
 
 The current orchestration plan is intentionally staged:
 
@@ -276,11 +300,12 @@ The current orchestration plan is intentionally staged:
    Replace the in-memory receipt/idempotency/turn-lock implementations with durable DB/object
    storage and a distributed claim/lock plus pending-claim reconciliation before multi-worker
    production use. Keep the current API synchronous until a job/queue product contract is chosen.
-6. Maintain the separate approved-edit backend contract: propose bounded edits, preview an exact
-   live-cell diff, bind human approval, atomically claim a workbook-level fence, and verify the
-   executor's reread without promoting it to prepared evidence. The next product slice is the
-   actual Excel Add-in executor and asset save/new-snapshot flow; never grant arbitrary JavaScript
-   or Python execution through the conversation model.
+6. Maintain the separate approved-edit backend and Office.js executor: propose bounded edits,
+   preview an exact live-cell diff, bind human approval, atomically claim a workbook-level fence,
+   apply only the immutable manifest, and verify the executor's reread without promoting it to
+   prepared evidence. The next product slice is authenticated host session bootstrap plus durable,
+   idempotent asset save/new-snapshot publication and reconciliation; never grant arbitrary
+   JavaScript or Python execution through the conversation model.
 7. Move `prepare` orchestration to a graph only after replacing temporary staging with durable,
    crash-resumable staging that preserves commit-last publication and rollback guarantees.
 8. Keep the current single-call aggregate generation path outside the graph until it needs

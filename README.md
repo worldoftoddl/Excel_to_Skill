@@ -459,7 +459,30 @@ GET  /v1/audit/workbook-edit-workflows/{workflow}
 여기서 `session_verified`는 host가 인증한 executor의 bounded readback이 승인한 authored state와
 일치한다는 뜻이다. backend가 Excel 계산 엔진을 독립 실행했다는 뜻이 아니며, dependent cell 전체,
 conditional formatting 표시, 파일 저장, 새 source snapshot 또는 prepared audit bundle 생성을
-보증하지 않는다. 실제 Office.js Add-in과 asset save/new-snapshot 연결은 다음 제품 slice다.
+보증하지 않는다.
+
+실제 실행기는 [`office-addin/`](office-addin/)에 있다. ExcelApi 1.13을 확인한 뒤 exact preview와
+승인을 거쳐 claim/fence/challenge를 받고, write-start 왕복 뒤 셀을 다시 읽어 immutable manifest만
+적용한다. formula edit은 대상 worksheet를 재계산하고, after-state witness가 backend artifact 상한을
+넘으면 `actual_after`를 버린 `indeterminate` witness로 축약해 terminal quarantine를 요청한다.
+개발 확인은 다음과 같이 수행한다.
+
+```bash
+cd office-addin
+npm ci
+npm test
+npm run build
+npm run validate:manifest
+npm run dev
+```
+
+현재 manifest와 자유 입력 API URL은 localhost 개발 harness용이다. 운영 host는 인증된 session/
+workflow/API origin을 고정하고, 저장된 cloud workbook을 다시 취득해 hash·영속화한 뒤 새 snapshot을
+등록해야 한다. Add-in에는 그 host callback의 타입과 응답 검증만 있으며 asset 저장 API,
+publication-only 재개, durable repository/분산 lock, 실패 조정은 아직 제품 통합 범위다. 자세한
+실행 및 sideload 경계는 [`office-addin/README.md`](office-addin/README.md)를 따른다.
+특히 verify와 cloud asset 재취득 사이에는 workbook-level publication lease 또는 base revision
+CAS가 필요하며, callback 반환 필드 검증만으로 snapshot 연결이 원자적이 되지는 않는다.
 
 prepare의 Python 오케스트레이션 진입점은
 `excel_to_skill.audit.prepare.prepare_package(...)`이다. 모델 client와

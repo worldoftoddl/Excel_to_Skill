@@ -9,3 +9,8 @@ tests/_output/
 _seed_local/
 .auditpaper_standards_cache/
 .audit_runtime/
+node_modules/
+office-addin/dist/
+office-addin/.dev-certs/
+office-addin/public/assets/icon-32.png
+office-addin/public/assets/icon-80.png

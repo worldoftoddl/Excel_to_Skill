@@ -1,0 +1,24 @@
+{
+  "name": "audit-workbook-office-addin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "node scripts/generate-icons.mjs",
+    "dev": "vite --host 0.0.0.0",
+    "prebuild": "node scripts/generate-icons.mjs",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prevalidate:manifest": "node scripts/generate-icons.mjs",
+    "validate:manifest": "office-addin-manifest validate manifest.xml"
+  },
+  "devDependencies": {
+    "@types/office-js": "1.0.599",
+    "office-addin-dev-certs": "2.0.10",
+    "office-addin-manifest": "2.1.6",
+    "typescript": "7.0.2",
+    "vite": "8.1.4",
+    "vitest": "4.1.10"
+  }
+}
