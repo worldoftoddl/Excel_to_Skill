@@ -491,6 +491,7 @@ def _prepare_audit_aggregate_agent_runtime(
     limit: int = DEFAULT_LIMIT,
     max_steps: int = DEFAULT_MAX_STEPS,
     prompt_name: str = AGGREGATE_AGENT_PROMPT,
+    package_lock_target: Path | str | None = None,
 ) -> _AuditAggregateAgentRuntime:
     path = Path(pkg)
     lim = _bounded_int(limit, name="limit", default=DEFAULT_LIMIT, maximum=MAX_LIMIT)
@@ -500,8 +501,9 @@ def _prepare_audit_aggregate_agent_runtime(
     user_question = _question(question)
     if user_question is None:
         raise AuditAggregateAgentError("aggregate conversation question이 비어 있습니다.")
+    lock_target = Path(package_lock_target) if package_lock_target is not None else path
     try:
-        with cache.package_lock(path):
+        with cache.package_lock(lock_target):
             paths, document, commit = load_audit_aggregate(path, aggregate_id)
             sources = _load_source_snapshots(path, document)
     except (AuditAggregateError, AuditAggregateStaleError) as e:

@@ -32,6 +32,10 @@ The audit-RAG implementation lives in `src/excel_to_skill/audit/`:
 - `xlsx_safety.py` validates a bounded XLSX/OOXML archive before it can become a server asset;
   `workbook_asset_service.py`, `workbook_asset_sqlite.py`, and `workbook_asset_web.py` keep
   principal-scoped raw workbook snapshots behind opaque upload, status, and download contracts.
+- `processing.py` connects one immutable raw snapshot to deterministic conversion, exact scope
+  selection, bounded prepare/aggregate execution, commit gating, immutable package publication,
+  and a server-bound conversation snapshot. `processing_sqlite.py`, `processing_store.py`, and
+  `processing_web.py` provide the durable job catalog, local content store, and strict HTTP edge.
 - `service.py` maps opaque web bundle/thread commands to server-owned snapshots with
   principal-scoped runtime IDs and atomic idempotency claims; `web.py` exposes a lazy FastAPI
   POST/GET adapter without accepting package paths, providers, or model settings from clients.
@@ -202,6 +206,27 @@ Preserve these invariants when changing the audit path:
   in one repository transaction. Public status and download responses may expose the exact digest
   and size but never the private asset ref or a server path. Only a later convert/prepare commit
   gate may publish a `bundle_id` for audit readers.
+- Processing must finish raw digest binding, deterministic convert, source-backed full verify,
+  and bounded scope planning before constructing a model client or standards retriever. Semantic
+  work starts only from an exact `scope_plan_sha256` plus canonical mode/scope selection; public
+  plans expose the 64-sheet execution limit instead of advertising an unusable all-sheets mode.
+- A processing job pins raw snapshot, source digest, stable processing profile, plan digest, and
+  selection digest. `retrieved_at` is observation time, not profile identity. Long external calls
+  must keep the lease alive; one local job staging root is additionally guarded by a process lock,
+  and an expired worker may never publish after a higher fence has won.
+- Prepare every selected sheet through its normal commit gate and aggregate only the exact selected
+  sheet list. Never use an implicit all-committed-sheets selector. Any selected-scope, aggregate,
+  final verify, or package-store failure leaves the job terminal without a public bundle row.
+  Terminal retry is not implemented in v1, so `failure.retryable` remains false.
+- Publish a fully read-back immutable package before atomically inserting the principal-scoped
+  bundle row and changing the job to `published`. A store object left before a losing DB publish is
+  only an orphan candidate. Every bundle resolve rechecks the immutable manifest and exact
+  workbook/sheet/aggregate commit gate before conversation entry.
+- Processing-published conversation snapshots carry a server-owned scope binding. Omitted client
+  scope is filled from that binding and any sheet/aggregate pivot fails before the model. All
+  conversation locks for immutable objects live under the private runtime, never beside or inside
+  the stored package. Raw-source retention may disable optional inspection but must not invalidate
+  an already committed package or idempotent completed processing receipt.
 
 ## Build, Test, and Development Commands
 
@@ -275,12 +300,19 @@ Raw-workbook upload tests must cover authentication before body consumption, exa
 finite body-read admission, strict ZIP/OOXML framing, malformed and polyglot rejection,
 idempotent replay and conflict, expired-claim fencing, SQLite restart/concurrency, principal
 isolation, immutable-store readback, atomic head publication, and download digest verification.
+Processing tests must cover model-free planning, workbook/all/selected modes, plan-digest and
+selection binding, exact aggregate inputs, one-sheet chat roots, partial-scope failure without
+bundle publication, SQLite restart/replay/principal isolation, BEGIN-IMMEDIATE lease timing,
+slow-call heartbeat and stale-fence rejection, immutable store corruption, final-gate failure,
+server-bound conversation scope, raw-source expiry degradation, closed HTTP schemas, and a real
+stubbed upload-to-bundle-to-`audit-chat` ASGI/service path. Never use live Anthropic or MCP calls in
+this automated E2E.
 
 ## Current Audit-RAG Status
 
-The audit-RAG path is now the local `main` direction. The last committed checkpoint is `cce3954`;
-the current working slice adds the provider-neutral raw-workbook upload and snapshot catalog in
-front of the existing prepare/chat path. The former local
+The audit-RAG path is now the local `main` direction. The last committed checkpoint is `9e405a7`;
+the current working slice connects the provider-neutral raw-workbook catalog through a durable
+processing job to exact-scope prepare/aggregate and bundle-bound conversation. The former local
 main harness series remains only at `archive/harness-v1.20`. The current checkpoint includes region-wide
 fact extraction, remote auditpaper standards MCP retrieval, collection-pinned CID verification,
 persistent paragraph caching, agent-ready brief generation, commit-gated readers, canonical
@@ -321,8 +353,14 @@ the saved XLSX before immutable storage, and atomically advances the source head
 SQLite repository. SQLite preserves workflow/idempotency/fence/claim/head state across restarts and
 reclaims expired command/publication workers with new fencing tokens. Real host authentication,
 durable session registries, cloud-provider reacquisition, production object storage, quarantine
-reconciliation, and raw-snapshot-to-prepared-bundle publication remain product integrations. The
-current complete Python suite is `863 passed, 1 skipped`; the focused raw-upload plus adjacent
+reconciliation remain product integrations. The processing slice now adds model-free deterministic
+planning, exact plan-bound workbook/all/selected execution, SQLite lease/fence recovery with
+slow-call heartbeat, immutable prepared-package storage, atomic bundle catalog publication, strict
+FastAPI job/status endpoints, and server-enforced conversation scope. A selected-scope or final
+gate failure publishes no bundle; raw retention can remove optional inspection without invalidating
+an already committed chat snapshot. The current complete Python suite is `911 passed, 1 skipped`;
+the focused processing/store/SQLite/web and upload-to-chat E2E suite is `48 passed`, the service/conversation regression
+suite is `59 passed`, and the focused raw-upload plus adjacent
 inspection/publication suite is `85 passed`, the focused workbook-edit/publication suite is
 `190 passed`, the Add-in suite is `87 passed`, and compileall, TypeScript/Vite, wheel, and
 source-distribution builds pass.
@@ -359,15 +397,14 @@ The current orchestration plan is intentionally staged:
    digest-bound raw source only when the host supplies it, refs-only checkpoints, and no
    later-turn authority.
 5. Stabilize the web service boundary around opaque bundle snapshots and repository interfaces.
-   The current product slice adds bounded XLSX upload, a principal-scoped raw snapshot catalog,
-   exact status/download, and a digest-bound source provider without prematurely creating a
-   prepared bundle. The next slice connects that raw snapshot to deterministic convert, scope
-   planning, prepare/aggregate jobs, and commit-gated `BundleSnapshot` publication. Later slices
-   add server-copy edit proposal/approval and a downloadable revised workbook. Replace the
-   in-memory receipt/idempotency/turn-lock
-   implementations with durable DB/object storage and a distributed claim/lock plus pending-claim
-   reconciliation before multi-worker production use. Keep the current API synchronous until a
-   job/queue product contract is chosen.
+   The current product slice now covers bounded XLSX upload, principal-scoped immutable raw
+   snapshots, deterministic convert/verify and scope planning, exact scope selection,
+   prepare/aggregate jobs, immutable package storage, commit-gated `BundleSnapshot` publication,
+   and bundle-bound conversation entry. Keep the current SQLite/local-store runner as the reference
+   synchronous implementation. The next production slice is an async queue/worker adapter,
+   distributed workspace/lock and object store, terminal retry/reconciliation, and retention/GC for
+   abandoned staging and orphan immutable objects. Later provider-neutral slices may add server-copy
+   edit proposal/approval and a downloadable revised workbook.
 6. Maintain the separate approved-edit backend and Office.js executor: propose bounded edits,
    preview an exact live-cell diff, bind human approval, atomically claim a workbook-level fence,
    apply only the immutable manifest, and verify the executor's reread without promoting it to

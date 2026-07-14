@@ -1,0 +1,410 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_processing_job.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "job_id",
+    "workbook_id",
+    "raw_snapshot_id",
+    "workbook_sha256",
+    "status",
+    "scope_plan_sha256",
+    "scope_plan",
+    "selection",
+    "progress",
+    "result",
+    "failure",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_processing_job.v1"},
+    "job_id": {
+      "type": "string",
+      "pattern": "^process-[0-9a-f]{48}$"
+    },
+    "workbook_id": {
+      "type": "string",
+      "pattern": "^workbook-[0-9a-f]{48}$"
+    },
+    "raw_snapshot_id": {"$ref": "#/$defs/sha256"},
+    "workbook_sha256": {"$ref": "#/$defs/sha256"},
+    "status": {
+      "enum": [
+        "planning",
+        "awaiting_scope",
+        "preparing",
+        "aggregating",
+        "published",
+        "failed"
+      ]
+    },
+    "scope_plan_sha256": {
+      "oneOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "scope_plan": {
+      "oneOf": [
+        {"$ref": "#/$defs/scope_plan"},
+        {"type": "null"}
+      ]
+    },
+    "selection": {
+      "oneOf": [
+        {"$ref": "#/$defs/selection"},
+        {"type": "null"}
+      ]
+    },
+    "progress": {"$ref": "#/$defs/progress"},
+    "result": {
+      "oneOf": [
+        {"$ref": "#/$defs/result"},
+        {"type": "null"}
+      ]
+    },
+    "failure": {
+      "oneOf": [
+        {"$ref": "#/$defs/failure"},
+        {"type": "null"}
+      ]
+    },
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "updated_at": {"$ref": "#/$defs/timestamp"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "planning"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "scope_plan_sha256": {"type": "null"},
+          "scope_plan": {"type": "null"},
+          "selection": {"type": "null"},
+          "result": {"type": "null"},
+          "failure": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "awaiting_scope"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "scope_plan_sha256": {"$ref": "#/$defs/sha256"},
+          "scope_plan": {"$ref": "#/$defs/scope_plan"},
+          "selection": {"type": "null"},
+          "result": {"type": "null"},
+          "failure": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"status": {"enum": ["preparing", "aggregating"]}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "scope_plan_sha256": {"$ref": "#/$defs/sha256"},
+          "scope_plan": {"$ref": "#/$defs/scope_plan"},
+          "selection": {"$ref": "#/$defs/selection"},
+          "result": {"type": "null"},
+          "failure": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "published"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "scope_plan_sha256": {"$ref": "#/$defs/sha256"},
+          "scope_plan": {"$ref": "#/$defs/scope_plan"},
+          "selection": {"$ref": "#/$defs/selection"},
+          "result": {"$ref": "#/$defs/result"},
+          "failure": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "failed"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "result": {"type": "null"},
+          "failure": {"$ref": "#/$defs/failure"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+    },
+    "sheet_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 31,
+      "pattern": "^[^\\[\\]:*?/\\\\]{1,31}$"
+    },
+    "estimated_calls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["facts", "brief", "total_llm"],
+      "properties": {
+        "facts": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "brief": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "total_llm": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+      }
+    },
+    "scope_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "workbook", "all_sheets", "sheets"],
+      "properties": {
+        "schema_version": {"const": "audit_scope_plan.v1"},
+        "workbook": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope",
+            "sheet_count",
+            "cell_count",
+            "region_count",
+            "analyzable",
+            "estimated_calls"
+          ],
+          "properties": {
+            "scope": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": {"kind": {"const": "workbook"}}
+            },
+            "sheet_count": {"type": "integer", "minimum": 0, "maximum": 512},
+            "cell_count": {"type": "integer", "minimum": 0},
+            "region_count": {"type": "integer", "minimum": 0},
+            "analyzable": {"type": "boolean"},
+            "estimated_calls": {"$ref": "#/$defs/estimated_calls"}
+          }
+        },
+        "all_sheets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sheet_count",
+            "total_sheet_count",
+            "skipped_empty_sheet_count",
+            "cell_count",
+            "region_count",
+            "selectable",
+            "selection_limit",
+            "estimated_calls"
+          ],
+          "properties": {
+            "sheet_count": {"type": "integer", "minimum": 0, "maximum": 512},
+            "total_sheet_count": {"type": "integer", "minimum": 0, "maximum": 512},
+            "skipped_empty_sheet_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 512
+            },
+            "cell_count": {"type": "integer", "minimum": 0},
+            "region_count": {"type": "integer", "minimum": 0},
+            "selectable": {"type": "boolean"},
+            "selection_limit": {"const": 64},
+            "estimated_calls": {"$ref": "#/$defs/estimated_calls"}
+          }
+        },
+        "sheets": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "dimensions",
+              "cell_count",
+              "region_count",
+              "analyzable",
+              "dependency_sheets",
+              "estimated_calls"
+            ],
+            "properties": {
+              "scope": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "sheet", "id"],
+                "properties": {
+                  "kind": {"const": "sheet"},
+                  "sheet": {"$ref": "#/$defs/sheet_name"},
+                  "id": {"$ref": "#/$defs/sha256"}
+                }
+              },
+              "dimensions": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 23,
+                    "pattern": "^[A-Z]{1,3}[1-9][0-9]{0,6}(:[A-Z]{1,3}[1-9][0-9]{0,6})?$"
+                  },
+                  {"type": "null"}
+                ]
+              },
+              "cell_count": {"type": "integer", "minimum": 0},
+              "region_count": {"type": "integer", "minimum": 0},
+              "analyzable": {"type": "boolean"},
+              "dependency_sheets": {
+                "type": "array",
+                "maxItems": 512,
+                "items": {"$ref": "#/$defs/sheet_name"}
+              },
+              "estimated_calls": {"$ref": "#/$defs/estimated_calls"}
+            }
+          }
+        }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "mode", "scope_plan_sha256", "scopes"],
+      "properties": {
+        "schema_version": {"const": "audit_processing_scope_selection.v1"},
+        "mode": {"enum": ["workbook", "all_sheets", "selected_sheets"]},
+        "scope_plan_sha256": {"$ref": "#/$defs/sha256"},
+        "scopes": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["scope_id", "sheet"],
+            "properties": {
+              "scope_id": {"$ref": "#/$defs/sha256"},
+              "sheet": {"$ref": "#/$defs/sheet_name"}
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"mode": {"const": "workbook"}},
+            "required": ["mode"]
+          },
+          "then": {"properties": {"scopes": {"maxItems": 0}}},
+          "else": {"properties": {"scopes": {"minItems": 1}}}
+        }
+      ]
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_scopes", "completed_scopes", "current_scope_ids"],
+      "properties": {
+        "total_scopes": {"type": "integer", "minimum": 0, "maximum": 64},
+        "completed_scopes": {"type": "integer", "minimum": 0, "maximum": 64},
+        "current_scope_ids": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "bundle_id",
+        "snapshot_id",
+        "selection_sha256",
+        "chat_binding",
+        "coverage"
+      ],
+      "properties": {
+        "schema_version": {"const": "audit_processing_result.v1"},
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^bundle-[0-9a-f]{48}$"
+        },
+        "snapshot_id": {"$ref": "#/$defs/sha256"},
+        "selection_sha256": {"$ref": "#/$defs/sha256"},
+        "chat_binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sheet", "aggregate_id"],
+          "properties": {
+            "sheet": {
+              "oneOf": [
+                {"$ref": "#/$defs/sheet_name"},
+                {"type": "null"}
+              ]
+            },
+            "aggregate_id": {
+              "oneOf": [
+                {"$ref": "#/$defs/sha256"},
+                {"type": "null"}
+              ]
+            }
+          },
+          "not": {
+            "properties": {
+              "sheet": {"type": "string"},
+              "aggregate_id": {"type": "string"}
+            },
+            "required": ["sheet", "aggregate_id"]
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["included_sheets", "skipped_empty_sheets"],
+          "properties": {
+            "included_sheets": {
+              "type": "array",
+              "maxItems": 512,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/sheet_name"}
+            },
+            "skipped_empty_sheets": {
+              "type": "array",
+              "maxItems": 512,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/sheet_name"}
+            }
+          }
+        }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "stage", "retryable"],
+      "properties": {
+        "code": {
+          "enum": [
+            "DETERMINISTIC_PROCESSING_FAILED",
+            "PREPARATION_FAILED",
+            "AGGREGATION_FAILED",
+            "PUBLICATION_FAILED",
+            "PROCESSING_PROFILE_CHANGED",
+            "SERVICE_UNAVAILABLE"
+          ]
+        },
+        "stage": {"enum": ["planning", "preparing", "aggregating", "publishing"]},
+        "retryable": {"type": "boolean"}
+      }
+    }
+  }
+}

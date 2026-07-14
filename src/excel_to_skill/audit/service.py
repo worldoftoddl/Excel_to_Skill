@@ -120,6 +120,27 @@ class ServicePrincipal:
 
 
 @dataclass(frozen=True)
+class BundleScopeBinding:
+    """Optional server-owned restriction for one published bundle's conversation root."""
+
+    sheet: str | None = None
+    aggregate_id: str | None = None
+
+    def __post_init__(self) -> None:
+        sheet = _require_optional_text(self.sheet, field="sheet", maximum=31)
+        if sheet is not None and any(character in sheet for character in "[]:*?/\\"):
+            raise ValueError("sheet is not a valid Excel sheet name")
+        if self.aggregate_id is not None and (
+            not isinstance(self.aggregate_id, str)
+            or _AGGREGATE_ID_RE.fullmatch(self.aggregate_id) is None
+        ):
+            raise ValueError("aggregate_id must be a sha256 identifier")
+        if sheet is not None and self.aggregate_id is not None:
+            raise ValueError("sheet and aggregate_id are mutually exclusive")
+        object.__setattr__(self, "sheet", sheet)
+
+
+@dataclass(frozen=True)
 class BundleSnapshot:
     """One immutable server-owned package/runtime mapping.
 
@@ -136,6 +157,8 @@ class BundleSnapshot:
         repr=False,
         compare=False,
     )
+    scope_binding: BundleScopeBinding | None = None
+    commit_lock_root: Path | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _require_opaque_id(self.bundle_id, field="bundle_id")
@@ -145,8 +168,18 @@ class BundleSnapshot:
         runtime_root = Path(self.runtime_root)
         if not package_path.is_absolute() or not runtime_root.is_absolute():
             raise ValueError("bundle repository paths must be absolute server-owned paths")
+        if self.scope_binding is not None and not isinstance(
+            self.scope_binding, BundleScopeBinding
+        ):
+            raise ValueError("scope_binding must be a BundleScopeBinding")
+        commit_lock_root = (
+            None if self.commit_lock_root is None else Path(self.commit_lock_root)
+        )
+        if commit_lock_root is not None and not commit_lock_root.is_absolute():
+            raise ValueError("commit_lock_root must be an absolute server-owned path")
         object.__setattr__(self, "package_path", package_path)
         object.__setattr__(self, "runtime_root", runtime_root)
+        object.__setattr__(self, "commit_lock_root", commit_lock_root)
 
 
 class BundleSnapshotRepository(Protocol):
@@ -926,11 +959,30 @@ class AuditConversationService:
                             status_code=503,
                         )
 
+                    effective_sheet = command.sheet
+                    effective_aggregate_id = command.aggregate_id
+                    if snapshot.scope_binding is not None:
+                        bound = snapshot.scope_binding
+                        if (
+                            command.sheet is not None
+                            or command.aggregate_id is not None
+                        ) and (
+                            command.sheet != bound.sheet
+                            or command.aggregate_id != bound.aggregate_id
+                        ):
+                            raise AuditConversationServiceError(
+                                "BUNDLE_SCOPE_CONFLICT",
+                                "The requested conversation scope is not published by this bundle.",
+                                status_code=409,
+                            )
+                        effective_sheet = bound.sheet
+                        effective_aggregate_id = bound.aggregate_id
+
                     binding = ThreadBundleBinding(
                         bundle_id=snapshot.bundle_id,
                         snapshot_id=snapshot.snapshot_id,
-                        sheet=command.sheet,
-                        aggregate_id=command.aggregate_id,
+                        sheet=effective_sheet,
+                        aggregate_id=effective_aggregate_id,
                     )
                     self._artifacts.bind_thread(
                         principal=principal,
@@ -943,27 +995,29 @@ class AuditConversationService:
                     # that re-execution is safe.
                     runtime_started = True
                     try:
-                        raw_result = self._runner(
-                            snapshot.package_path,
-                            model=self._model,
-                            question=command.question,
-                            thread_id=runtime_thread_id,
-                            sheet=command.sheet,
-                            aggregate_id=command.aggregate_id,
-                            limit=self._limit,
-                            max_steps=self._max_steps,
-                            client=self._client,
-                            client_factory=self._client_factory,
-                            standards_research=command.standards_research,
-                            procedure_planning=command.procedure_planning,
-                            workbook_inspection=command.workbook_inspection,
-                            workbook_source_provider=snapshot.workbook_source_provider,
-                            standards_retriever=self._standards_retriever,
-                            standards_retriever_factory=self._standards_retriever_factory,
-                            checkpointer=self._checkpointer,
-                            runtime_root=snapshot.runtime_root,
-                            eprint=self._eprint,
-                        )
+                        runner_arguments = {
+                            "model": self._model,
+                            "question": command.question,
+                            "thread_id": runtime_thread_id,
+                            "sheet": effective_sheet,
+                            "aggregate_id": effective_aggregate_id,
+                            "limit": self._limit,
+                            "max_steps": self._max_steps,
+                            "client": self._client,
+                            "client_factory": self._client_factory,
+                            "standards_research": command.standards_research,
+                            "procedure_planning": command.procedure_planning,
+                            "workbook_inspection": command.workbook_inspection,
+                            "workbook_source_provider": snapshot.workbook_source_provider,
+                            "standards_retriever": self._standards_retriever,
+                            "standards_retriever_factory": self._standards_retriever_factory,
+                            "checkpointer": self._checkpointer,
+                            "runtime_root": snapshot.runtime_root,
+                            "eprint": self._eprint,
+                        }
+                        if snapshot.commit_lock_root is not None:
+                            runner_arguments["commit_lock_root"] = snapshot.commit_lock_root
+                        raw_result = self._runner(snapshot.package_path, **runner_arguments)
                     except AuditConversationBundleChangedError as exc:
                         raise AuditConversationServiceError(
                             "BUNDLE_CHANGED",
@@ -1081,6 +1135,7 @@ class AuditConversationService:
 __all__ = [
     "AuditConversationService",
     "AuditConversationServiceError",
+    "BundleScopeBinding",
     "BundleSnapshot",
     "BundleSnapshotNotFoundError",
     "BundleSnapshotRepository",

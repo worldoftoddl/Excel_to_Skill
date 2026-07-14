@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_processing_submission.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "replayed", "job"],
+  "properties": {
+    "schema_version": {"const": "audit_processing_submission.v1"},
+    "replayed": {"type": "boolean"},
+    "job": {"$ref": "audit_processing_job.schema.json"}
+  }
+}

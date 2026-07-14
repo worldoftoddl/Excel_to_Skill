@@ -195,6 +195,7 @@ class AuditConversationRuntime:
     store: ConversationArtifactStore
     agent: _AuditAgentRuntime | _AuditAggregateAgentRuntime | None
     blocked_response: dict | None
+    commit_lock_root: Path | None = None
     aggregate_id: str | None = None
     client: object | None = None
     client_factory: object | None = None
@@ -3143,7 +3144,12 @@ def _commit_turn_locked(
 
 def _commit_turn(state: AuditConversationState, runtime) -> dict:
     context = _context(runtime)
-    with cache.package_lock(context.package_path):
+    lock_target = (
+        context.package_path
+        if context.commit_lock_root is None
+        else context.commit_lock_root / "immutable_snapshot"
+    )
+    with cache.package_lock(lock_target):
         _assert_runtime_bundle_current(context)
         return _commit_turn_locked(state, context)
 
@@ -3441,6 +3447,7 @@ def run_audit_conversation_turn(
     workbook_source_provider=None,
     checkpointer=None,
     runtime_root: Path | str | None = None,
+    commit_lock_root: Path | str | None = None,
     eprint=None,
 ) -> dict:
     """Run one resumable question/answer turn over an exact committed bundle."""
@@ -3455,20 +3462,28 @@ def run_audit_conversation_turn(
         raise AuditConversationError("procedure_planning은 boolean이어야 합니다.")
     if not isinstance(workbook_inspection, bool):
         raise AuditConversationError("workbook_inspection은 boolean이어야 합니다.")
+    path = Path(pkg)
+    root = Path(runtime_root) if runtime_root is not None else path / RUNTIME_DIR
+    lock_root = Path(commit_lock_root) if commit_lock_root is not None else None
+    if lock_root is not None and not lock_root.is_absolute():
+        raise AuditConversationError("conversation commit lock root는 절대경로여야 합니다.")
     try:
         if aggregate_id is not None:
             agent = _prepare_audit_aggregate_agent_runtime(
-                pkg,
+                path,
                 aggregate_id=aggregate_id,
                 model=model,
                 question=question,
                 limit=limit,
                 max_steps=max_steps,
+                package_lock_target=(
+                    None if lock_root is None else lock_root / "aggregate_bootstrap"
+                ),
             )
             blocked = None
         else:
             agent, blocked = _prepare_audit_agent_runtime(
-                pkg,
+                path,
                 model=model,
                 question=question,
                 sheet=sheet,
@@ -3478,8 +3493,6 @@ def run_audit_conversation_turn(
             )
     except (AuditAgentError, AuditAggregateAgentError, AuditConsumeError) as e:
         raise AuditConversationError(str(e)) from e
-    path = Path(pkg)
-    root = Path(runtime_root) if runtime_root is not None else path / RUNTIME_DIR
     try:
         store = ConversationArtifactStore(root)
     except ConversationArtifactStoreError as e:
@@ -3505,6 +3518,7 @@ def run_audit_conversation_turn(
     context = AuditConversationRuntime(
         thread_id=selected_thread,
         package_path=path,
+        commit_lock_root=lock_root,
         sheet=sheet,
         store=store,
         agent=agent,

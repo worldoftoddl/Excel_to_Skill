@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_processing_scope_selection_request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode", "scope_plan_sha256", "scope_ids"],
+  "properties": {
+    "mode": {
+      "enum": ["workbook", "all_sheets", "selected_sheets"]
+    },
+    "scope_plan_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scope_ids": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {"enum": ["workbook", "all_sheets"]}
+        },
+        "required": ["mode"]
+      },
+      "then": {
+        "properties": {
+          "scope_ids": {"maxItems": 0}
+        }
+      },
+      "else": {
+        "properties": {
+          "scope_ids": {"minItems": 1}
+        }
+      }
+    }
+  ]
+}
