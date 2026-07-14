@@ -195,6 +195,43 @@ def _provider_turn_schema(
     return schema
 
 
+def _final_only_turn_schema(turn_schema: dict) -> dict:
+    """Return a turn schema that cannot request another tool."""
+    schema = copy.deepcopy(turn_schema)
+    final_response = copy.deepcopy(schema["definitions"]["finalResponse"])
+    final_response["type"] = "object"
+    schema["properties"]["action"] = {
+        "type": "string",
+        "enum": ["final"],
+    }
+    schema["properties"]["tool"] = {"type": "null"}
+    schema["properties"]["final"] = final_response
+    return schema
+
+
+def _capabilities_for_turn(
+    capabilities: dict,
+    *,
+    remaining_model_calls: int,
+) -> dict:
+    """Expose whether a child-model tool can still preserve a later final call."""
+    selected = copy.deepcopy(capabilities)
+    for name in ("standards_research", "procedure_planning"):
+        capability = selected.get(name)
+        if isinstance(capability, dict):
+            remaining_requests = capability.get("remaining_requests")
+            quota_available = (
+                remaining_requests is None
+                or (type(remaining_requests) is int and remaining_requests > 0)
+            )
+            capability["request_available"] = (
+                capability.get("enabled") is True
+                and quota_available
+                and remaining_model_calls >= 2
+            )
+    return selected
+
+
 def _validated_response(document: dict) -> dict:
     try:
         jsonschema.validate(document, load_schema(AGENT_RESPONSE_SCHEMA))
@@ -1372,7 +1409,10 @@ def _request_audit_agent_model_turn(
         "observations": state.observations,
     }
     if capabilities is not None:
-        payload["capabilities"] = copy.deepcopy(capabilities)
+        payload["capabilities"] = _capabilities_for_turn(
+            capabilities,
+            remaining_model_calls=remaining_model_calls,
+        )
     if runtime.analysis_scope is not None:
         payload["analysis_scope"] = runtime.analysis_scope
     try:
@@ -1388,21 +1428,26 @@ def _request_audit_agent_model_turn(
             isinstance(capabilities, dict)
             and capabilities.get("workbook_inspection", {}).get("enabled") is True
         )
+        provider_schema = (
+            _provider_turn_schema(
+                runtime.schema,
+                include_research=research_enabled,
+                include_planning=planning_enabled,
+                include_inspection=inspection_enabled,
+            )
+            if research_enabled or planning_enabled or inspection_enabled
+            else runtime.provider_schema
+        )
+        validation_schema = runtime.schema
+        if remaining_model_calls == 0:
+            provider_schema = _final_only_turn_schema(provider_schema)
+            validation_schema = _final_only_turn_schema(runtime.schema)
         return call_json(
             client,
             system=runtime.prompt,
             user=_serialize_model_payload(payload),
-            schema=(
-                _provider_turn_schema(
-                    runtime.schema,
-                    include_research=research_enabled,
-                    include_planning=planning_enabled,
-                    include_inspection=inspection_enabled,
-                )
-                if research_enabled or planning_enabled or inspection_enabled
-                else runtime.provider_schema
-            ),
-            validation_schema=runtime.schema,
+            schema=provider_schema,
+            validation_schema=validation_schema,
             label="audit briefing agent",
             retries=0,
             eprint=eprint or (lambda *args: None),

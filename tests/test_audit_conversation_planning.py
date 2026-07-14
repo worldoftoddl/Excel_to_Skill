@@ -462,6 +462,73 @@ def test_disabled_planning_returns_fixed_error_without_child_call(
     assert "procedure_plan" not in result["response"]
 
 
+def test_planning_reserves_the_last_model_call_for_the_final_answer(
+    tmp_path: Path,
+) -> None:
+    pkg, _, _, _ = _write_committed_bundle(
+        tmp_path, configure=_configure_planning_bundle
+    )
+
+    class ReservedBudgetClient:
+        usage_events: list[dict] = []
+
+        def __init__(self) -> None:
+            self.main_calls = 0
+            self.child_calls = 0
+
+        def __call__(self, **kwargs):
+            payload = json.loads(kwargs["user"])
+            if "objective" in payload and "target" in payload:
+                self.child_calls += 1
+                raise AssertionError(
+                    "planning child must not consume the reserved final-answer call"
+                )
+            self.main_calls += 1
+            if self.main_calls == 1:
+                assert payload["capabilities"]["procedure_planning"][
+                    "request_available"
+                ] is True
+                return _trace_request()
+            if self.main_calls == 2:
+                assert payload["remaining_model_calls"] == 1
+                assert payload["capabilities"]["procedure_planning"][
+                    "request_available"
+                ] is False
+                return _planning_request()
+            planning = next(
+                item for item in payload["observations"]
+                if item.get("tool") == "procedure_planning"
+            )
+            assert planning["result"] == {
+                "error": {
+                    "code": "FINAL_ANSWER_BUDGET_RESERVED",
+                    "message": "감사 test 후보 계획을 완료하지 못했습니다.",
+                }
+            }
+            assert payload["remaining_model_calls"] == 0
+            assert payload["capabilities"]["procedure_planning"][
+                "request_available"
+            ] is False
+            return _abstained_final()
+
+    client = ReservedBudgetClient()
+    result = run_audit_conversation_turn(
+        pkg,
+        model="stub-model",
+        question="근거를 확인한 뒤 test 후보를 추천해줘",
+        client=client,
+        checkpointer=InMemorySaver(),
+        runtime_root=tmp_path / "runtime",
+        max_steps=3,
+        procedure_planning=True,
+    )
+
+    assert client.main_calls == 3
+    assert client.child_calls == 0
+    assert result["response"]["answer"]["abstained"] is True
+    assert "procedure_plan" not in result["response"]
+
+
 def test_second_planning_request_is_bounded_without_second_child_call(
     tmp_path: Path,
 ) -> None:
@@ -490,6 +557,9 @@ def test_second_planning_request_is_bounded_without_second_child_call(
             if self.main_calls == 2:
                 return _planning_request(query="첫 번째 후보 묶음")
             if self.main_calls == 3:
+                capability = payload["capabilities"]["procedure_planning"]
+                assert capability["remaining_requests"] == 0
+                assert capability["request_available"] is False
                 first = next(
                     item["result"] for item in payload["observations"]
                     if item.get("tool") == "procedure_planning"

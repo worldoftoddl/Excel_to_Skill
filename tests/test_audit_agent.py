@@ -17,6 +17,7 @@ from excel_to_skill.audit.aggregate_agent import (
 )
 from excel_to_skill.audit.agent import (
     AuditAgentError,
+    _final_only_turn_schema,
     _observed_from_result,
     _provider_turn_schema,
     _validated_response,
@@ -140,6 +141,42 @@ def test_provider_turn_schema_has_no_combinators_but_local_schema_stays_strict()
     ]
     jsonschema.validate(_grounded_final(), provider)
     jsonschema.validate(_grounded_final(), strict)
+
+
+def test_final_only_turn_schema_structurally_rejects_tool_actions() -> None:
+    provider = _provider_turn_schema(
+        load_schema("audit_agent_turn.schema.json"),
+        include_research=True,
+        include_planning=True,
+        include_inspection=True,
+    )
+    final_only = _final_only_turn_schema(provider)
+    local_final_only = _final_only_turn_schema(
+        load_schema("audit_agent_turn.schema.json")
+    )
+
+    jsonschema.validate(_grounded_final(), final_only)
+    jsonschema.validate(_grounded_final(), local_final_only)
+    tool_turn = {
+        "action": "tool",
+        "tool": {
+            "name": "audit_search",
+            "query": "위험",
+            "kind": "risk",
+            "item_id": None,
+            "limit": 20,
+        },
+        "final": None,
+    }
+    for schema in (final_only, local_final_only):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(tool_turn, schema)
+    assert final_only["properties"]["action"]["enum"] == ["final"]
+    assert final_only["properties"]["tool"] == {"type": "null"}
+    assert final_only["properties"]["final"]["type"] == "object"
+    assert {
+        "research_refs", "plan_refs", "inspection_refs",
+    } <= set(final_only["properties"]["final"]["properties"])
 
 
 @pytest.mark.parametrize(

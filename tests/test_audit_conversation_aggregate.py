@@ -171,16 +171,166 @@ def test_aggregate_root_keeps_same_local_ids_distinct_and_hydrates_exact_sheets(
     assert {item["source_id"] for item in evidence} == {"statement:fact"}
     assert {item["scope"]["sheet"] for item in evidence} == {"Main", "Other"}
     for item in evidence:
+        assert [fact["id"] for fact in item["trace"]["facts"]] == ["fact:risk"]
         assert {
             cell["sheet"] for cell in item["trace"].get("cells", [])
         } <= {item["scope"]["sheet"]}
+        assert item["trace"]["cells"]
     model_payload = client.calls[0]["user"]
     assert _FORMULA_SENTINEL not in model_payload
     assert _RAW_STANDARD_SENTINEL not in model_payload
+    payload = json.loads(model_payload)
+    assert payload["selection_contract"] == {
+        "linked_evidence_hydrated_after_final": True,
+        "select_linked_refs_only_if_observed_and_independently_needed": True,
+        "must_finalize": False,
+    }
+    assert "Selecting that statement is sufficient for final provenance" in (
+        client.calls[0]["system"]
+    )
+    assert len(client.calls) == 1
     assert result["usage"]["total_tokens"] == 25
     assert response["trust"]["answer_review_status"] == "unreviewed"
     assert response["trust"]["readiness"]["status"] == "partial"
     assert "AGGREGATE_PARTIAL" in {item["code"] for item in response["notices"]}
+
+
+def test_aggregate_last_model_call_is_final_only(tmp_path: Path) -> None:
+    pkg, aggregate = _prepared_aggregate(tmp_path)
+    aggregate_ref = aggregate.document["portfolio"]["highlights"][0]["record_ref"]
+    client = QueueClient([_final("aggregate_record", aggregate_ref)])
+
+    result = _run(
+        pkg,
+        aggregate.paths.aggregate_id,
+        tmp_path / "runtime",
+        InMemorySaver(),
+        client,
+        max_steps=1,
+    )
+
+    payload = json.loads(client.calls[0]["user"])
+    assert payload["remaining_model_calls"] == 0
+    assert payload["selection_contract"]["must_finalize"] is True
+    provider_schema = client.calls[0]["schema"]
+    assert provider_schema["properties"]["action"]["enum"] == ["final"]
+    assert provider_schema["properties"]["tool"] == {"type": "null"}
+    assert provider_schema["properties"]["final"]["type"] == "object"
+    assert result["response"]["answer"]["abstained"] is False
+
+
+def test_aggregate_last_model_call_rejects_tool_without_execution(
+    tmp_path: Path,
+) -> None:
+    pkg, aggregate = _prepared_aggregate(tmp_path)
+    root = tmp_path / "runtime"
+    client = QueueClient([{
+        "action": "tool",
+        "tool": {
+            "name": "aggregate_search",
+            "query": "위험",
+            "kind": "statement",
+            "item_ref": None,
+            "scope_id": None,
+            "limit": 1,
+        },
+        "final": None,
+    }])
+
+    with pytest.raises(
+        AuditConversationError,
+        match="1회 안에",
+    ):
+        _run(
+            pkg,
+            aggregate.paths.aggregate_id,
+            root,
+            InMemorySaver(),
+            client,
+            max_steps=1,
+        )
+
+    assert len(client.calls) == 1
+    observations = _artifact_documents(root, "observations")
+    assert all(
+        not any(
+            item.get("tool") == "aggregate_search"
+            for item in document["payload"]["value"]
+        )
+        for document in observations
+    )
+
+
+def test_unobserved_linked_source_ref_retries_with_aggregate_statement_only(
+    tmp_path: Path,
+) -> None:
+    pkg, aggregate = _prepared_aggregate(tmp_path)
+    runtime = _prepare_audit_aggregate_agent_runtime(
+        pkg,
+        aggregate_id=aggregate.paths.aggregate_id,
+        model="main-model",
+        question="관련 감사기준은?",
+    )
+    scope_id = AuditScope.for_sheet("Main").id
+    aggregate_record = next(
+        record for record in runtime.aggregate_records.values()
+        if record["scope"]["id"] == scope_id
+        and record.get("source_id") == "statement:standard"
+    )
+    aggregate_ref = aggregate_record["record_ref"]
+    citation_ref = runtime.source_lookup[
+        (scope_id, "standard_citation", "citation:1")
+    ]
+
+    invalid_final = {
+        "action": "final",
+        "tool": None,
+        "final": {
+            "abstained": False,
+            "abstention_code": None,
+            "selections": [
+                {"kind": "aggregate_record", "refs": [aggregate_ref]},
+                {"kind": "source_record", "refs": [citation_ref]},
+            ],
+        },
+    }
+
+    def retry_with_statement_only(payload: dict) -> dict:
+        validation = next(
+            item["result"]["error"]
+            for item in payload["observations"]
+            if item.get("tool") == "answer_validation"
+        )
+        assert validation["code"] == "UNGROUNDED_FINAL"
+        assert "unobserved source ref" in validation["message"][0]
+        assert not any(
+            item.get("tool") == "trace" for item in payload["observations"]
+        )
+        assert payload["selection_contract"]["must_finalize"] is True
+        return _final("aggregate_record", aggregate_ref)
+
+    client = QueueClient([invalid_final, retry_with_statement_only])
+    result = _run(
+        pkg,
+        aggregate.paths.aggregate_id,
+        tmp_path / "runtime",
+        InMemorySaver(),
+        client,
+        question="관련 감사기준은?",
+        max_steps=2,
+    )
+
+    [evidence] = result["response"]["evidence"]["records"]
+    assert evidence["selection_ref"] == aggregate_ref
+    assert evidence["selection_kind"] == "aggregate_record"
+    assert [
+        citation["id"] for citation in evidence["trace"]["standards_citations"]
+    ] == ["citation:1"]
+    assert evidence["trace_complete"] is True
+    [claim] = result["response"]["answer"]["claims"]
+    assert claim["aggregate_record_refs"] == [aggregate_ref]
+    assert claim["source_record_refs"] == []
+    assert len(client.calls) == 2
 
 
 def test_aggregate_checkpoint_ids_cannot_override_observation_replay(

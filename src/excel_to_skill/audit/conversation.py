@@ -173,16 +173,37 @@ class ConversationOutput(TypedDict):
     usage_ref: ArtifactRef
 
 
+class _ChildModelBudgetReserved(RuntimeError):
+    """A child provider call was denied to preserve one main-agent final call."""
+
+
 @dataclass
 class _CountedChildModelClient:
     """Count only child-model calls that actually cross the client boundary."""
 
     client: object
+    call_budget: int | None = None
     calls: int = 0
 
     def __call__(self, **kwargs):
+        if self.call_budget is not None and self.calls >= self.call_budget:
+            raise _ChildModelBudgetReserved(
+                "final answer model-call budget is reserved"
+            )
         self.calls += 1
         return self.client(**kwargs)
+
+
+def _exception_has_cause(error: BaseException, expected: type[BaseException]) -> bool:
+    """Return whether a wrapped provider error retains an expected private cause."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, expected):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 @dataclass
@@ -288,6 +309,10 @@ class AuditConversationRuntime:
             "standards_research": {
                 "enabled": self.standards_research_enabled,
                 "max_requests": MAX_RESEARCH_REQUESTS,
+                "remaining_requests": max(
+                    0,
+                    MAX_RESEARCH_REQUESTS - self._research_request_count,
+                ),
                 "max_candidates": 5,
                 "max_selected": 3,
                 "result_status": "ephemeral_unreviewed_turn_scoped",
@@ -295,6 +320,10 @@ class AuditConversationRuntime:
             "procedure_planning": {
                 "enabled": self.procedure_planning_enabled,
                 "max_requests": MAX_PLANNING_REQUESTS,
+                "remaining_requests": max(
+                    0,
+                    MAX_PLANNING_REQUESTS - self._planning_request_count,
+                ),
                 "min_candidates": 3,
                 "max_candidates": 5,
                 "result_status": "proposed_unreviewed_not_evidenced",
@@ -302,6 +331,10 @@ class AuditConversationRuntime:
             "workbook_inspection": {
                 "enabled": self.workbook_inspection_enabled,
                 "max_requests": MAX_INSPECTION_REQUESTS,
+                "remaining_requests": max(
+                    0,
+                    MAX_INSPECTION_REQUESTS - self._inspection_request_count,
+                ),
                 "max_selected": MAX_INSPECTION_REQUESTS,
                 "one_sheet_per_request": True,
                 "one_range_per_request": True,
@@ -348,7 +381,11 @@ class AuditConversationRuntime:
 
     def close_research(self) -> None:
         closed: set[int] = set()
-        for value in [*self._research_retrievers.values(), self.standards_retriever_factory]:
+        for value in [
+            *self._research_retrievers.values(),
+            self.standards_retriever,
+            self.standards_retriever_factory,
+        ]:
             if value is None or id(value) in closed:
                 continue
             closed.add(id(value))
@@ -553,6 +590,7 @@ def _research_error(code: str) -> dict:
         "RESEARCH_LIMIT_EXCEEDED",
         "INVALID_REQUEST",
         "CORPUS_DRIFT",
+        "FINAL_ANSWER_BUDGET_RESERVED",
         "UPSTREAM_UNAVAILABLE",
         "CONTRACT_MISMATCH",
         "NO_RESULTS",
@@ -578,6 +616,7 @@ def _planning_error(code: str) -> dict:
         "PLANNING_DISABLED",
         "PLANNING_LIMIT_EXCEEDED",
         "RESEARCH_REQUIRED",
+        "FINAL_ANSWER_BUDGET_RESERVED",
         "INVALID_REQUEST",
         "UPSTREAM_UNAVAILABLE",
         "CONTRACT_MISMATCH",
@@ -2311,11 +2350,14 @@ def _run_research_request(
     request: dict,
     *,
     invocation_id: str,
+    child_model_call_budget: int | None = None,
 ) -> dict:
     if not context.standards_research_enabled:
         return _research_error("RESEARCH_DISABLED")
     if context._research_request_count >= MAX_RESEARCH_REQUESTS:
         return _research_error("RESEARCH_LIMIT_EXCEEDED")
+    if child_model_call_budget is not None and child_model_call_budget <= 0:
+        return _research_error("FINAL_ANSWER_BUDGET_RESERVED")
     context._research_request_count += 1
     research_client: _CountedChildModelClient | None = None
     try:
@@ -2329,7 +2371,10 @@ def _run_research_request(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        research_client = _CountedChildModelClient(context.model_client())
+        research_client = _CountedChildModelClient(
+            context.model_client(),
+            call_budget=child_model_call_budget,
+        )
         return run_standards_research(
             canonical,
             runtime=StandardsResearchRuntime(
@@ -2344,6 +2389,8 @@ def _run_research_request(
             ),
         )
     except StandardsResearchError as e:
+        if _exception_has_cause(e, _ChildModelBudgetReserved):
+            return _research_error("FINAL_ANSWER_BUDGET_RESERVED")
         return _research_error(e.code)
     except AuditConversationError:
         return _research_error("INVALID_REQUEST")
@@ -2361,11 +2408,14 @@ def _run_planning_request(
     invocation_id: str,
     observed: dict[str, set[str]],
     observations: list[dict],
+    child_model_call_budget: int | None = None,
 ) -> dict:
     if not context.procedure_planning_enabled:
         return _planning_error("PLANNING_DISABLED")
     if context._planning_request_count >= MAX_PLANNING_REQUESTS:
         return _planning_error("PLANNING_LIMIT_EXCEEDED")
+    if child_model_call_budget is not None and child_model_call_budget <= 0:
+        return _planning_error("FINAL_ANSWER_BUDGET_RESERVED")
     planning_client: _CountedChildModelClient | None = None
     try:
         canonical, scope = _planning_binding(
@@ -2385,7 +2435,10 @@ def _run_planning_request(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        planning_client = _CountedChildModelClient(context.model_client())
+        planning_client = _CountedChildModelClient(
+            context.model_client(),
+            call_budget=child_model_call_budget,
+        )
         return run_procedure_planning(
             canonical,
             runtime=ProcedurePlanningRuntime(
@@ -2398,6 +2451,8 @@ def _run_planning_request(
             ),
         )
     except ProcedurePlanningError as e:
+        if _exception_has_cause(e, _ChildModelBudgetReserved):
+            return _planning_error("FINAL_ANSWER_BUDGET_RESERVED")
         return _planning_error(e.code)
     except AuditConversationError:
         return _planning_error("INVALID_REQUEST")
@@ -2497,6 +2552,12 @@ def _decide(state: AuditConversationState, runtime) -> dict:
                 "audit agent 입력이 600KB 모델 예산을 초과했습니다. "
                 "--limit을 낮추거나 질문 범위를 좁혀 주세요."
             ) from e
+        if step + 1 + context._child_model_call_count >= agent.max_steps:
+            raise AuditConversationError(
+                f"{agent.max_steps}회 안에 근거가 검증된 최종 답변을 만들지 "
+                "못했습니다. 이 상한에는 child research/planning 모델 호출도 "
+                "포함됩니다."
+            ) from e
         raise AuditConversationError(
             "audit-chat 모델 호출 또는 구조화 응답 검증에 실패했습니다."
         ) from e
@@ -2584,6 +2645,25 @@ def _execute_tool(state: AuditConversationState, runtime) -> dict:
     }
 
 
+def _child_model_call_budget(
+    context: AuditConversationRuntime,
+    state: AuditConversationState,
+) -> int:
+    """Return child calls available while reserving one later main-agent final."""
+    if context.agent is None:
+        raise AuditConversationError("child model budget에 agent runtime이 없습니다.")
+    step = state.get("step")
+    if not isinstance(step, int) or step < 0:
+        raise AuditConversationError("child model budget step이 유효하지 않습니다.")
+    return max(
+        0,
+        context.agent.max_steps
+        - step
+        - context._child_model_call_count
+        - 1,
+    )
+
+
 def _execute_research(state: AuditConversationState, runtime) -> dict:
     context = _context(runtime)
     if context.agent is None:
@@ -2612,6 +2692,7 @@ def _execute_research(state: AuditConversationState, runtime) -> dict:
             context,
             request,
             invocation_id=invocation_id,
+            child_model_call_budget=_child_model_call_budget(context, state),
         )
     context._research_results.setdefault(request_key, []).append(copy.deepcopy(result))
     turn_state.observations.append({
@@ -2669,6 +2750,7 @@ def _execute_plan(state: AuditConversationState, runtime) -> dict:
             invocation_id=invocation_id,
             observed=turn_state.observed,
             observations=turn_state.observations,
+            child_model_call_budget=_child_model_call_budget(context, state),
         )
     context._planning_results.setdefault(request_key, []).append(copy.deepcopy(result))
     turn_state.observations.append({

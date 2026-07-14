@@ -26,6 +26,8 @@ from .agent import (
     MAX_STEPS,
     _AuditAgentTurnState,
     _bounded_int,
+    _capabilities_for_turn,
+    _final_only_turn_schema,
     _question,
 )
 from .aggregate import (
@@ -660,10 +662,18 @@ def _request_audit_aggregate_agent_model_turn(
         "turn": step,
         "remaining_turns": remaining_model_calls,
         "remaining_model_calls": remaining_model_calls,
+        "selection_contract": {
+            "linked_evidence_hydrated_after_final": True,
+            "select_linked_refs_only_if_observed_and_independently_needed": True,
+            "must_finalize": remaining_model_calls == 0,
+        },
         "observations": state.observations,
     }
     if capabilities is not None:
-        payload["capabilities"] = copy.deepcopy(capabilities)
+        payload["capabilities"] = _capabilities_for_turn(
+            capabilities,
+            remaining_model_calls=remaining_model_calls,
+        )
     try:
         research_enabled = (
             isinstance(capabilities, dict)
@@ -677,21 +687,26 @@ def _request_audit_aggregate_agent_model_turn(
             isinstance(capabilities, dict)
             and capabilities.get("workbook_inspection", {}).get("enabled") is True
         )
+        provider_schema = (
+            _provider_turn_schema(
+                runtime.schema,
+                include_research=research_enabled,
+                include_planning=planning_enabled,
+                include_inspection=inspection_enabled,
+            )
+            if research_enabled or planning_enabled or inspection_enabled
+            else runtime.provider_schema
+        )
+        validation_schema = runtime.schema
+        if remaining_model_calls == 0:
+            provider_schema = _final_only_turn_schema(provider_schema)
+            validation_schema = _final_only_turn_schema(runtime.schema)
         return call_json(
             client,
             system=runtime.prompt,
             user=_serialize_payload(payload),
-            schema=(
-                _provider_turn_schema(
-                    runtime.schema,
-                    include_research=research_enabled,
-                    include_planning=planning_enabled,
-                    include_inspection=inspection_enabled,
-                )
-                if research_enabled or planning_enabled or inspection_enabled
-                else runtime.provider_schema
-            ),
-            validation_schema=runtime.schema,
+            schema=provider_schema,
+            validation_schema=validation_schema,
             label="audit aggregate main agent",
             retries=0,
             eprint=eprint or (lambda *args: None),

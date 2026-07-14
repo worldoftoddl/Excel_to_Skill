@@ -109,6 +109,11 @@ Preserve these invariants when changing the audit path:
   Each serialized observation payload has a 600KB hard cap, duplicate tool calls are rejected,
   and every generated answer remains `unreviewed` independently of the source brief review
   status.
+- The last available main-model call exposes a final-only provider and local validation schema;
+  a tool action can never execute from that response. Research/planning child calls share the
+  turn limit and must leave one later main-model call. Capability payloads expose remaining
+  request quota separately, and exhausted budget returns the fixed
+  `FINAL_ANSWER_BUDGET_RESERVED` error without entering MCP or child-model work.
 - A brief statement may name a `KSA`/`KIFRS` standard number only when that statement directly
   cites a passage from the same standard. Fail closed by omitting the whole unsupported statement
   and surfacing the omission in readiness; never rewrite it into a plausible uncited claim.
@@ -314,10 +319,12 @@ this automated E2E.
 
 ## Current Audit-RAG Status
 
-The audit-RAG path is now the local `main` direction. The last committed checkpoint is `2b514ec`;
-the current working slice makes complex workbook briefings use observed statements directly while
-application code hydrates their committed linked evidence, avoiding redundant trace calls without
-weakening ID authority. The former local main harness series remains only at
+The audit-RAG path is now the local `main` direction. The last committed checkpoint is `9a899f8`;
+it makes complex workbook briefings use observed statements directly while application code
+hydrates their committed linked evidence, avoiding redundant trace calls without weakening ID
+authority. The current working slice adds aggregate-agent parity, structurally final-only last
+model calls, and child research/planning budgets that preserve one main-agent final call. The
+former local main harness series remains only at
 `archive/harness-v1.20`. The current checkpoint includes region-wide
 fact extraction, remote auditpaper standards MCP retrieval, collection-pinned CID verification,
 persistent paragraph caching, agent-ready brief generation, commit-gated readers, canonical
@@ -363,7 +370,8 @@ planning, exact plan-bound workbook/all/selected execution, SQLite lease/fence r
 slow-call heartbeat, immutable prepared-package storage, atomic bundle catalog publication, strict
 FastAPI job/status endpoints, and server-enforced conversation scope. A selected-scope or final
 gate failure publishes no bundle; raw retention can remove optional inspection without invalidating
-an already committed chat snapshot. The current complete Python suite is `913 passed, 1 skipped`;
+an already committed chat snapshot. The current complete Python suite is `920 passed, 1 skipped`;
+the focused main/aggregate conversation and child-budget suite is `104 passed`,
 the focused processing/store/SQLite/web and upload-to-chat E2E suite is `48 passed`, the
 service/conversation regression suite is `61 passed`, and the focused raw-upload plus adjacent
 inspection/publication suite is `85 passed`, the focused workbook-edit/publication suite is
@@ -391,9 +399,12 @@ the six-call limit while tracing them individually. The current selection-contra
 the validator fail-closed but explains that observed statements are hydrated after finalization.
 The same live question then completed in one model request using 10,881 tokens, with 20 facts, 12
 relations, and seven standards citations hydrated and `evidence_complete=true`. The brief remained
-`partial`/`draft` and the answer `unreviewed`. Future robustness work should make the last-call
-final-only rule structural, add aggregate-agent parity, and reserve main-agent budget around child
-research/planning calls.
+`partial`/`draft` and the answer `unreviewed`. The subsequent hardening makes the last-call
+final-only rule structural for workbook and aggregate conversations, gives aggregate statements
+the same exact-source linked-evidence hydration guidance, and prevents child research/planning
+workers from consuming the final main-agent call. Per-turn capabilities now expose both remaining
+request quota and final-budget availability; a denied child returns only the fixed
+`FINAL_ANSWER_BUDGET_RESERVED` code.
 
 The current orchestration plan is intentionally staged:
 

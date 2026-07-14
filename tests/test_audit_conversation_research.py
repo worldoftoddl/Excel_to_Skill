@@ -111,6 +111,10 @@ class ResearchConversationClient:
         self.main_calls += 1
         capability = payload["capabilities"]["standards_research"]
         assert capability["enabled"] is True
+        assert capability["request_available"] is (
+            capability["remaining_requests"] > 0
+            and payload["remaining_model_calls"] >= 2
+        )
         if self.main_calls == 1:
             return {
                 "action": "tool",
@@ -155,6 +159,7 @@ def test_workbook_conversation_runs_research_lazily_and_keeps_it_supplemental(
         client=client,
         checkpointer=InMemorySaver(),
         runtime_root=tmp_path / "runtime",
+        max_steps=3,
         standards_research=True,
         standards_retriever=retriever,
     )
@@ -201,6 +206,9 @@ def test_collection_drift_fails_closed_before_child_selection(
                 )
             self.main_calls += 1
             if self.main_calls == 1:
+                assert payload["capabilities"]["standards_research"][
+                    "request_available"
+                ] is True
                 return {
                     "action": "tool",
                     "tool": {
@@ -241,7 +249,7 @@ def test_collection_drift_fails_closed_before_child_selection(
         client=client,
         checkpointer=InMemorySaver(),
         runtime_root=tmp_path / "runtime",
-        max_steps=2,
+        max_steps=3,
         standards_research=True,
         standards_retriever=retriever,
     )
@@ -318,7 +326,7 @@ def test_empty_research_does_not_consume_a_child_model_step(tmp_path: Path) -> N
         client=client,
         checkpointer=InMemorySaver(),
         runtime_root=tmp_path / "runtime",
-        max_steps=2,
+        max_steps=3,
         standards_research=True,
         standards_retriever=retriever,
     )
@@ -327,6 +335,88 @@ def test_empty_research_does_not_consume_a_child_model_step(tmp_path: Path) -> N
     assert len(retriever.search_calls) == 1
     assert retriever.get_calls == []
     assert result["response"]["standards_research"]["status"] == "no_results"
+
+
+def test_candidate_research_reserves_the_last_call_for_the_main_answer(
+    tmp_path: Path,
+) -> None:
+    pkg, _, standards, _ = _write_committed_bundle(tmp_path)
+
+    class ReservedBudgetClient:
+        usage_events: list[dict] = []
+
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self.main_calls = 0
+            self.child_calls = 0
+            self.research_observation: dict | None = None
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            payload = json.loads(kwargs["user"])
+            if "candidates" in payload:
+                self.child_calls += 1
+                raise AssertionError(
+                    "the research child must not consume the reserved final call"
+                )
+            self.main_calls += 1
+            if self.main_calls == 1:
+                return {
+                    "action": "tool",
+                    "tool": {
+                        "name": "standards_research",
+                        "query": "외부조회 절차의 감사기준 요구사항",
+                        "kind": "audit_standard",
+                        "item_id": None,
+                        "limit": 3,
+                    },
+                    "final": None,
+                }
+            self.research_observation = next(
+                item for item in payload["observations"]
+                if item.get("tool") == "standards_research"
+            )
+            assert self.research_observation["result"] == {
+                "error": {
+                    "code": "FINAL_ANSWER_BUDGET_RESERVED",
+                    "message": "동적 기준서 조회를 완료하지 못했습니다.",
+                }
+            }
+            return {
+                "action": "final",
+                "tool": None,
+                "final": {
+                    "abstained": True,
+                    "abstention_code": "retrieval_incomplete",
+                    "selections": [],
+                    "research_refs": [],
+                },
+            }
+
+    retriever = ResearchRetriever(standards["retriever"]["corpus_version"])
+    client = ReservedBudgetClient()
+    result = run_audit_conversation_turn(
+        pkg,
+        model="stub-model",
+        question="외부조회 기준을 확인한 뒤 답해줘",
+        client=client,
+        checkpointer=InMemorySaver(),
+        runtime_root=tmp_path / "runtime",
+        max_steps=2,
+        standards_research=True,
+        standards_retriever=retriever,
+    )
+
+    assert client.main_calls == 2
+    assert client.child_calls == 0
+    assert len(client.calls) == 2
+    assert client.research_observation is not None
+    assert retriever.search_calls == []
+    assert retriever.get_calls == []
+    assert retriever.closed is True
+    assert result["response"]["answer"]["abstained"] is True
+    assert result["response"]["coverage"]["discovery_complete"] is False
+    assert "standards_research" not in result["response"]
 
 
 def test_disabled_research_never_constructs_retriever_and_returns_fixed_error(
@@ -479,6 +569,9 @@ def test_aggregate_research_is_pinned_to_selected_source_scope(tmp_path: Path) -
                 }
             self.main_calls += 1
             if self.main_calls == 1:
+                assert payload["capabilities"]["standards_research"][
+                    "request_available"
+                ] is True
                 scope_id = payload["observations"][0]["result"]["accounts"][0][
                     "scope"
                 ]["id"]
@@ -498,6 +591,10 @@ def test_aggregate_research_is_pinned_to_selected_source_scope(tmp_path: Path) -
                 item["result"] for item in payload["observations"]
                 if item.get("tool") == "standards_research"
             )
+            assert payload["remaining_model_calls"] == 0
+            assert payload["capabilities"]["standards_research"][
+                "request_available"
+            ] is False
             return {
                 "action": "final",
                 "tool": None,
@@ -517,6 +614,7 @@ def test_aggregate_research_is_pinned_to_selected_source_scope(tmp_path: Path) -
         client=AggregateResearchClient(),
         checkpointer=InMemorySaver(),
         runtime_root=tmp_path / "runtime",
+        max_steps=3,
         standards_research=True,
         standards_retriever_factory=factory,
     )
@@ -633,6 +731,13 @@ def test_second_research_request_is_bounded_without_a_second_mcp_call(
                 }
             self.main_calls += 1
             if self.main_calls <= 2:
+                capability = payload["capabilities"]["standards_research"]
+                assert capability["remaining_requests"] == (
+                    1 if self.main_calls == 1 else 0
+                )
+                assert capability["request_available"] is (
+                    self.main_calls == 1
+                )
                 return {
                     "action": "tool",
                     "tool": {

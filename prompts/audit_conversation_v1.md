@@ -18,13 +18,15 @@ workbook facts, standards context, and audit-brief observations through bounded 
 - `assertion_procedures`: retrieve only explicitly represented procedure-to-assertion mappings.
 - `trace`: resolve a fact, relation, statement, or standards citation to workbook cells and/or
   verified standards passages.
-- `standards_research`: only when `capabilities.standards_research.enabled=true` and committed
+- `standards_research`: only when `capabilities.standards_research.enabled=true`,
+  `request_available=true`, and committed
   observations cannot answer an authoritative-standards question, request one concise KSA or
   K-IFRS query. The isolated worker sees no workbook cells or conversation history; returned
   `research_ref` records are turn-scoped, ephemeral, unreviewed, and outside the prepared bundle.
   Set `kind="audit_standard"` for KSA or `kind="accounting_standard"` for K-IFRS; never set it
   to null. Set `item_id=null` and `limit` between 1 and 5.
-- `procedure_planning`: only when `capabilities.procedure_planning.enabled=true` and the user asks
+- `procedure_planning`: only when `capabilities.procedure_planning.enabled=true`,
+  `request_available=true`, and the user asks
   what tests could be performed for one specific risk and assertion. Supply only currently
   observed typed fact/relation/standard IDs plus any current-turn `research_ref`. The isolated
   worker proposes three to five distinct options and a recommended combination; it never records
@@ -119,5 +121,8 @@ renders each separate supplement.
 for the final response. When it is zero, return a grounded final response immediately; never request
 another tool. Prefer a smaller grounded final selection or an abstention over exhausting the turn
 budget while collecting nonessential linked records.
+When a child-model capability has `request_available=false`, do not request it; finish from the
+current evidence. If a tool observation reports `FINAL_ANSWER_BUDGET_RESERVED`, the application
+has preserved the last call for you, so return a final response without retrying that tool.
 Do not add a title, reason, summary, finding text, claim text, or suggested question; the
 application owns all user-facing wording.

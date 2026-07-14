@@ -291,7 +291,33 @@ def test_last_model_call_is_explicitly_reserved_for_a_grounded_final(
     payload = json.loads(client.calls[0]["user"])
     assert payload["remaining_model_calls"] == 0
     assert payload["selection_contract"]["must_finalize"] is True
+    provider_schema = client.calls[0]["schema"]
+    assert provider_schema["properties"]["action"]["enum"] == ["final"]
+    assert provider_schema["properties"]["tool"] == {"type": "null"}
+    assert provider_schema["properties"]["final"]["type"] == "object"
     assert result["response"]["answer"]["abstained"] is False
+
+
+def test_last_model_call_rejects_a_tool_without_executing_it(tmp_path: Path) -> None:
+    pkg, _, _, _ = _write_committed_bundle(tmp_path)
+    client = StubClient([_tool("audit_search", query="위험", kind="risk")])
+    runtime_root = tmp_path / "runtime"
+
+    with pytest.raises(AuditConversationError, match="1회 안에"):
+        _run(
+            pkg,
+            runtime_root,
+            InMemorySaver(),
+            client,
+            max_steps=1,
+        )
+
+    assert len(client.calls) == 1
+    observations = _artifact_documents(runtime_root, kind="observations")
+    assert all(
+        not any(item.get("tool") == "audit_search" for item in document["payload"]["value"])
+        for _, document in observations
+    )
 
 
 def test_unobserved_linked_id_feedback_can_retry_with_statement_only(
