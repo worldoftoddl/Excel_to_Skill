@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_workbook_snapshot_publication.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "bundle_id", "execution_id", "manifest_ref",
+    "manifest_sha256", "base_snapshot_id", "base_revision_id", "snapshot_id",
+    "workbook_sha256", "revision_id", "asset_persisted", "prepared_bundle_created"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_workbook_snapshot_publication.v1"},
+    "bundle_id": {"$ref": "#/$defs/opaque"},
+    "execution_id": {"$ref": "#/$defs/opaque"},
+    "manifest_ref": {
+      "type": "string",
+      "pattern": "^edit-manifest:[0-9a-f]{64}$"
+    },
+    "manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "base_snapshot_id": {"$ref": "#/$defs/sha256"},
+    "base_revision_id": {"$ref": "#/$defs/opaque"},
+    "snapshot_id": {"$ref": "#/$defs/sha256"},
+    "workbook_sha256": {"$ref": "#/$defs/sha256"},
+    "revision_id": {"$ref": "#/$defs/opaque"},
+    "asset_persisted": {"const": true},
+    "prepared_bundle_created": {"type": "boolean"}
+  },
+  "$defs": {
+    "opaque": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -37,6 +37,11 @@ The audit-RAG implementation lives in `src/excel_to_skill/audit/`:
 - `workbook_edit_service.py` keeps that workflow outside conversations and prepared artifacts,
   consumes each exact approval once, and fences one live workbook execution at a time;
   `workbook_edit_web.py` exposes the strict host/add-in HTTP boundary.
+- `workbook_edit_host.py` issues short-lived, principal-scoped host bootstrap selectors bound to
+  one exact private session/workflow binding; `workbook_snapshot_publication.py` reacquires and
+  validates saved XLSX bytes, then stores them behind immutable content-addressed asset refs.
+- `workbook_edit_sqlite.py` is the durable single-database reference repository for workflow,
+  idempotency, workbook-level fence/lease, and source-snapshot CAS state.
 - `prepare.py` stages, validates, and atomically publishes all three artifacts.
 - `consume.py` exposes commit-gated `brief`, search/get, assertion-procedure, and trace readers.
 - `validate.py` enforces schemas, cross-links, digests, relation direction, and source separation.
@@ -48,8 +53,10 @@ Keep generated packages in ignored `converted/` or `tests/_output/` directories.
 
 `office-addin/` is an independent TypeScript/Vite project for the ExcelApi 1.13 task pane. Its
 executor consumes only the approved backend manifest, rereads live cells before and after the
-write, and submits a bounded witness. The add-in's host callback is an integration contract; cloud
-asset reacquisition, snapshot publication, and authenticated bootstrap are not implemented here.
+write, and submits a bounded witness. Production bootstrap accepts only one opaque host-session
+selector from the same authenticated HTTPS origin. Required persistence saves the workbook, asks
+the server to reacquire and publish a new source snapshot, and recovers ambiguous POST results by
+execution-scoped GET without replaying the cell edit.
 
 ## Audit-RAG Contracts
 
@@ -157,16 +164,34 @@ Preserve these invariants when changing the audit path:
   distinct across workbook copies. Revision, sheet, and worksheet remain manifest preconditions,
   not ways to reset workbook-level fencing. Completed command replay and stored workflow reads do
   not depend on a still-live Office session.
+- A host-session ID is an opaque selector under an already authenticated principal, never a bearer
+  credential. Production Add-ins accept only that selector, fetch bootstrap from the current HTTPS
+  origin with same-origin credentials, and bind every mutation to its exact workflow/session and
+  private binding digest. Authenticate before reading mutation bodies; expiry, revocation, and
+  principal scope remain mandatory even for immutable completed-workflow/publication reads.
 - `session_verified` means a host-authenticated executor's bounded readback is internally
   consistent with the approved authored state. It does not mean the backend independently ran
-  Excel, validated every formula result or dependent cell, persisted the file, or prepared a new
-  audit bundle. The Office.js executor exists under `office-addin/`, but authenticated session
-  bootstrap, cloud asset save/new-snapshot publication, durable repository, distributed lock, and
-  failed/indeterminate reconciliation remain host/product integrations.
-- Do not treat a snapshot callback as atomic publication. The current backend releases the active
-  execution at `session_verified`; a production host must retain a workbook-level publication
-  lease through asset reacquisition or enforce a base snapshot/revision CAS before linking the new
-  asset to that execution.
+  Excel or validated every formula result or dependent cell. Under `required` persistence it is a
+  nonterminal state: retain the workbook-level publication lease until the server has reacquired
+  the saved XLSX, matched every approved authored cell/formula and number format, stored exact bytes,
+  and atomically advanced the source head from the exact base bundle/snapshot/hash/revision.
+- Pin `required`, `session_only`, or `unsupported` to the execution at claim time; do not infer
+  lease release from a server-global provider setting. Different publication idempotency keys for
+  one execution share a single bounded publication claim. Durable claims may be reclaimed only
+  after expiry with a new token that fences every older worker.
+- Snapshot publication requests carry only exact execution and manifest selectors. Provider
+  locators, workbook bytes, physical workbook identity, new digest, revision, and asset refs are
+  server-owned. The reacquirer must prove the saved revision is the direct provider transition from
+  the pinned base and attest the exact worksheet identity; reading whichever revision is newest is
+  forbidden. Validate the XLSX archive and every approved authored cell/formula and number format
+  before immutable storage. An asset written before a losing source-head CAS is only an orphan
+  candidate and must never become a source head. POST response loss is recovered through
+  execution-scoped GET and may never rerun the manifest or save the workbook again. A published raw
+  snapshot is not a prepared audit bundle.
+- Local immutable storage and SQLite are reference implementations, not the cloud product boundary.
+  Production still needs authenticated durable host/session registries, a provider reacquirer,
+  object storage, multi-worker deployment tests, pending/orphan reconciliation, and failed or
+  indeterminate workbook quarantine handling.
 
 ## Build, Test, and Development Commands
 
@@ -231,12 +256,17 @@ idempotent replay after session loss, repository fault atomicity, and executor r
 Add-in tests use fake Excel/HTTP ports and a Python-generated shared contract fixture; they must
 cover misrouted workflow responses, claim/start/verify uncertainty, request/response and witness
 bounds, coauthor drift rereads, formula recalculation, read-only workbooks, save/publication loss,
-and host callback validation. A real Excel Desktop/Web sideload smoke remains a manual host check.
+same-origin host bootstrap/header binding, publication-only recovery, and host callback validation.
+Publication tests must reopen the reacquired XLSX and compare every approved authored cell/formula
+and number format, exercise immutable-store integrity and source-head CAS, and restart a durable
+repository while an active publication lease exists. A real Excel Desktop/Web sideload smoke and
+real cloud-provider save/reacquisition remain manual host checks.
 
 ## Current Audit-RAG Status
 
-The audit-RAG path is now the local `main` direction. The Office.js executor and host integration
-contract described below were implemented on top of backend checkpoint `e574e19`. The former local
+The audit-RAG path is now the local `main` direction. The last committed checkpoint is `3548359`;
+the current working slice adds authenticated host bootstrap and durable raw-snapshot publication
+around that Office.js executor. The former local
 main harness series remains only at `archive/harness-v1.20`. The current checkpoint includes region-wide
 fact extraction, remote auditpaper standards MCP retrieval, collection-pinned CID verification,
 persistent paragraph caching, agent-ready brief generation, commit-gated readers, canonical
@@ -269,12 +299,24 @@ digest-bound human approval, one-use execution claims, workbook-level monotonic 
 formula and safe-number policy, execution leases, reread verification, failure quarantine, strict
 request/response schemas, and bounded FastAPI endpoints. The Add-in slice now provides
 an ExcelApi 1.13 task pane, exact cell and safety-constraint rereads, immutable manifest execution,
-worksheet recalculation, bounded witness submission, optional current-workbook save, and a validated
-host callback response contract. It still relies on host-owned session bootstrap, asset reacquisition,
-snapshot publication/resume, and reconciliation. The current complete Python suite is
-`754 passed, 1 skipped`; the focused Python workbook-edit suite is `134 passed`, the Add-in suite is
-`74 passed`, and TypeScript/Vite, compileall, wheel, and source-distribution builds pass. The
-Microsoft manifest validator still reports the unchanged localhost manifest as valid.
+worksheet recalculation, bounded witness submission, policy-controlled current-workbook save, and
+publication-only resume. Production bootstrap now accepts one short-lived principal-scoped selector
+from the same HTTPS origin. Required persistence retains the workbook lease, enforces one bounded
+publication claimant, requires a provider-attested direct revision and worksheet identity, validates
+the saved XLSX before immutable storage, and atomically advances the source head in the in-memory or
+SQLite repository. SQLite preserves workflow/idempotency/fence/claim/head state across restarts and
+reclaims expired command/publication workers with new fencing tokens. Real host authentication,
+durable session registries, cloud-provider reacquisition, production object storage, quarantine
+reconciliation, and raw-snapshot-to-prepared-bundle publication remain product integrations. The
+current complete Python suite is `810 passed, 1 skipped`; the focused workbook-edit/publication
+suite is `190 passed`, the Add-in suite is `87 passed`, and compileall, TypeScript/Vite, wheel, and
+source-distribution builds pass.
+
+The adopted product default is provider-neutral web upload, not Microsoft 365. A normal user
+uploads XLSX to server-owned object storage, runs prepare/aggregate, chats over the committed
+bundle, reviews edit proposals, and receives a revised workbook copy. OneDrive/SharePoint plus the
+Office.js executor is an optional direct-edit integration for Microsoft 365 and coauthoring users;
+it is not a prerequisite for the web UI or the core audit briefing product.
 
 The current orchestration plan is intentionally staged:
 
@@ -297,15 +339,22 @@ The current orchestration plan is intentionally staged:
    digest-bound raw source only when the host supplies it, refs-only checkpoints, and no
    later-turn authority.
 5. Stabilize the web service boundary around opaque bundle snapshots and repository interfaces.
-   Replace the in-memory receipt/idempotency/turn-lock implementations with durable DB/object
-   storage and a distributed claim/lock plus pending-claim reconciliation before multi-worker
-   production use. Keep the current API synchronous until a job/queue product contract is chosen.
+   The next product slice is the provider-neutral default path: bounded XLSX upload to server-owned
+   S3/MinIO-style object storage, prepare/aggregate jobs, bundle-bound chat, edit proposal/approval,
+   and a downloadable revised workbook. Replace the in-memory receipt/idempotency/turn-lock
+   implementations with durable DB/object storage and a distributed claim/lock plus pending-claim
+   reconciliation before multi-worker production use. Keep the current API synchronous until a
+   job/queue product contract is chosen.
 6. Maintain the separate approved-edit backend and Office.js executor: propose bounded edits,
    preview an exact live-cell diff, bind human approval, atomically claim a workbook-level fence,
    apply only the immutable manifest, and verify the executor's reread without promoting it to
-   prepared evidence. The next product slice is authenticated host session bootstrap plus durable,
-   idempotent asset save/new-snapshot publication and reconciliation; never grant arbitrary
-   JavaScript or Python execution through the conversation model.
+   prepared evidence. Maintain same-origin authenticated bootstrap, execution-scoped publication
+   claims, direct provider-revision/worksheet attestation, pre-store XLSX validation, immutable
+   assets, source-head CAS, and publication-only recovery. Treat this as an optional Microsoft 365
+   integration. A future direct-edit slice may add a OneDrive/SharePoint-style reacquirer, durable
+   host/session registries, reconciliation UI/jobs, and raw-snapshot-to-new-bundle preparation,
+   but it must not block the provider-neutral web product. Never grant arbitrary JavaScript or
+   Python execution through the conversation model.
 7. Move `prepare` orchestration to a graph only after replacing temporary staging with durable,
    crash-resumable staging that preserves commit-last publication and rollback guarantees.
 8. Keep the current single-call aggregate generation path outside the graph until it needs

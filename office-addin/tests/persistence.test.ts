@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { verificationFromSubmission } from "../src/executor/contracts";
 import {
+  AuthenticatedApiSnapshotPublisher,
   HostCallbackSnapshotPublisher,
   type SnapshotPublicationRequest,
 } from "../src/executor/persistence";
@@ -75,3 +76,78 @@ describe("HostCallbackSnapshotPublisher", () => {
     await expect(publisher.publishVerifiedSnapshot(request())).rejects.toThrow(TypeError);
   });
 });
+
+describe("AuthenticatedApiSnapshotPublisher", () => {
+  it("posts only exact manifest selectors with same-origin host binding", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(jsonResponse(publication()));
+    const publisher = new AuthenticatedApiSnapshotPublisher(
+      "https://addin.example",
+      "edit-host-11111111111111111111111111111111",
+      {
+        fetch,
+        currentOrigin: "https://addin.example",
+        mutationAttemptId: "2".repeat(32),
+      },
+    );
+
+    const result = await publisher.publishVerifiedSnapshot(request());
+
+    expect(result.snapshot_id).toBe(SHA_C);
+    const [url, init] = fetch.mock.calls[0]!;
+    expect(url).toContain(`/executions/${MANIFEST.execution_id}/snapshot-publication`);
+    expect(init?.credentials).toBe("same-origin");
+    expect(init?.redirect).toBe("error");
+    expect(new Headers(init?.headers).get("X-Audit-Workbook-Host-Session")).toBe(
+      "edit-host-11111111111111111111111111111111",
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({
+      manifest_ref: MANIFEST.manifest_ref,
+      manifest_sha256: MANIFEST.manifest_sha256,
+    });
+  });
+
+  it("recovers a committed publication by GET after both POST responses are lost", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockRejectedValueOnce(new TypeError("lost"))
+      .mockRejectedValueOnce(new TypeError("lost again"))
+      .mockResolvedValueOnce(jsonResponse(publication()));
+    const publisher = new AuthenticatedApiSnapshotPublisher(
+      "https://addin.example",
+      "edit-host-11111111111111111111111111111111",
+      {
+        fetch,
+        currentOrigin: "https://addin.example",
+        mutationAttemptId: "3".repeat(32),
+      },
+    );
+
+    const result = await publisher.publishVerifiedSnapshot(request());
+
+    expect(result.revision_id).toBe("revision-new");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch.mock.calls[2]![1]?.method).toBe("GET");
+    expect(fetch.mock.calls[0]![1]?.body).toBe(fetch.mock.calls[1]![1]?.body);
+    expect(
+      new Headers(fetch.mock.calls[0]![1]?.headers).get("Idempotency-Key"),
+    ).toBe(new Headers(fetch.mock.calls[1]![1]?.headers).get("Idempotency-Key"));
+  });
+
+  it("rejects cross-origin publication before fetch", () => {
+    expect(
+      () =>
+        new AuthenticatedApiSnapshotPublisher(
+          "https://api.example",
+          "edit-host-11111111111111111111111111111111",
+          { currentOrigin: "https://addin.example" },
+        ),
+    ).toThrow(TypeError);
+  });
+});
+
+function jsonResponse(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}

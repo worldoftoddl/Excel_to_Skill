@@ -4,10 +4,16 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 
+import openpyxl
 import pytest
 
 from excel_to_skill.audit.service import ServicePrincipal
+from excel_to_skill.audit.workbook_snapshot_publication import (
+    AcquiredWorkbook,
+    LocalImmutableWorkbookAssetStore,
+)
 from excel_to_skill.audit.workbook_edit_service import (
     InMemoryWorkbookEditRepository,
     InMemoryWorkbookSessionRepository,
@@ -168,6 +174,54 @@ def _assert_error(code: str, call) -> WorkbookEditServiceError:
     return caught.value
 
 
+class _SavedWorkbookReacquirer:
+    def __init__(
+        self,
+        *,
+        content: bytes | None = None,
+        revision_id: str = "revision-b",
+        workbook_instance_id: str = "workbook-instance-a",
+    ) -> None:
+        self.content = _saved_workbook_bytes() if content is None else content
+        self.revision_id = revision_id
+        self.workbook_instance_id = workbook_instance_id
+        self.calls = 0
+
+    def reacquire_saved_workbook(
+        self,
+        *,
+        expected_workbook_instance_id: str,
+        base_revision_id: str,
+        expected_sheet: str,
+        expected_worksheet_id: str,
+        max_bytes: int,
+    ) -> AcquiredWorkbook:
+        assert expected_workbook_instance_id == "workbook-instance-a"
+        assert base_revision_id == "revision-a"
+        assert expected_sheet == "매출채권"
+        assert expected_worksheet_id == "worksheet-a"
+        assert len(self.content) <= max_bytes
+        self.calls += 1
+        return AcquiredWorkbook(
+            provider_revision_id=self.revision_id,
+            predecessor_revision_id=base_revision_id,
+            worksheet_id=expected_worksheet_id,
+            workbook_instance_id=self.workbook_instance_id,
+            content=self.content,
+        )
+
+
+def _saved_workbook_bytes() -> bytes:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "매출채권"
+    worksheet["A1"] = "승인됨"
+    buffer = BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    return buffer.getvalue()
+
+
 def test_full_lifecycle_is_exact_fenced_and_session_verified(edit_service) -> None:
     service, _, _ = edit_service
     workflow_id, _ = _approved(service)
@@ -198,6 +252,178 @@ def test_full_lifecycle_is_exact_fenced_and_session_verified(edit_service) -> No
     assert workflow["approval_consumed"] is True
     assert workflow["execution_deadline"] == "2026-07-14T00:02:00Z"
     assert "challenge" not in workflow
+
+
+def test_publication_enabled_service_holds_lock_until_source_head_cas(tmp_path) -> None:
+    sessions = InMemoryWorkbookSessionRepository([_binding()])
+    edits = InMemoryWorkbookEditRepository()
+    reacquirer = _SavedWorkbookReacquirer()
+    service = WorkbookEditService(
+        sessions=sessions,
+        edits=edits,
+        saved_workbooks=reacquirer,
+        workbook_assets=LocalImmutableWorkbookAssetStore(tmp_path / "assets"),
+        now=lambda: NOW,
+    )
+    workflow_id, _ = _approved(service, prefix="publish-a-")
+    claim = _claim(service, workflow_id, key="publish-a-claim")
+    details = claim.receipt.details
+    _start(service, workflow_id, details, key="publish-a-start")
+    _verify(service, workflow_id, details, key="publish-a-verify")
+
+    second_workflow, _ = _approved(service, prefix="publish-b-")
+    _assert_error(
+        "ACTIVE_EXECUTION_CONFLICT",
+        lambda: _claim(service, second_workflow, key="publish-b-claim"),
+    )
+
+    manifest = details["apply_manifest"]
+    published = service.publish_verified_snapshot(
+        principal=PRINCIPAL,
+        workflow_id=workflow_id,
+        execution_id=details["execution_id"],
+        manifest_ref=manifest["manifest_ref"],
+        manifest_sha256=manifest["manifest_sha256"],
+        idempotency_key="publish-a-snapshot",
+    )
+    publication = published.receipt.details["publication"]
+
+    assert publication == service.get_snapshot_publication(
+        principal=PRINCIPAL,
+        workflow_id=workflow_id,
+        execution_id=details["execution_id"],
+    )
+    assert publication["base_snapshot_id"] == "a" * 64
+    assert publication["base_revision_id"] == "revision-a"
+    assert publication["revision_id"] == "revision-b"
+    assert publication["asset_persisted"] is True
+    assert publication["prepared_bundle_created"] is False
+    assert "asset_ref" not in publication
+    assert "workbook_instance_id" not in publication
+    assert reacquirer.calls == 1
+
+    replay = service.publish_verified_snapshot(
+        principal=PRINCIPAL,
+        workflow_id=workflow_id,
+        execution_id=details["execution_id"],
+        manifest_ref=manifest["manifest_ref"],
+        manifest_sha256=manifest["manifest_sha256"],
+        idempotency_key="publish-a-snapshot",
+    )
+    assert replay.replayed is True
+    assert replay.receipt.to_dict() == published.receipt.to_dict()
+    assert reacquirer.calls == 1
+
+    # The repository head now outranks the old mutable Office-session registration. A host must
+    # register a new exact revision before any subsequent edit can proceed.
+    _assert_error(
+        "STALE_REVISION",
+        lambda: _claim(service, second_workflow, key="publish-b-claim-after-cas"),
+    )
+
+
+def test_publication_enabled_service_can_pin_a_session_only_execution(tmp_path) -> None:
+    sessions = InMemoryWorkbookSessionRepository([_binding()])
+    service = WorkbookEditService(
+        sessions=sessions,
+        edits=InMemoryWorkbookEditRepository(),
+        saved_workbooks=_SavedWorkbookReacquirer(),
+        workbook_assets=LocalImmutableWorkbookAssetStore(tmp_path / "assets"),
+        now=lambda: NOW,
+    )
+    workflow_id, _ = _approved(service, prefix="session-only-a-")
+    claimed = service.claim_execution(
+        principal=PRINCIPAL,
+        workflow_id=workflow_id,
+        session_id="office-session-a",
+        idempotency_key="session-only-a-claim",
+        publication_required=False,
+    )
+    details = claimed.receipt.details
+    _start(service, workflow_id, details, key="session-only-a-start")
+    _verify(service, workflow_id, details, key="session-only-a-verify")
+
+    second_workflow, _ = _approved(service, prefix="session-only-b-")
+    second = _claim(service, second_workflow, key="session-only-b-claim")
+    assert second.receipt.details["fence"] == 2
+    manifest = details["apply_manifest"]
+    _assert_error(
+        "PUBLICATION_NOT_READY",
+        lambda: service.publish_verified_snapshot(
+            principal=PRINCIPAL,
+            workflow_id=workflow_id,
+            execution_id=details["execution_id"],
+            manifest_ref=manifest["manifest_ref"],
+            manifest_sha256=manifest["manifest_sha256"],
+            idempotency_key="session-only-publish",
+        ),
+    )
+
+
+def test_publication_identity_mismatch_keeps_workbook_quarantined(tmp_path) -> None:
+    sessions = InMemoryWorkbookSessionRepository([_binding()])
+    edits = InMemoryWorkbookEditRepository()
+    service = WorkbookEditService(
+        sessions=sessions,
+        edits=edits,
+        saved_workbooks=_SavedWorkbookReacquirer(workbook_instance_id="copied-workbook"),
+        workbook_assets=LocalImmutableWorkbookAssetStore(tmp_path / "assets"),
+        now=lambda: NOW,
+    )
+    workflow_id, _ = _approved(service, prefix="mismatch-a-")
+    details = _claim(service, workflow_id, key="mismatch-a-claim").receipt.details
+    _start(service, workflow_id, details, key="mismatch-a-start")
+    _verify(service, workflow_id, details, key="mismatch-a-verify")
+    manifest = details["apply_manifest"]
+
+    _assert_error(
+        "PUBLICATION_CONFLICT",
+        lambda: service.publish_verified_snapshot(
+            principal=PRINCIPAL,
+            workflow_id=workflow_id,
+            execution_id=details["execution_id"],
+            manifest_ref=manifest["manifest_ref"],
+            manifest_sha256=manifest["manifest_sha256"],
+            idempotency_key="mismatch-a-publish",
+        ),
+    )
+
+    second_workflow, _ = _approved(service, prefix="mismatch-b-")
+    _assert_error(
+        "ACTIVE_EXECUTION_CONFLICT",
+        lambda: _claim(service, second_workflow, key="mismatch-b-claim"),
+    )
+
+
+def test_saved_workbook_is_validated_before_immutable_asset_write(tmp_path) -> None:
+    sessions = InMemoryWorkbookSessionRepository([_binding()])
+    assets_root = tmp_path / "assets"
+    service = WorkbookEditService(
+        sessions=sessions,
+        edits=InMemoryWorkbookEditRepository(),
+        saved_workbooks=_SavedWorkbookReacquirer(content=b"not-an-xlsx"),
+        workbook_assets=LocalImmutableWorkbookAssetStore(assets_root),
+        now=lambda: NOW,
+    )
+    workflow_id, _ = _approved(service, prefix="invalid-saved-")
+    details = _claim(service, workflow_id, key="invalid-saved-claim").receipt.details
+    _start(service, workflow_id, details, key="invalid-saved-start")
+    _verify(service, workflow_id, details, key="invalid-saved-verify")
+    manifest = details["apply_manifest"]
+
+    _assert_error(
+        "PUBLICATION_CONFLICT",
+        lambda: service.publish_verified_snapshot(
+            principal=PRINCIPAL,
+            workflow_id=workflow_id,
+            execution_id=details["execution_id"],
+            manifest_ref=manifest["manifest_ref"],
+            manifest_sha256=manifest["manifest_sha256"],
+            idempotency_key="invalid-saved-publish",
+        ),
+    )
+
+    assert list((assets_root / "objects").iterdir()) == []
 
 
 def test_every_completed_mutation_replays_same_receipt(edit_service) -> None:

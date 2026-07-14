@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_workbook_snapshot_publication_request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest_ref", "manifest_sha256"],
+  "properties": {
+    "manifest_ref": {
+      "type": "string",
+      "pattern": "^edit-manifest:[0-9a-f]{64}$"
+    },
+    "manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

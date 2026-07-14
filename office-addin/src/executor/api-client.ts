@@ -10,6 +10,8 @@ import {
 const MAX_RESPONSE_BYTES = 3 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const IDEMPOTENCY_PREFIX = "awe1";
+const HOST_SESSION_HEADER = "X-Audit-Workbook-Host-Session";
+const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 
 export interface WorkbookEditApi {
   getWorkflow(workflowId: string): Promise<WorkflowResponse>;
@@ -50,6 +52,10 @@ export interface WorkbookEditApiClientOptions {
   fetch?: typeof fetch;
   credentials?: RequestCredentials;
   maxNetworkAttempts?: number;
+  /** Server-issued host session. When set, every request is bound to the current same origin. */
+  hostSessionId?: string;
+  /** Explicit browser origin for non-window hosts and deterministic tests. */
+  currentOrigin?: string;
   /** Unique to one user action; reuse only for in-method network retries. */
   mutationAttemptId?: string;
 }
@@ -72,10 +78,29 @@ export class WorkbookEditApiClient implements WorkbookEditApi {
   readonly #credentials: RequestCredentials;
   readonly #maxNetworkAttempts: number;
   readonly #mutationAttemptId: string;
+  readonly #hostSessionId: string | null;
   readonly #issuedMutationKeys = new Set<string>();
 
   constructor(baseUrl: string, options: WorkbookEditApiClientOptions = {}) {
     const parsed = parseBaseUrl(baseUrl);
+    const hostSessionId = options.hostSessionId;
+    if (hostSessionId === undefined) {
+      this.#hostSessionId = null;
+    } else {
+      if (!OPAQUE_ID.test(hostSessionId)) {
+        throw new TypeError("hostSessionId must be an exact opaque identifier");
+      }
+      const currentOrigin = parseCurrentOrigin(
+        options.currentOrigin ?? globalThis.location?.origin,
+      );
+      if (parsed.origin !== currentOrigin) {
+        throw new TypeError("authenticated workbook edit API must use the current origin");
+      }
+      if (options.credentials !== undefined && options.credentials !== "same-origin") {
+        throw new TypeError("authenticated workbook edit API requires same-origin credentials");
+      }
+      this.#hostSessionId = hostSessionId;
+    }
     this.#baseUrl = parsed.toString().replace(/\/$/, "");
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.#credentials = options.credentials ?? "same-origin";
@@ -229,9 +254,13 @@ export class WorkbookEditApiClient implements WorkbookEditApi {
           cache: "no-store",
           headers: {
             Accept: "application/json",
+            ...(this.#hostSessionId === null
+              ? {}
+              : { [HOST_SESSION_HEADER]: this.#hostSessionId }),
             ...(body === undefined ? {} : { "Content-Type": "application/json" }),
             ...(idempotency === undefined ? {} : { "Idempotency-Key": idempotency }),
           },
+          redirect: "error",
           ...(serializedBody === undefined ? {} : { body: serializedBody }),
         });
         const value = await readBoundedJson(response);
@@ -355,4 +384,22 @@ function parseBaseUrl(value: string): URL {
     throw new TypeError("base URL must not contain credentials, query, or fragment");
   }
   return parsed;
+}
+
+function parseCurrentOrigin(value: string | undefined): string {
+  if (value === undefined) {
+    throw new TypeError("currentOrigin is required for an authenticated host session");
+  }
+  const parsed = new URL(value);
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.pathname !== "/" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    throw new TypeError("currentOrigin must be an exact HTTPS origin");
+  }
+  return parsed.origin;
 }

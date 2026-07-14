@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_workbook_edit_host_bootstrap.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "host_session_id",
+    "workflow_id",
+    "session_id",
+    "bundle_id",
+    "snapshot_id",
+    "workbook_sha256",
+    "revision_id",
+    "sheet",
+    "worksheet_id",
+    "binding_sha256",
+    "expires_at",
+    "persistence_policy"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_workbook_edit_host_bootstrap.v1"},
+    "host_session_id": {
+      "type": "string",
+      "pattern": "^edit-host-[0-9a-f]{32}$"
+    },
+    "workflow_id": {"$ref": "#/$defs/opaque"},
+    "session_id": {"$ref": "#/$defs/opaque"},
+    "bundle_id": {"$ref": "#/$defs/opaque"},
+    "snapshot_id": {"$ref": "#/$defs/sha256"},
+    "workbook_sha256": {"$ref": "#/$defs/sha256"},
+    "revision_id": {"$ref": "#/$defs/opaque"},
+    "sheet": {"$ref": "#/$defs/sheet"},
+    "worksheet_id": {"$ref": "#/$defs/opaque"},
+    "binding_sha256": {"$ref": "#/$defs/sha256"},
+    "expires_at": {"$ref": "#/$defs/timestamp"},
+    "persistence_policy": {
+      "enum": ["required", "session_only", "unsupported"]
+    }
+  },
+  "$defs": {
+    "opaque": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sheet": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 31,
+      "pattern": "^[^\\[\\]:*?/\\\\]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 64,
+      "pattern": "Z$"
+    }
+  }
+}

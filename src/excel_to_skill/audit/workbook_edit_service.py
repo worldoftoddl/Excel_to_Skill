@@ -18,6 +18,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Literal, Mapping, Protocol, Sequence
 
 from .service import ServicePrincipal
+from .workbook_snapshot_publication import (
+    ImmutableWorkbookAssetStore,
+    SavedWorkbookReacquirer,
+    SnapshotPublicationBasis,
+    WorkbookSnapshotPublicationError,
+    build_snapshot_publication,
+    reacquire_saved_workbook,
+    store_acquired_workbook,
+    validate_saved_workbook_manifest,
+)
 from .workbook_edit import (
     MAX_SAFE_INTEGER,
     WorkbookEditError,
@@ -32,6 +42,7 @@ from .workbook_edit import (
 
 _OPAQUE_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+_MANIFEST_REF_RE = re.compile(r"\Aedit-manifest:[0-9a-f]{64}\Z")
 _MAX_IDEMPOTENCY_KEY_LENGTH = 200
 _VERIFICATION_STATES = frozenset(
     {"session_verified", "verification_failed", "indeterminate", "stale_precondition"}
@@ -75,6 +86,10 @@ class WorkbookEditRepositoryError(RuntimeError):
 
 class WorkbookEditConflictError(WorkbookEditRepositoryError):
     """A compare-and-swap or active-execution invariant failed."""
+
+
+class WorkbookEditPublicationClaimError(WorkbookEditConflictError):
+    """Another claimant currently owns the bounded publication attempt."""
 
 
 class WorkbookEditIdempotencyConflictError(WorkbookEditRepositoryError):
@@ -225,6 +240,8 @@ class WorkbookEditWorkflow:
     manifest: Mapping[str, object] | None = None
     witness: Mapping[str, object] | None = None
     verification: Mapping[str, object] | None = None
+    publication: Mapping[str, object] | None = None
+    publication_required: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -328,7 +345,47 @@ class WorkbookEditRepository(Protocol):
         expected_version: int,
         execution_id: str,
         challenge: str,
+        publication_required: bool,
         manifest_factory: Callable[[int], Mapping[str, object]],
+        receipt_factory: Callable[[WorkbookEditWorkflow], WorkbookEditReceipt],
+    ) -> WorkbookEditReceipt: ...
+
+    def claim_snapshot_publication(
+        self,
+        *,
+        principal: ServicePrincipal,
+        workflow_id: str,
+        execution_id: str,
+        fence: int,
+        publication_claim_token: str,
+        claim_expires_at: str,
+    ) -> None: ...
+
+    def release_snapshot_publication(
+        self,
+        *,
+        principal: ServicePrincipal,
+        workflow_id: str,
+        execution_id: str,
+        fence: int,
+        publication_claim_token: str,
+    ) -> None: ...
+
+    def publish_snapshot(
+        self,
+        *,
+        principal: ServicePrincipal,
+        idempotency_key: str,
+        command_sha256: str,
+        command_id: str,
+        claim_token: str,
+        workflow_id: str,
+        expected_version: int,
+        execution_id: str,
+        fence: int,
+        publication: Mapping[str, object],
+        asset_ref: str,
+        publication_claim_token: str,
         receipt_factory: Callable[[WorkbookEditWorkflow], WorkbookEditReceipt],
     ) -> WorkbookEditReceipt: ...
 
@@ -349,6 +406,9 @@ class WorkbookEditRepository(Protocol):
         workflow_id: str,
     ) -> WorkbookEditWorkflow | None: ...
 
+    def assert_snapshot_head(self, *, binding: WorkbookSessionBinding) -> None:
+        """Raise WorkbookEditConflictError when the registered raw source head moved."""
+
 
 @dataclass
 class _IdempotencyEntry:
@@ -357,6 +417,15 @@ class _IdempotencyEntry:
     state: Literal["pending", "completed"]
     claim_token: str | None
     receipt: WorkbookEditReceipt | None
+
+
+@dataclass(frozen=True)
+class _WorkbookSnapshotHead:
+    bundle_id: str
+    snapshot_id: str
+    workbook_sha256: str
+    revision_id: str
+    asset_ref: str | None
 
 
 class InMemoryWorkbookEditRepository:
@@ -368,6 +437,10 @@ class InMemoryWorkbookEditRepository:
         self._idempotency: dict[tuple[tuple[str, str], str], _IdempotencyEntry] = {}
         self._active: dict[tuple[str, ...], tuple[str, str, int]] = {}
         self._fences: dict[tuple[str, ...], int] = {}
+        self._snapshot_heads: dict[tuple[str, ...], _WorkbookSnapshotHead] = {}
+        self._publication_claims: dict[
+            tuple[str, ...], tuple[str, str, int, str, str]
+        ] = {}
 
     @staticmethod
     def _copy_workflow(value: WorkbookEditWorkflow) -> WorkbookEditWorkflow:
@@ -413,6 +486,19 @@ class InMemoryWorkbookEditRepository:
         with self._lock:
             found = self._workflows.get((principal.scope, workflow_id))
             return None if found is None else self._copy_workflow(found)
+
+    def assert_snapshot_head(self, *, binding: WorkbookSessionBinding) -> None:
+        with self._lock:
+            head = self._snapshot_heads.get(_live_workbook_key(binding))
+        if head is None:
+            return
+        if (
+            head.bundle_id != binding.bundle_id
+            or head.snapshot_id != binding.snapshot_id
+            or head.workbook_sha256 != binding.workbook_sha256
+            or head.revision_id != binding.revision_id
+        ):
+            raise WorkbookEditConflictError("source snapshot head changed")
 
     def publish_transition(
         self,
@@ -473,9 +559,12 @@ class InMemoryWorkbookEditRepository:
         expected_version: int,
         execution_id: str,
         challenge: str,
+        publication_required: bool,
         manifest_factory: Callable[[int], Mapping[str, object]],
         receipt_factory: Callable[[WorkbookEditWorkflow], WorkbookEditReceipt],
     ) -> WorkbookEditReceipt:
+        if not isinstance(publication_required, bool):
+            raise TypeError("publication_required must be a boolean")
         with self._lock:
             idem = self._idempotency.get((principal.scope, idempotency_key))
             if (
@@ -490,6 +579,7 @@ class InMemoryWorkbookEditRepository:
             current = self._workflows.get(workflow_key)
             if current is None or current.version != expected_version:
                 raise WorkbookEditConflictError("workflow version changed")
+            self.assert_snapshot_head(binding=current.binding)
             active_key = _live_workbook_key(current.binding)
             if active_key in self._active:
                 raise WorkbookEditConflictError("session already has an active execution")
@@ -506,6 +596,7 @@ class InMemoryWorkbookEditRepository:
                 fence=fence,
                 challenge=challenge,
                 manifest=manifest,
+                publication_required=publication_required,
             )
             receipt = receipt_factory(claimed)
             copied_claimed = self._copy_workflow(claimed)
@@ -523,6 +614,179 @@ class InMemoryWorkbookEditRepository:
             self._fences[active_key] = fence
             self._idempotency[(principal.scope, idempotency_key)] = completed_entry
             return return_receipt
+
+    def publish_snapshot(
+        self,
+        *,
+        principal: ServicePrincipal,
+        idempotency_key: str,
+        command_sha256: str,
+        command_id: str,
+        claim_token: str,
+        workflow_id: str,
+        expected_version: int,
+        execution_id: str,
+        fence: int,
+        publication: Mapping[str, object],
+        asset_ref: str,
+        publication_claim_token: str,
+        receipt_factory: Callable[[WorkbookEditWorkflow], WorkbookEditReceipt],
+    ) -> WorkbookEditReceipt:
+        """Atomically advance the raw-workbook head and release the publication lease.
+
+        Immutable asset storage happens before this transaction.  A failed CAS can therefore
+        leave only an unreferenced content-addressed object; it can never expose a losing head.
+        """
+
+        with self._lock:
+            idem_key = (principal.scope, idempotency_key)
+            idem = self._idempotency.get(idem_key)
+            if (
+                idem is None
+                or idem.state != "pending"
+                or idem.command_sha256 != command_sha256
+                or idem.command_id != command_id
+                or idem.claim_token != claim_token
+            ):
+                raise WorkbookEditIdempotencyClaimError("command claim mismatch")
+            workflow_key = (principal.scope, workflow_id)
+            current = self._workflows.get(workflow_key)
+            if current is None or current.version != expected_version:
+                raise WorkbookEditConflictError("workflow version changed")
+            if (
+                current.state != "session_verified"
+                or current.execution_id != execution_id
+                or current.fence != fence
+                or current.publication is not None
+            ):
+                raise WorkbookEditConflictError("publication basis changed")
+            active_key = _live_workbook_key(current.binding)
+            if self._active.get(active_key) != (workflow_id, execution_id, fence):
+                raise WorkbookEditConflictError("publication lease changed")
+            publication_claim = self._publication_claims.get(active_key)
+            if publication_claim is None or publication_claim[:4] != (
+                workflow_id,
+                execution_id,
+                fence,
+                publication_claim_token,
+            ):
+                raise WorkbookEditConflictError("publication claim changed")
+
+            base = current.binding
+            head = self._snapshot_heads.get(active_key)
+            if head is None:
+                head = _WorkbookSnapshotHead(
+                    bundle_id=base.bundle_id,
+                    snapshot_id=base.snapshot_id,
+                    workbook_sha256=base.workbook_sha256,
+                    revision_id=base.revision_id,
+                    asset_ref=None,
+                )
+            if (
+                head.bundle_id != base.bundle_id
+                or head.snapshot_id != base.snapshot_id
+                or head.workbook_sha256 != base.workbook_sha256
+                or head.revision_id != base.revision_id
+            ):
+                raise WorkbookEditConflictError("source snapshot head changed")
+            try:
+                copied_publication = copy.deepcopy(dict(publication))
+                new_head = _WorkbookSnapshotHead(
+                    bundle_id=base.bundle_id,
+                    snapshot_id=str(copied_publication["snapshot_id"]),
+                    workbook_sha256=str(copied_publication["workbook_sha256"]),
+                    revision_id=str(copied_publication["revision_id"]),
+                    asset_ref=asset_ref,
+                )
+                published = replace(
+                    current,
+                    version=current.version + 1,
+                    publication=copied_publication,
+                )
+                receipt = receipt_factory(published)
+                copied_workflow = self._copy_workflow(published)
+                copied_receipt = self._copy_receipt(receipt)
+            except Exception:
+                raise
+
+            self._workflows[workflow_key] = copied_workflow
+            self._snapshot_heads[active_key] = new_head
+            del self._publication_claims[active_key]
+            del self._active[active_key]
+            self._idempotency[idem_key] = _IdempotencyEntry(
+                command_sha256,
+                command_id,
+                "completed",
+                None,
+                copied_receipt,
+            )
+            return self._copy_receipt(copied_receipt)
+
+    def claim_snapshot_publication(
+        self,
+        *,
+        principal: ServicePrincipal,
+        workflow_id: str,
+        execution_id: str,
+        fence: int,
+        publication_claim_token: str,
+        claim_expires_at: str,
+    ) -> None:
+        _parse_iso(claim_expires_at)
+        with self._lock:
+            workflow = self._workflows.get((principal.scope, workflow_id))
+            if (
+                workflow is None
+                or workflow.state != "session_verified"
+                or workflow.execution_id != execution_id
+                or workflow.fence != fence
+                or workflow.publication is not None
+            ):
+                raise WorkbookEditConflictError("publication basis changed")
+            active_key = _live_workbook_key(workflow.binding)
+            if self._active.get(active_key) != (workflow_id, execution_id, fence):
+                raise WorkbookEditConflictError("publication lease changed")
+            current = self._publication_claims.get(active_key)
+            if current is not None:
+                if current[:4] == (
+                    workflow_id,
+                    execution_id,
+                    fence,
+                    publication_claim_token,
+                ):
+                    return
+                raise WorkbookEditPublicationClaimError("publication already in progress")
+            self._publication_claims[active_key] = (
+                workflow_id,
+                execution_id,
+                fence,
+                publication_claim_token,
+                claim_expires_at,
+            )
+
+    def release_snapshot_publication(
+        self,
+        *,
+        principal: ServicePrincipal,
+        workflow_id: str,
+        execution_id: str,
+        fence: int,
+        publication_claim_token: str,
+    ) -> None:
+        with self._lock:
+            workflow = self._workflows.get((principal.scope, workflow_id))
+            if workflow is None:
+                raise WorkbookEditConflictError("publication basis changed")
+            active_key = _live_workbook_key(workflow.binding)
+            claim = self._publication_claims.get(active_key)
+            if claim is None or claim[:4] != (
+                workflow_id,
+                execution_id,
+                fence,
+                publication_claim_token,
+            ):
+                raise WorkbookEditConflictError("publication claim changed")
+            del self._publication_claims[active_key]
 
     def abort_command(
         self,
@@ -557,6 +821,9 @@ class WorkbookEditService:
         edits: WorkbookEditRepository,
         approval_ttl: timedelta = timedelta(minutes=5),
         execution_ttl: timedelta = timedelta(minutes=2),
+        publication_claim_ttl: timedelta = timedelta(minutes=5),
+        saved_workbooks: SavedWorkbookReacquirer | None = None,
+        workbook_assets: ImmutableWorkbookAssetStore | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(approval_ttl, timedelta) or not (
@@ -567,11 +834,28 @@ class WorkbookEditService:
             timedelta(seconds=1) <= execution_ttl <= timedelta(minutes=10)
         ):
             raise ValueError("execution_ttl must be between one second and ten minutes")
+        if not isinstance(publication_claim_ttl, timedelta) or not (
+            timedelta(seconds=1) <= publication_claim_ttl <= timedelta(minutes=15)
+        ):
+            raise ValueError(
+                "publication_claim_ttl must be between one second and fifteen minutes"
+            )
+        if (saved_workbooks is None) != (workbook_assets is None):
+            raise ValueError(
+                "saved_workbooks and workbook_assets must be configured together"
+            )
         self._sessions = sessions
         self._edits = edits
         self._approval_ttl = approval_ttl
         self._execution_ttl = execution_ttl
+        self._publication_claim_ttl = publication_claim_ttl
+        self._saved_workbooks = saved_workbooks
+        self._workbook_assets = workbook_assets
         self._now = now or (lambda: datetime.now(timezone.utc))
+
+    @property
+    def snapshot_publication_enabled(self) -> bool:
+        return self._saved_workbooks is not None and self._workbook_assets is not None
 
     def _clock(self) -> datetime:
         value = self._now()
@@ -669,6 +953,14 @@ class WorkbookEditService:
             raise _public_error("STALE_REVISION")
         if current.sheet != expected.sheet or current.worksheet_id != expected.worksheet_id:
             raise _public_error("WORKSHEET_MISMATCH")
+        try:
+            self._edits.assert_snapshot_head(binding=expected)
+        except WorkbookEditConflictError:
+            raise _public_error("STALE_REVISION") from None
+        except WorkbookEditRepositoryError:
+            raise _public_error("SERVICE_UNAVAILABLE") from None
+        except Exception:
+            raise _public_error("SERVICE_UNAVAILABLE") from None
 
     def _begin(
         self,
@@ -735,6 +1027,28 @@ class WorkbookEditService:
         except Exception:
             # The original fixed error is safer than leaking repository state.  A surviving
             # pending claim intentionally makes a later retry report COMMAND_IN_PROGRESS.
+            pass
+
+    def _release_publication_claim(
+        self,
+        *,
+        principal: ServicePrincipal,
+        claim: tuple[str, str, int, str] | None,
+    ) -> None:
+        if claim is None:
+            return
+        workflow_id, execution_id, fence, publication_claim_token = claim
+        try:
+            self._edits.release_snapshot_publication(
+                principal=principal,
+                workflow_id=workflow_id,
+                execution_id=execution_id,
+                fence=fence,
+                publication_claim_token=publication_claim_token,
+            )
+        except Exception:
+            # A surviving claim remains a fail-closed publication quarantine. Durable
+            # repositories may reclaim only after their bounded claim lease expires.
             pass
 
     def _publish(
@@ -1057,13 +1371,23 @@ class WorkbookEditService:
         workflow_id: str,
         session_id: str,
         idempotency_key: str,
+        publication_required: bool | None = None,
     ) -> WorkbookEditSubmission:
         clean_workflow_id = _public_opaque(workflow_id)
         clean_session_id = _public_opaque(session_id)
+        if publication_required is None:
+            require_publication = self.snapshot_publication_enabled
+        elif isinstance(publication_required, bool):
+            require_publication = publication_required
+        else:
+            raise _public_error("INVALID_REQUEST")
+        if require_publication and not self.snapshot_publication_enabled:
+            raise _public_error("PUBLICATION_UNAVAILABLE")
         command = {
             "operation": "claim_execution",
             "workflow_id": clean_workflow_id,
             "session_id": clean_session_id,
+            "publication_required": require_publication,
         }
         key, digest, command_id, claim_token, replay = self._begin(
             principal=principal, idempotency_key=idempotency_key, command=command
@@ -1120,6 +1444,7 @@ class WorkbookEditService:
                 expected_version=workflow.version,
                 execution_id=execution_id,
                 challenge=challenge,
+                publication_required=require_publication,
                 manifest_factory=manifest_factory,
                 receipt_factory=receipt_factory,
             )
@@ -1378,7 +1703,16 @@ class WorkbookEditService:
                 workflow=updated,
                 expected_version=workflow.version,
                 details={"verification": verification},
-                release_active=verified_state in {"session_verified", "stale_precondition"},
+                # In a publication-enabled host, a verified write still owns the workbook-level
+                # publication lease. Only the raw source-head CAS releases it. The legacy/local
+                # session-only service keeps its previous terminal behavior.
+                release_active=(
+                    verified_state == "stale_precondition"
+                    or (
+                        verified_state == "session_verified"
+                        and workflow.publication_required is not True
+                    )
+                ),
                 require_current_binding=False,
                 require_active=True,
             )
@@ -1528,6 +1862,264 @@ class WorkbookEditService:
             },
         }
 
+    def publish_verified_snapshot(
+        self,
+        *,
+        principal: ServicePrincipal,
+        workflow_id: str,
+        execution_id: str,
+        manifest_ref: str,
+        manifest_sha256: str,
+        idempotency_key: str,
+    ) -> WorkbookEditSubmission:
+        """Reacquire, persist, and CAS-publish one verified saved workbook revision.
+
+        The client supplies only exact content-addressed execution selectors. Workbook bytes,
+        provider revision, physical workbook identity, asset location, and the base source head
+        all come from server-owned state.
+        """
+
+        clean_workflow_id = _public_opaque(workflow_id)
+        clean_execution_id = _public_opaque(execution_id)
+        clean_manifest_ref = _public_manifest_ref(manifest_ref)
+        clean_manifest_sha256 = _public_sha256(manifest_sha256)
+        command = {
+            "operation": "publish_verified_snapshot",
+            "workflow_id": clean_workflow_id,
+            "execution_id": clean_execution_id,
+            "manifest_ref": clean_manifest_ref,
+            "manifest_sha256": clean_manifest_sha256,
+        }
+        key, digest, command_id, claim_token, replay = self._begin(
+            principal=principal,
+            idempotency_key=idempotency_key,
+            command=command,
+        )
+        if replay is not None:
+            return replay
+        active_publication_claim: tuple[str, str, int, str] | None = None
+        try:
+            if not self.snapshot_publication_enabled:
+                raise _public_error("PUBLICATION_UNAVAILABLE")
+            workflow = self._stored(
+                principal=principal,
+                workflow_id=clean_workflow_id,
+            )
+            if (
+                workflow.state != "session_verified"
+                or workflow.publication is not None
+                or workflow.publication_required is not True
+            ):
+                raise _public_error("PUBLICATION_NOT_READY")
+            if (
+                workflow.execution_id != clean_execution_id
+                or workflow.manifest is None
+                or workflow.verification is None
+                or workflow.manifest.get("manifest_ref") != clean_manifest_ref
+                or workflow.manifest.get("manifest_sha256") != clean_manifest_sha256
+                or workflow.verification.get("status") != "session_verified"
+                or workflow.verification.get("new_snapshot_required") is not True
+                or workflow.verification.get("asset_persisted") is not False
+            ):
+                raise _public_error("PUBLICATION_BASIS_MISMATCH")
+            if workflow.fence is None:
+                raise _public_error("SERVICE_UNAVAILABLE")
+            claim_expires_at = _iso_utc(self._clock() + self._publication_claim_ttl)
+            self._edits.claim_snapshot_publication(
+                principal=principal,
+                workflow_id=workflow.workflow_id,
+                execution_id=clean_execution_id,
+                fence=workflow.fence,
+                publication_claim_token=claim_token,
+                claim_expires_at=claim_expires_at,
+            )
+            active_publication_claim = (
+                workflow.workflow_id,
+                clean_execution_id,
+                workflow.fence,
+                claim_token,
+            )
+            basis = SnapshotPublicationBasis(
+                bundle_id=workflow.binding.bundle_id,
+                execution_id=clean_execution_id,
+                manifest_ref=clean_manifest_ref,
+                manifest_sha256=clean_manifest_sha256,
+                base_snapshot_id=workflow.binding.snapshot_id,
+                base_workbook_sha256=workflow.binding.workbook_sha256,
+                base_revision_id=workflow.binding.revision_id,
+                sheet=workflow.binding.sheet,
+                worksheet_id=workflow.binding.worksheet_id,
+                workbook_instance_id=workflow.binding.workbook_instance_id,
+            )
+            assert self._saved_workbooks is not None
+            assert self._workbook_assets is not None
+            acquired = reacquire_saved_workbook(
+                basis=basis,
+                reacquirer=self._saved_workbooks,
+            )
+            validate_saved_workbook_manifest(acquired, workflow.manifest)
+            stored = store_acquired_workbook(
+                acquired=acquired,
+                assets=self._workbook_assets,
+            )
+            publication = build_snapshot_publication(
+                basis=basis,
+                acquired=acquired,
+                stored=stored,
+            )
+
+            def receipt_factory(published: WorkbookEditWorkflow) -> WorkbookEditReceipt:
+                return _receipt(
+                    command_id=command_id,
+                    workflow=published,
+                    details={"publication": publication},
+                )
+
+            receipt = self._edits.publish_snapshot(
+                principal=principal,
+                idempotency_key=key,
+                command_sha256=digest,
+                command_id=command_id,
+                claim_token=claim_token,
+                workflow_id=workflow.workflow_id,
+                expected_version=workflow.version,
+                execution_id=clean_execution_id,
+                fence=workflow.fence,
+                publication=publication,
+                asset_ref=stored.asset_ref,
+                publication_claim_token=claim_token,
+                receipt_factory=receipt_factory,
+            )
+            active_publication_claim = None
+            return WorkbookEditSubmission(receipt=receipt, replayed=False)
+        except WorkbookEditServiceError:
+            self._release_publication_claim(
+                principal=principal,
+                claim=active_publication_claim,
+            )
+            self._abort_pending(
+                principal=principal,
+                idempotency_key=key,
+                command_sha256=digest,
+                command_id=command_id,
+                claim_token=claim_token,
+            )
+            raise
+        except WorkbookSnapshotPublicationError as error:
+            self._release_publication_claim(
+                principal=principal,
+                claim=active_publication_claim,
+            )
+            self._abort_pending(
+                principal=principal,
+                idempotency_key=key,
+                command_sha256=digest,
+                command_id=command_id,
+                claim_token=claim_token,
+            )
+            raise _publication_error(error) from None
+        except WorkbookEditPublicationClaimError:
+            self._release_publication_claim(
+                principal=principal,
+                claim=active_publication_claim,
+            )
+            self._abort_pending(
+                principal=principal,
+                idempotency_key=key,
+                command_sha256=digest,
+                command_id=command_id,
+                claim_token=claim_token,
+            )
+            raise _public_error("COMMAND_IN_PROGRESS") from None
+        except WorkbookEditConflictError:
+            self._release_publication_claim(
+                principal=principal,
+                claim=active_publication_claim,
+            )
+            self._abort_pending(
+                principal=principal,
+                idempotency_key=key,
+                command_sha256=digest,
+                command_id=command_id,
+                claim_token=claim_token,
+            )
+            raise _public_error("PUBLICATION_CONFLICT") from None
+        except WorkbookEditRepositoryError:
+            self._release_publication_claim(
+                principal=principal,
+                claim=active_publication_claim,
+            )
+            self._abort_pending(
+                principal=principal,
+                idempotency_key=key,
+                command_sha256=digest,
+                command_id=command_id,
+                claim_token=claim_token,
+            )
+            raise _public_error("SERVICE_UNAVAILABLE") from None
+        except Exception:
+            self._release_publication_claim(
+                principal=principal,
+                claim=active_publication_claim,
+            )
+            self._abort_pending(
+                principal=principal,
+                idempotency_key=key,
+                command_sha256=digest,
+                command_id=command_id,
+                claim_token=claim_token,
+            )
+            raise _public_error("SERVICE_UNAVAILABLE") from None
+
+    def get_snapshot_publication(
+        self,
+        *,
+        principal: ServicePrincipal,
+        workflow_id: str,
+        execution_id: str,
+    ) -> dict[str, object]:
+        workflow = self._stored(
+            principal=principal,
+            workflow_id=_public_opaque(workflow_id),
+        )
+        clean_execution_id = _public_opaque(execution_id)
+        if workflow.execution_id != clean_execution_id:
+            raise _public_error("PUBLICATION_NOT_FOUND")
+        if workflow.publication is None:
+            if workflow.state == "session_verified":
+                raise _public_error("PUBLICATION_NOT_READY")
+            raise _public_error("PUBLICATION_NOT_FOUND")
+        return copy.deepcopy(dict(workflow.publication))
+
+    def resolve_current_binding(
+        self,
+        *,
+        principal: ServicePrincipal,
+        workflow_id: str,
+    ) -> WorkbookSessionBinding:
+        """Return an exact private binding for an authenticated host-session issuer.
+
+        This method is intentionally not exposed by the public workbook-edit HTTP adapter.  The
+        host bootstrap service hashes the private binding, retains workbook_instance_id only on
+        the server, and returns a separately bounded public document.
+        """
+
+        workflow = self._current(principal=principal, workflow_id=workflow_id)
+        return copy.deepcopy(workflow.binding)
+
+    def resolve_published_binding(
+        self,
+        *,
+        principal: ServicePrincipal,
+        workflow_id: str,
+    ) -> WorkbookSessionBinding:
+        """Return the immutable base binding only after its snapshot publication committed."""
+
+        workflow = self._stored(principal=principal, workflow_id=workflow_id)
+        if workflow.publication is None:
+            raise _public_error("PUBLICATION_NOT_FOUND")
+        return copy.deepcopy(workflow.binding)
+
 
 _ERRORS: dict[str, tuple[str, int]] = {
     "INVALID_REQUEST": ("The request does not match the workbook edit contract.", 400),
@@ -1558,6 +2150,11 @@ _ERRORS: dict[str, tuple[str, int]] = {
     "UNSAFE_TARGET": ("The target cell is outside the supported safe edit scope.", 409),
     "NO_OP_EDIT": ("The edit would not change the current Office state.", 409),
     "LIMIT_EXCEEDED": ("The workbook edit payload exceeds the supported limit.", 413),
+    "PUBLICATION_UNAVAILABLE": ("Saved workbook publication is not configured.", 503),
+    "PUBLICATION_NOT_READY": ("The verified workbook publication is not ready.", 409),
+    "PUBLICATION_NOT_FOUND": ("The workbook snapshot publication was not found.", 404),
+    "PUBLICATION_BASIS_MISMATCH": ("The publication request does not match the verified execution.", 409),
+    "PUBLICATION_CONFLICT": ("The workbook source snapshot head changed.", 409),
     "EDIT_CONTRACT_MISMATCH": ("The workbook edit artifact failed validation.", 500),
     "SERVICE_UNAVAILABLE": ("The workbook edit service could not safely complete the request.", 503),
 }
@@ -1583,6 +2180,27 @@ def _contract_error(error: WorkbookEditError) -> WorkbookEditServiceError:
     return _public_error("EDIT_CONTRACT_MISMATCH")
 
 
+def _publication_error(
+    error: WorkbookSnapshotPublicationError,
+) -> WorkbookEditServiceError:
+    if error.code == "SOURCE_LIMIT_EXCEEDED":
+        return _public_error("LIMIT_EXCEEDED")
+    if error.code in {
+        "WORKBOOK_INSTANCE_MISMATCH",
+        "WORKSHEET_MISMATCH",
+        "REVISION_NOT_ADVANCED",
+        "REVISION_CHAIN_MISMATCH",
+        "WORKBOOK_NOT_CHANGED",
+        "SNAPSHOT_NOT_ADVANCED",
+        "INVALID_ACQUIRED_WORKBOOK",
+        "INVALID_STORED_ASSET",
+        "ASSET_INTEGRITY_MISMATCH",
+        "SAVED_WORKBOOK_MISMATCH",
+    }:
+        return _public_error("PUBLICATION_CONFLICT")
+    return _public_error("SERVICE_UNAVAILABLE")
+
+
 def _require_principal(value: object) -> ServicePrincipal:
     if not isinstance(value, ServicePrincipal):
         raise _public_error("PRINCIPAL_MISMATCH")
@@ -1601,6 +2219,12 @@ def _public_sha256(value: object) -> str:
         return _sha256(value, field="sha256")
     except (TypeError, ValueError):
         raise _public_error("INVALID_REQUEST") from None
+
+
+def _public_manifest_ref(value: object) -> str:
+    if not isinstance(value, str) or _MANIFEST_REF_RE.fullmatch(value) is None:
+        raise _public_error("INVALID_REQUEST")
+    return value
 
 
 def _public_fence(value: object) -> int:

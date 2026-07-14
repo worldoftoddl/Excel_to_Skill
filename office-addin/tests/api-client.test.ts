@@ -34,6 +34,66 @@ describe("WorkbookEditApiClient", () => {
     expect(new Headers(init?.headers).has("Idempotency-Key")).toBe(false);
   });
 
+  it("binds every authenticated GET and POST to the exact same-origin host session", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse(WORKFLOW_RESPONSE))
+      .mockResolvedValueOnce(jsonResponse(CLAIM_SUBMISSION));
+    const client = new WorkbookEditApiClient("https://addin.example/api", {
+      fetch,
+      hostSessionId: "host-session-a",
+      currentOrigin: "https://addin.example",
+    });
+
+    await client.getWorkflow("workflow-a");
+    await client.claimExecution("workflow-a", "office-session-a");
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    for (const call of fetch.mock.calls) {
+      const init = call[1]!;
+      expect(init.credentials).toBe("same-origin");
+      expect(init.cache).toBe("no-store");
+      expect(init.redirect).toBe("error");
+      expect(new Headers(init.headers).get("X-Audit-Workbook-Host-Session")).toBe(
+        "host-session-a",
+      );
+    }
+  });
+
+  it("rejects cross-origin or weakened credential configuration for a host session", () => {
+    expect(
+      () =>
+        new WorkbookEditApiClient("https://api.example", {
+          hostSessionId: "host-session-a",
+          currentOrigin: "https://addin.example",
+        }),
+    ).toThrow(TypeError);
+    expect(
+      () =>
+        new WorkbookEditApiClient("https://addin.example", {
+          hostSessionId: "host-session-a",
+          currentOrigin: "https://addin.example",
+          credentials: "include",
+        }),
+    ).toThrow(TypeError);
+    expect(
+      () =>
+        new WorkbookEditApiClient("https://addin.example", {
+          hostSessionId: "not valid",
+          currentOrigin: "https://addin.example",
+        }),
+    ).toThrow(TypeError);
+  });
+
+  it("requires an explicit or browser current origin for an authenticated client", () => {
+    expect(
+      () =>
+        new WorkbookEditApiClient("https://addin.example", {
+          hostSessionId: "host-session-a",
+        }),
+    ).toThrow(TypeError);
+  });
+
   it("rejects a workflow response routed from a different requested ID", async () => {
     const misrouted = clone(WORKFLOW_RESPONSE);
     misrouted.workflow.workflow_id = "workflow-b";
