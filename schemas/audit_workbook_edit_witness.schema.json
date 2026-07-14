@@ -1,0 +1,120 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "audit_workbook_edit_witness.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "witness_ref", "witness_sha256", "manifest_ref",
+    "manifest_sha256", "execution_id", "fencing_token", "challenge_nonce",
+    "office_binding", "executor_id", "outcome", "write_started",
+    "recalculation", "observed_before", "observed_before_sha256",
+    "actual_after", "actual_after_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_workbook_edit_witness.v1"},
+    "witness_ref": {"type": "string", "pattern": "^edit-witness:[0-9a-f]{64}$"},
+    "witness_sha256": {"$ref": "#/definitions/sha256"},
+    "manifest_ref": {"type": "string", "pattern": "^edit-manifest:[0-9a-f]{64}$"},
+    "manifest_sha256": {"$ref": "#/definitions/sha256"},
+    "execution_id": {"$ref": "#/definitions/opaque"},
+    "fencing_token": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "challenge_nonce": {"$ref": "#/definitions/opaque"},
+    "office_binding": {"$ref": "#/definitions/officeBinding"},
+    "executor_id": {"$ref": "#/definitions/opaque"},
+    "outcome": {"enum": ["applied", "stale_precondition", "indeterminate"]},
+    "write_started": {"type": "boolean"},
+    "recalculation": {"enum": ["none", "recalculate"]},
+    "observed_before": {"$ref": "#/definitions/stateList"},
+    "observed_before_sha256": {"$ref": "#/definitions/sha256"},
+    "actual_after": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/definitions/stateList"}]
+    },
+    "actual_after_sha256": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/definitions/sha256"}]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "applied"}}},
+      "then": {
+        "properties": {
+          "write_started": {"const": true},
+          "actual_after": {"$ref": "#/definitions/stateList"},
+          "actual_after_sha256": {"$ref": "#/definitions/sha256"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "stale_precondition"}}},
+      "then": {
+        "properties": {
+          "write_started": {"const": false},
+          "actual_after": {"type": "null"},
+          "actual_after_sha256": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "indeterminate"}}},
+      "then": {"properties": {"write_started": {"const": true}}}
+    }
+  ],
+  "definitions": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "opaque": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "cell": {"type": "string", "pattern": "^[A-Z]{1,3}[1-9][0-9]*$"},
+    "scalar": {
+      "oneOf": [
+        {"type": "string"},
+        {"type": "number", "minimum": -9007199254740991, "maximum": 9007199254740991},
+        {"type": "boolean"}
+      ]
+    },
+    "nullableScalar": {
+      "oneOf": [
+        {"$ref": "#/definitions/scalar"},
+        {"type": "null"}
+      ]
+    },
+    "officeBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "revision_id", "worksheet_id", "sheet"],
+      "properties": {
+        "session_id": {"$ref": "#/definitions/opaque"},
+        "revision_id": {"$ref": "#/definitions/opaque"},
+        "worksheet_id": {"$ref": "#/definitions/opaque"},
+        "sheet": {"type": "string", "minLength": 1, "maxLength": 31}
+      }
+    },
+    "authored": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["kind"], "properties": {"kind": {"const": "blank"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": {"kind": {"const": "value"}, "value": {"$ref": "#/definitions/scalar"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "formula"], "properties": {"kind": {"const": "formula"}, "formula": {"type": "string", "minLength": 2, "maxLength": 8192, "pattern": "^="}}}
+      ]
+    },
+    "constraints": {
+      "type": "object", "additionalProperties": false,
+      "required": ["merged", "spill", "protected", "table_member"],
+      "properties": {
+        "merged": {"type": "boolean"},
+        "spill": {"enum": ["none", "parent", "child"]},
+        "protected": {"type": "boolean"},
+        "table_member": {"type": "boolean"}
+      }
+    },
+    "state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cell", "authored", "calculated_value", "calculated_type", "number_format", "target_constraints"],
+      "properties": {
+        "cell": {"$ref": "#/definitions/cell"},
+        "authored": {"$ref": "#/definitions/authored"},
+        "calculated_value": {"$ref": "#/definitions/nullableScalar"},
+        "calculated_type": {"enum": ["empty", "string", "number", "boolean", "error"]},
+        "number_format": {"type": "string", "minLength": 1, "maxLength": 500},
+        "target_constraints": {"$ref": "#/definitions/constraints"}
+      }
+    },
+    "stateList": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/definitions/state"}}
+  }
+}

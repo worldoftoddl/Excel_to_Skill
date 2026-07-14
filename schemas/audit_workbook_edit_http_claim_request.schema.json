@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_workbook_edit_http_claim_request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_id"],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    }
+  }
+}

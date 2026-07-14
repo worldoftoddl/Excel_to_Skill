@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_workbook_edit_http_workflow.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workflow"],
+  "properties": {
+    "schema_version": {"const": "audit_workbook_edit_http_workflow.v1"},
+    "workflow": {"$ref": "#/$defs/workflow"}
+  },
+  "$defs": {
+    "opaque": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sheet": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 31,
+      "pattern": "^[^\\[\\]:*?/\\\\]+$"
+    },
+    "nullableOpaque": {
+      "oneOf": [{"$ref": "#/$defs/opaque"}, {"type": "null"}]
+    },
+    "nullableSha256": {
+      "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    },
+    "nullableProposalRef": {
+      "oneOf": [
+        {"type": "string", "pattern": "^edit-proposal:[0-9a-f]{64}$"},
+        {"type": "null"}
+      ]
+    },
+    "nullablePreviewRef": {
+      "oneOf": [
+        {"type": "string", "pattern": "^edit-preview:[0-9a-f]{64}$"},
+        {"type": "null"}
+      ]
+    },
+    "nullableApprovalRef": {
+      "oneOf": [
+        {"type": "string", "pattern": "^edit-approval:[0-9a-f]{64}$"},
+        {"type": "null"}
+      ]
+    },
+    "nullableManifestRef": {
+      "oneOf": [
+        {"type": "string", "pattern": "^edit-manifest:[0-9a-f]{64}$"},
+        {"type": "null"}
+      ]
+    },
+    "nullableVerificationRef": {
+      "oneOf": [
+        {"type": "string", "pattern": "^edit-verification:[0-9a-f]{64}$"},
+        {"type": "null"}
+      ]
+    },
+    "manifestSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_ref", "manifest_sha256", "execution_id", "fencing_token", "redacted"
+      ],
+      "properties": {
+        "manifest_ref": {"type": "string", "pattern": "^edit-manifest:[0-9a-f]{64}$"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "execution_id": {"$ref": "#/$defs/opaque"},
+        "fencing_token": {"type": "integer", "minimum": 1},
+        "redacted": {"const": true}
+      }
+    },
+    "refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_ref", "preview_ref", "approval_ref", "manifest_ref", "verification_ref"
+      ],
+      "properties": {
+        "proposal_ref": {"$ref": "#/$defs/nullableProposalRef"},
+        "preview_ref": {"$ref": "#/$defs/nullablePreviewRef"},
+        "approval_ref": {"$ref": "#/$defs/nullableApprovalRef"},
+        "manifest_ref": {"$ref": "#/$defs/nullableManifestRef"},
+        "verification_ref": {"$ref": "#/$defs/nullableVerificationRef"}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proposal", "preview", "approval", "manifest", "verification"],
+      "properties": {
+        "proposal": {"$ref": "audit_workbook_edit_proposal.schema.json"},
+        "preview": {
+          "oneOf": [
+            {"$ref": "audit_workbook_edit_preview.schema.json"},
+            {"type": "null"}
+          ]
+        },
+        "approval": {
+          "oneOf": [
+            {"$ref": "audit_workbook_edit_approval.schema.json"},
+            {"type": "null"}
+          ]
+        },
+        "manifest": {
+          "oneOf": [
+            {"$ref": "#/$defs/manifestSummary"},
+            {"type": "null"}
+          ]
+        },
+        "verification": {
+          "oneOf": [
+            {"$ref": "audit_workbook_edit_verification.schema.json"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "workflow_id", "session_id", "bundle_id", "snapshot_id",
+        "workbook_sha256", "revision_id", "sheet", "worksheet_id", "state", "version",
+        "approval_consumed", "execution_id", "fence", "execution_deadline", "refs", "artifacts"
+      ],
+      "properties": {
+        "schema_version": {"const": "audit_workbook_edit_workflow.v1"},
+        "workflow_id": {"$ref": "#/$defs/opaque"},
+        "session_id": {"$ref": "#/$defs/opaque"},
+        "bundle_id": {"$ref": "#/$defs/opaque"},
+        "snapshot_id": {"$ref": "#/$defs/sha256"},
+        "workbook_sha256": {"$ref": "#/$defs/sha256"},
+        "revision_id": {"$ref": "#/$defs/opaque"},
+        "sheet": {"$ref": "#/$defs/sheet"},
+        "worksheet_id": {"$ref": "#/$defs/opaque"},
+        "state": {
+          "enum": [
+            "proposed", "previewed", "approved", "rejected", "claimed", "apply_started",
+            "session_verified", "verification_failed", "indeterminate", "stale_precondition",
+            "aborted_before_apply"
+          ]
+        },
+        "version": {"type": "integer", "minimum": 1},
+        "approval_consumed": {"type": "boolean"},
+        "execution_id": {"$ref": "#/$defs/nullableOpaque"},
+        "fence": {
+          "oneOf": [
+            {"type": "integer", "minimum": 1},
+            {"type": "null"}
+          ]
+        },
+        "execution_deadline": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 20,
+              "maxLength": 64,
+              "pattern": "Z$"
+            },
+            {"type": "null"}
+          ]
+        },
+        "refs": {"$ref": "#/$defs/refs"},
+        "artifacts": {"$ref": "#/$defs/artifacts"}
+      }
+    }
+  }
+}

@@ -406,9 +406,60 @@ prototype용이다. 다중 worker 운영은 `ConversationArtifactRepository`의 
 구현해야 한다. runtime 시작 뒤 실패한 claim은 중복 turn을 막기 위해 자동 재실행하지 않고
 pending으로 남으므로 운영 repository에는 별도 reconciliation 정책도 필요하다.
 
-현재 웹 slice는 읽기·대화 backend까지다. Office.js 쓰기는 이 API가 바로 workbook을 수정하지
-않고, 후속 단계에서 `propose → preview diff → user approval → apply → reread/verify` 계약과 Excel
-Add-in executor를 추가하는 방식으로 분리한다.
+### 승인형 workbook 편집 계약
+
+대화 API가 workbook을 직접 수정하지 않도록 편집 경계도 별도 모듈로 분리한다.
+`audit.workbook_edit`은 Excel을 열지 않고 content-addressed 문서를 만들고 검증하며,
+`audit.workbook_edit_service`가 다음 상태 전이를 관리한다.
+
+```text
+proposed → previewed → approved → claimed → apply_started
+                                            ├─ session_verified
+                                            ├─ verification_failed
+                                            └─ indeterminate
+                    claimed ├─ stale_precondition
+                            └─ aborted_before_apply
+```
+
+V1 proposal은 한 sheet의 single cell 최대 100개만 대상으로 하며 `set_value`, `set_formula`,
+`set_number_format`, `clear_contents`를 지원한다. Office executor가 대상 셀의 authored value/formula,
+계산값·타입, number format, merged/spill/protected/table 상태를 먼저 읽어 보내면 backend가 exact
+before/after/diff를 만든다. 같은 sheet의 정적 A1 참조와 허용 함수만 쓰는 bounded formula만
+허용하고, 거대한 참조 범위나 승인 범위 밖으로 spill할 수 있는 formula는 거부한다.
+
+승인은 exact preview SHA-256과 만료시각에 묶이고 한 번만 소비된다. 실행 claim은 stable한 live
+workbook 단위 monotonic fence와 challenge를 반환한다. Add-in은 쓰기 직전 before를 다시 읽어
+다르면 아무것도 쓰지 않고 `stale_precondition`을 보고하고, 일치할 때만 write-start를 기록한 뒤
+immutable manifest를 적용한다. 적용 뒤 재계산과 재조회 결과가 expected authored state에 맞아야
+`session_verified`가 된다. write-start 뒤에는 짧은 server-issued execution deadline 안에서 결과를
+보고해야 한다. 결과가 불명확한 `indeterminate` 또는 기대 상태와 다른 `verification_failed`는 같은
+workbook의 후속 실행을 호스트가 조정할 때까지 격리한다.
+
+`audit.workbook_edit_web.create_workbook_edit_fastapi_app(...)`은 다음 endpoint를 제공한다.
+
+```text
+POST /v1/audit/workbook-edit-workflows
+POST /v1/audit/workbook-edit-workflows/{workflow}/previews
+POST /v1/audit/workbook-edit-workflows/{workflow}/previews/{preview}/approve
+POST /v1/audit/workbook-edit-workflows/{workflow}/previews/{preview}/reject
+POST /v1/audit/workbook-edit-workflows/{workflow}/executions/claim
+POST /v1/audit/workbook-edit-workflows/{workflow}/executions/{execution}/started
+POST /v1/audit/workbook-edit-workflows/{workflow}/executions/{execution}/verify
+POST /v1/audit/workbook-edit-workflows/{workflow}/executions/{execution}/abort
+GET  /v1/audit/workbook-edit-workflows/{workflow}
+```
+
+모든 mutation은 정확히 하나의 `Idempotency-Key`가 필요하다. 경로·provider·JavaScript·credential은
+요청 계약에 없고, host가 등록한 Office session만 bundle/snapshot/workbook/revision/worksheet에
+연결된다. 운영 host는 coauthor session 사이에서 같고 독립 복사본 사이에서는 다른
+`workbook_instance_id`를 등록해야 한다. 내장 session/edit repository는 단일 프로세스 reference
+구현이므로 실제 웹 배포 전 durable DB, 분산 lock/fence, pending claim 및
+`verification_failed`/`indeterminate` 조정이 필요하다.
+
+여기서 `session_verified`는 host가 인증한 executor의 bounded readback이 승인한 authored state와
+일치한다는 뜻이다. backend가 Excel 계산 엔진을 독립 실행했다는 뜻이 아니며, dependent cell 전체,
+conditional formatting 표시, 파일 저장, 새 source snapshot 또는 prepared audit bundle 생성을
+보증하지 않는다. 실제 Office.js Add-in과 asset save/new-snapshot 연결은 다음 제품 slice다.
 
 prepare의 Python 오케스트레이션 진입점은
 `excel_to_skill.audit.prepare.prepare_package(...)`이다. 모델 client와

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_workbook_edit_http_approve_request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["preview_sha256", "confirmed"],
+  "properties": {
+    "preview_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "confirmed": {"const": true}
+  }
+}

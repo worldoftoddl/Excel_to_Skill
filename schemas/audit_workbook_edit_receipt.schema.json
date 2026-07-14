@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_workbook_edit_receipt.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "command_id", "workflow_id", "session_id", "bundle_id",
+    "snapshot_id", "workbook_sha256", "revision_id", "sheet", "state", "details"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_workbook_edit_receipt.v1"},
+    "command_id": {"$ref": "#/$defs/opaque"},
+    "workflow_id": {"$ref": "#/$defs/opaque"},
+    "session_id": {"$ref": "#/$defs/opaque"},
+    "bundle_id": {"$ref": "#/$defs/opaque"},
+    "snapshot_id": {"$ref": "#/$defs/sha256"},
+    "workbook_sha256": {"$ref": "#/$defs/sha256"},
+    "revision_id": {"$ref": "#/$defs/opaque"},
+    "sheet": {"$ref": "#/$defs/sheet"},
+    "state": {
+      "enum": [
+        "proposed", "previewed", "approved", "rejected", "claimed", "apply_started",
+        "session_verified", "verification_failed", "indeterminate", "stale_precondition",
+        "aborted_before_apply"
+      ]
+    },
+    "details": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {"const": "proposed"},
+            "details": {"$ref": "#/$defs/proposalDetails"}
+          }
+        },
+        {
+          "properties": {
+            "state": {"const": "previewed"},
+            "details": {"$ref": "#/$defs/previewDetails"}
+          }
+        },
+        {
+          "properties": {
+            "state": {"const": "approved"},
+            "details": {"$ref": "#/$defs/approvalDetails"}
+          }
+        },
+        {
+          "properties": {
+            "state": {"const": "rejected"},
+            "details": {"$ref": "#/$defs/rejectionDetails"}
+          }
+        },
+        {
+          "properties": {
+            "state": {"const": "claimed"},
+            "details": {"$ref": "#/$defs/claimDetails"}
+          }
+        },
+        {
+          "properties": {
+            "state": {"const": "apply_started"},
+            "details": {"$ref": "#/$defs/startDetails"}
+          }
+        },
+        {
+          "properties": {
+            "state": {"const": "session_verified"},
+            "details": {
+              "allOf": [
+                {"$ref": "#/$defs/verificationDetails"},
+                {
+                  "properties": {
+                    "verification": {
+                      "properties": {"status": {"const": "session_verified"}}
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "state": {"const": "verification_failed"},
+            "details": {
+              "allOf": [
+                {"$ref": "#/$defs/verificationDetails"},
+                {
+                  "properties": {
+                    "verification": {
+                      "properties": {"status": {"const": "verification_failed"}}
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "state": {"const": "indeterminate"},
+            "details": {
+              "allOf": [
+                {"$ref": "#/$defs/verificationDetails"},
+                {
+                  "properties": {
+                    "verification": {
+                      "properties": {"status": {"const": "indeterminate"}}
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "state": {"const": "stale_precondition"},
+            "details": {
+              "allOf": [
+                {"$ref": "#/$defs/verificationDetails"},
+                {
+                  "properties": {
+                    "verification": {
+                      "properties": {"status": {"const": "stale_precondition"}}
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "state": {"const": "aborted_before_apply"},
+            "details": {"$ref": "#/$defs/abortDetails"}
+          }
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "opaque": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sheet": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 31,
+      "pattern": "^[^\\[\\]:*?/\\\\]+$"
+    },
+    "proposalRef": {
+      "type": "string",
+      "pattern": "^edit-proposal:[0-9a-f]{64}$"
+    },
+    "previewRef": {
+      "type": "string",
+      "pattern": "^edit-preview:[0-9a-f]{64}$"
+    },
+    "approvalRef": {
+      "type": "string",
+      "pattern": "^edit-approval:[0-9a-f]{64}$"
+    },
+    "manifestRef": {
+      "type": "string",
+      "pattern": "^edit-manifest:[0-9a-f]{64}$"
+    },
+    "proposalDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proposal_ref", "proposal_sha256"],
+      "properties": {
+        "proposal_ref": {"$ref": "#/$defs/proposalRef"},
+        "proposal_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "previewDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preview"],
+      "properties": {
+        "preview": {"$ref": "audit_workbook_edit_preview.schema.json"}
+      }
+    },
+    "approvalDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approval_ref", "approval_sha256", "expires_at"],
+      "properties": {
+        "approval_ref": {"$ref": "#/$defs/approvalRef"},
+        "approval_sha256": {"$ref": "#/$defs/sha256"},
+        "expires_at": {"type": "string", "minLength": 20, "maxLength": 64}
+      }
+    },
+    "rejectionDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preview_ref", "reason"],
+      "properties": {
+        "preview_ref": {"$ref": "#/$defs/previewRef"},
+        "reason": {"const": "human_rejected"}
+      }
+    },
+    "claimDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execution_id", "fence", "challenge", "apply_manifest"],
+      "properties": {
+        "execution_id": {"$ref": "#/$defs/opaque"},
+        "fence": {"type": "integer", "minimum": 1},
+        "challenge": {"$ref": "#/$defs/opaque"},
+        "apply_manifest": {"$ref": "audit_workbook_edit_apply_manifest.schema.json"}
+      }
+    },
+    "startDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "execution_id", "fence", "manifest_ref", "write_started", "execution_deadline"
+      ],
+      "properties": {
+        "execution_id": {"$ref": "#/$defs/opaque"},
+        "fence": {"type": "integer", "minimum": 1},
+        "manifest_ref": {"$ref": "#/$defs/manifestRef"},
+        "write_started": {"const": true},
+        "execution_deadline": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 64,
+          "pattern": "Z$"
+        }
+      }
+    },
+    "verificationDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verification"],
+      "properties": {
+        "verification": {"$ref": "audit_workbook_edit_verification.schema.json"}
+      }
+    },
+    "abortDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execution_id", "fence", "reason"],
+      "properties": {
+        "execution_id": {"$ref": "#/$defs/opaque"},
+        "fence": {"type": "integer", "minimum": 1},
+        "reason": {"const": "claim_aborted"}
+      }
+    }
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "audit_workbook_edit_approval.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "approval_ref", "approval_sha256", "proposal_ref",
+    "preview_ref", "preview_sha256", "approver_id", "expires_at",
+    "approval_status", "status", "review_status", "application_status",
+    "outside_prepared_bundle", "binding", "office_binding"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_workbook_edit_approval.v1"},
+    "approval_ref": {"type": "string", "pattern": "^edit-approval:[0-9a-f]{64}$"},
+    "approval_sha256": {"$ref": "#/definitions/sha256"},
+    "proposal_ref": {"type": "string", "pattern": "^edit-proposal:[0-9a-f]{64}$"},
+    "preview_ref": {"type": "string", "pattern": "^edit-preview:[0-9a-f]{64}$"},
+    "preview_sha256": {"$ref": "#/definitions/sha256"},
+    "approver_id": {"$ref": "#/definitions/opaque"},
+    "expires_at": {"type": "string", "minLength": 20, "maxLength": 64},
+    "approval_status": {"const": "approved"},
+    "status": {"const": "proposed"},
+    "review_status": {"const": "unreviewed"},
+    "application_status": {"const": "not_applied"},
+    "outside_prepared_bundle": {"const": true},
+    "binding": {"$ref": "#/definitions/binding"},
+    "office_binding": {"$ref": "#/definitions/officeBinding"}
+  },
+  "definitions": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "opaque": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "sheet", "id"],
+      "properties": {
+        "kind": {"const": "sheet"},
+        "sheet": {"type": "string", "minLength": 1, "maxLength": 31},
+        "id": {"$ref": "#/definitions/sha256"}
+      }
+    },
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bundle_id", "snapshot_id", "workbook_sha256", "scope"],
+      "properties": {
+        "bundle_id": {"$ref": "#/definitions/opaque"},
+        "snapshot_id": {"$ref": "#/definitions/sha256"},
+        "workbook_sha256": {"$ref": "#/definitions/sha256"},
+        "scope": {"$ref": "#/definitions/scope"}
+      }
+    },
+    "officeBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "revision_id", "worksheet_id", "sheet"],
+      "properties": {
+        "session_id": {"$ref": "#/definitions/opaque"},
+        "revision_id": {"$ref": "#/definitions/opaque"},
+        "worksheet_id": {"$ref": "#/definitions/opaque"},
+        "sheet": {"type": "string", "minLength": 1, "maxLength": 31}
+      }
+    }
+  }
+}

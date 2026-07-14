@@ -32,6 +32,11 @@ The audit-RAG implementation lives in `src/excel_to_skill/audit/`:
 - `service.py` maps opaque web bundle/thread commands to server-owned snapshots with
   principal-scoped runtime IDs and atomic idempotency claims; `web.py` exposes a lazy FastAPI
   POST/GET adapter without accepting package paths, providers, or model settings from clients.
+- `workbook_edit.py` defines content-addressed proposal, exact-preview, approval, apply-manifest,
+  executor-witness, and verification contracts for bounded Office edits without opening Excel.
+- `workbook_edit_service.py` keeps that workflow outside conversations and prepared artifacts,
+  consumes each exact approval once, and fences one live workbook execution at a time;
+  `workbook_edit_web.py` exposes the strict host/add-in HTTP boundary.
 - `prepare.py` stages, validates, and atomically publishes all three artifacts.
 - `consume.py` exposes commit-gated `brief`, search/get, assertion-procedure, and trace readers.
 - `validate.py` enforces schemas, cross-links, digests, relation direction, and source separation.
@@ -129,6 +134,26 @@ Preserve these invariants when changing the audit path:
   source scope. A research basis must be from the current turn and match that scope and collection.
   Raw planning input/output stays in private objects behind checkpoint refs and is never re-exposed
   as later-turn focus or ID authority.
+- Workbook editing is a separate authoring workflow, never an `audit-chat` tool side effect. V1 is
+  limited to at most 100 single-cell edits on one exact sheet: literal value, allowlisted formula,
+  number format, or clear contents. Merged, spill, protected, and table-member targets fail closed;
+  formulas are same-sheet, locale-neutral, statically bounded, and may not introduce an unapproved
+  spill range.
+- A human approval binds one exact live-cell preview digest and expires before write start. The
+  executor must claim a one-use approval, retain the monotonic fence and challenge, reread the
+  exact before state, mark write start, apply only the immutable manifest, recalculate when required,
+  and return an exact after-state witness within the server-issued execution deadline. A stale
+  precondition is a no-write terminal result; `verification_failed` and `indeterminate` quarantine
+  the live workbook until host reconciliation.
+- The host must register a stable `workbook_instance_id` shared by coauthoring sessions and
+  distinct across workbook copies. Revision, sheet, and worksheet remain manifest preconditions,
+  not ways to reset workbook-level fencing. Completed command replay and stored workflow reads do
+  not depend on a still-live Office session.
+- `session_verified` means a host-authenticated executor's bounded readback is internally
+  consistent with the approved authored state. It does not mean the backend independently ran
+  Excel, validated every formula result or dependent cell, persisted the file, or prepared a new
+  audit bundle. The actual Office.js Add-in, asset save flow, durable repository, distributed lock,
+  and failed/indeterminate reconciliation remain host/product integrations.
 
 ## Build, Test, and Development Commands
 
@@ -183,10 +208,15 @@ and later-turn focus. Web tests should exercise the framework-neutral adapter an
 POST/GET requests; do not depend on Starlette `TestClient` when the installed portal/http client
 combination is incompatible. Production repositories need multi-worker claim/publish/abort and
 principal-isolation tests; the in-memory implementations prove only the single-process contract.
+Workbook-edit tests must additionally cover exact preview digest binding, no-op/unsafe target and
+formula rejection, approval expiry and single use, stale-before-write, post-start retry denial,
+monotonic workbook-level fencing, cross-session/cross-sheet isolation, indeterminate quarantine,
+idempotent replay after session loss, repository fault atomicity, and executor reread verification.
 
 ## Current Audit-RAG Status
 
-The audit-RAG path is now the local `main` direction, based on commit `ef1337e`. The former local
+The audit-RAG path is now the local `main` direction. The last committed checkpoint is `42b1309`;
+the current working slice adds the approved workbook-edit backend described below. The former local
 main harness series remains only at `archive/harness-v1.20`. The current checkpoint includes region-wide
 fact extraction, remote auditpaper standards MCP retrieval, collection-pinned CID verification,
 persistent paragraph caching, agent-ready brief generation, commit-gated readers, canonical
@@ -214,8 +244,13 @@ become prepared or later-turn evidence. A web-ready service boundary now resolve
 IDs, namespaces public threads per principal, claims idempotency keys before runtime entry, and
 offers strict FastAPI POST/GET adapters over server-owned snapshots. The in-memory repository and
 lock are prototype implementations; durable multi-worker storage remains a host responsibility.
-The current complete suite is `620 passed, 1 skipped`; compileall, schema validation, lock
-consistency, diff/credential-pattern checks, and wheel/source-distribution builds pass.
+The approved-edit backend now adds content-addressed proposals and exact live-cell previews,
+digest-bound human approval, one-use execution claims, workbook-level monotonic fencing, bounded
+formula and safe-number policy, execution leases, reread verification, failure quarantine, strict
+request/response schemas, and bounded FastAPI endpoints. It is not yet an actual Office.js Add-in
+or an asset-save pipeline. The current complete suite is `752 passed, 1 skipped`; the 132 focused
+edit tests, compileall, 17 edit-schema validations, lock consistency, diff/credential-pattern
+checks, and wheel/source-distribution builds pass.
 
 The current orchestration plan is intentionally staged:
 
@@ -241,10 +276,11 @@ The current orchestration plan is intentionally staged:
    Replace the in-memory receipt/idempotency/turn-lock implementations with durable DB/object
    storage and a distributed claim/lock plus pending-claim reconciliation before multi-worker
    production use. Keep the current API synchronous until a job/queue product contract is chosen.
-6. Add Office.js writing only as a separate approved-edit executor after the read-only boundary is
-   stable: propose edits, preview an exact diff, obtain user approval, apply in an Excel Add-in,
-   reread/recalculate, verify, and retain a change record. Never grant arbitrary JavaScript or
-   Python execution through the conversation model.
+6. Maintain the separate approved-edit backend contract: propose bounded edits, preview an exact
+   live-cell diff, bind human approval, atomically claim a workbook-level fence, and verify the
+   executor's reread without promoting it to prepared evidence. The next product slice is the
+   actual Excel Add-in executor and asset save/new-snapshot flow; never grant arbitrary JavaScript
+   or Python execution through the conversation model.
 7. Move `prepare` orchestration to a graph only after replacing temporary staging with durable,
    crash-resumable staging that preserves commit-last publication and rollback guarantees.
 8. Keep the current single-call aggregate generation path outside the graph until it needs

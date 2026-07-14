@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_workbook_edit_http_execution_request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fence", "challenge"],
+  "properties": {
+    "fence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "challenge": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    }
+  }
+}

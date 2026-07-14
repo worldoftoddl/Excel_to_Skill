@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "audit_workbook_edit_verification.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "verification_ref", "verification_sha256", "manifest_ref",
+    "witness_ref", "status", "review_status", "application_status",
+    "asset_persisted", "new_snapshot_required", "outside_prepared_bundle",
+    "before_matches", "expected_after_matches", "actual_after_sha256", "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "audit_workbook_edit_verification.v1"},
+    "verification_ref": {"type": "string", "pattern": "^edit-verification:[0-9a-f]{64}$"},
+    "verification_sha256": {"$ref": "#/definitions/sha256"},
+    "manifest_ref": {"type": "string", "pattern": "^edit-manifest:[0-9a-f]{64}$"},
+    "witness_ref": {"type": "string", "pattern": "^edit-witness:[0-9a-f]{64}$"},
+    "status": {"enum": ["session_verified", "stale_precondition", "verification_failed", "indeterminate"]},
+    "review_status": {"const": "unreviewed"},
+    "application_status": {"enum": ["applied_session_verified", "not_applied", "application_failed", "indeterminate"]},
+    "asset_persisted": {"const": false},
+    "new_snapshot_required": {"type": "boolean"},
+    "outside_prepared_bundle": {"const": true},
+    "before_matches": {"type": "boolean"},
+    "expected_after_matches": {"type": ["boolean", "null"]},
+    "actual_after_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/definitions/sha256"}]},
+    "limitations": {
+      "type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 300}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "session_verified"}}},
+      "then": {
+        "properties": {
+          "application_status": {"const": "applied_session_verified"},
+          "asset_persisted": {"const": false},
+          "new_snapshot_required": {"const": true},
+          "before_matches": {"const": true},
+          "expected_after_matches": {"const": true},
+          "actual_after_sha256": {"$ref": "#/definitions/sha256"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "stale_precondition"}}},
+      "then": {
+        "properties": {
+          "application_status": {"const": "not_applied"},
+          "new_snapshot_required": {"const": false},
+          "before_matches": {"const": false},
+          "expected_after_matches": {"type": "null"},
+          "actual_after_sha256": {"type": "null"}
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
