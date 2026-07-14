@@ -16,8 +16,6 @@ import re
 from collections.abc import Mapping
 from io import BytesIO
 from pathlib import Path
-from pathlib import PurePosixPath
-from zipfile import BadZipFile, ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import jsonschema
 import openpyxl
@@ -32,6 +30,14 @@ from .workbook_source import (
     WorkbookSourceError,
     WorkbookSourceProvider,
     read_verified_workbook_source,
+)
+from .xlsx_safety import (
+    MAX_XLSX_COMPRESSION_RATIO,
+    MAX_XLSX_MEMBERS,
+    MAX_XLSX_MEMBER_BYTES,
+    MAX_XLSX_UNCOMPRESSED_BYTES,
+    XlsxSafetyError,
+    validate_xlsx_archive,
 )
 
 
@@ -53,11 +59,6 @@ MAX_SELECTED_INSPECTIONS = 5
 MAX_LEDGER_BYTES = 64 * 1024 * 1024
 MAX_REFERENCES_BYTES = 32 * 1024 * 1024
 MAX_RESULT_BYTES = 300_000
-MAX_XLSX_MEMBERS = 10_000
-MAX_XLSX_MEMBER_BYTES = 64 * 1024 * 1024
-MAX_XLSX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
-MAX_XLSX_COMPRESSION_RATIO = 200
-
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COLUMN_RE = re.compile(r"^[A-Z]{1,3}$")
 _OPERATIONS = {
@@ -474,63 +475,14 @@ def _raw_cells(
 
 
 def _validate_xlsx_archive(data: bytes) -> None:
-    """Reject archives whose metadata exceeds a bounded XLSX parser envelope."""
+    """Map the shared XLSX safety boundary to the established inspection error contract."""
     try:
-        with ZipFile(BytesIO(data)) as archive:
-            members = archive.infolist()
-            if not members or len(members) > MAX_XLSX_MEMBERS:
-                raise WorkbookInspectionError(
-                    "SOURCE_LIMIT_EXCEEDED", "원본 xlsx archive member 상한을 초과했습니다."
-                )
-            names: set[str] = set()
-            total_uncompressed = 0
-            for member in members:
-                name = member.filename
-                path = PurePosixPath(name)
-                if (
-                    not name
-                    or len(name) > 512
-                    or "\x00" in name
-                    or "\\" in name
-                    or path.is_absolute()
-                    or ".." in path.parts
-                    or name in names
-                    or member.flag_bits & 0x1
-                    or member.compress_type not in {ZIP_STORED, ZIP_DEFLATED}
-                ):
-                    raise WorkbookInspectionError(
-                        "SOURCE_CONTRACT_MISMATCH", "원본 xlsx archive 계약이 유효하지 않습니다."
-                    )
-                names.add(name)
-                if member.is_dir():
-                    continue
-                if member.file_size > MAX_XLSX_MEMBER_BYTES:
-                    raise WorkbookInspectionError(
-                        "SOURCE_LIMIT_EXCEEDED", "원본 xlsx member byte 상한을 초과했습니다."
-                    )
-                total_uncompressed += member.file_size
-                if total_uncompressed > MAX_XLSX_UNCOMPRESSED_BYTES:
-                    raise WorkbookInspectionError(
-                        "SOURCE_LIMIT_EXCEEDED", "원본 xlsx 압축해제 byte 상한을 초과했습니다."
-                    )
-                if (
-                    member.file_size > 0
-                    and (
-                        member.compress_size <= 0
-                        or member.file_size
-                        > member.compress_size * MAX_XLSX_COMPRESSION_RATIO
-                    )
-                ):
-                    raise WorkbookInspectionError(
-                        "SOURCE_LIMIT_EXCEEDED", "원본 xlsx 압축률 상한을 초과했습니다."
-                    )
-            if not {"[Content_Types].xml", "xl/workbook.xml"}.issubset(names):
-                raise WorkbookInspectionError(
-                    "SOURCE_CONTRACT_MISMATCH", "원본 xlsx 필수 archive member가 없습니다."
-                )
-    except WorkbookInspectionError:
-        raise
-    except (BadZipFile, OSError, RuntimeError, ValueError) as e:
+        validate_xlsx_archive(data)
+    except XlsxSafetyError as e:
+        if e.code == "LIMIT_EXCEEDED":
+            raise WorkbookInspectionError(
+                "SOURCE_LIMIT_EXCEEDED", "원본 xlsx archive 안전 상한을 초과했습니다."
+            ) from e
         raise WorkbookInspectionError(
             "SOURCE_CONTRACT_MISMATCH", "원본 xlsx archive를 검증할 수 없습니다."
         ) from e

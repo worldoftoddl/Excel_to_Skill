@@ -29,6 +29,9 @@ The audit-RAG implementation lives in `src/excel_to_skill/audit/`:
 - `workbook_source.py` binds an opaque uploaded asset to the package source digest;
   `workbook_inspection.py` provides bounded ledger-first range, dependency, profile, duplicate,
   outlier, and optional raw-XLSX observations without creating audit evidence.
+- `xlsx_safety.py` validates a bounded XLSX/OOXML archive before it can become a server asset;
+  `workbook_asset_service.py`, `workbook_asset_sqlite.py`, and `workbook_asset_web.py` keep
+  principal-scoped raw workbook snapshots behind opaque upload, status, and download contracts.
 - `service.py` maps opaque web bundle/thread commands to server-owned snapshots with
   principal-scoped runtime IDs and atomic idempotency claims; `web.py` exposes a lazy FastAPI
   POST/GET adapter without accepting package paths, providers, or model settings from clients.
@@ -192,6 +195,13 @@ Preserve these invariants when changing the audit path:
   Production still needs authenticated durable host/session registries, a provider reacquirer,
   object storage, multi-worker deployment tests, pending/orphan reconciliation, and failed or
   indeterminate workbook quarantine handling.
+- A web upload creates only a principal-scoped `workbook_id` and immutable `raw_snapshot_id`; it
+  does not create a prepared `bundle_id`. Authenticate and validate headers before consuming the
+  size- and time-bounded XLSX body, reject non-XLSX or polyglot OOXML archives, validate before
+  immutable storage, and publish the workbook, snapshot, head, and completed idempotency receipt
+  in one repository transaction. Public status and download responses may expose the exact digest
+  and size but never the private asset ref or a server path. Only a later convert/prepare commit
+  gate may publish a `bundle_id` for audit readers.
 
 ## Build, Test, and Development Commands
 
@@ -261,12 +271,16 @@ Publication tests must reopen the reacquired XLSX and compare every approved aut
 and number format, exercise immutable-store integrity and source-head CAS, and restart a durable
 repository while an active publication lease exists. A real Excel Desktop/Web sideload smoke and
 real cloud-provider save/reacquisition remain manual host checks.
+Raw-workbook upload tests must cover authentication before body consumption, exact byte limits,
+finite body-read admission, strict ZIP/OOXML framing, malformed and polyglot rejection,
+idempotent replay and conflict, expired-claim fencing, SQLite restart/concurrency, principal
+isolation, immutable-store readback, atomic head publication, and download digest verification.
 
 ## Current Audit-RAG Status
 
-The audit-RAG path is now the local `main` direction. The last committed checkpoint is `3548359`;
-the current working slice adds authenticated host bootstrap and durable raw-snapshot publication
-around that Office.js executor. The former local
+The audit-RAG path is now the local `main` direction. The last committed checkpoint is `cce3954`;
+the current working slice adds the provider-neutral raw-workbook upload and snapshot catalog in
+front of the existing prepare/chat path. The former local
 main harness series remains only at `archive/harness-v1.20`. The current checkpoint includes region-wide
 fact extraction, remote auditpaper standards MCP retrieval, collection-pinned CID verification,
 persistent paragraph caching, agent-ready brief generation, commit-gated readers, canonical
@@ -308,8 +322,9 @@ SQLite repository. SQLite preserves workflow/idempotency/fence/claim/head state 
 reclaims expired command/publication workers with new fencing tokens. Real host authentication,
 durable session registries, cloud-provider reacquisition, production object storage, quarantine
 reconciliation, and raw-snapshot-to-prepared-bundle publication remain product integrations. The
-current complete Python suite is `810 passed, 1 skipped`; the focused workbook-edit/publication
-suite is `190 passed`, the Add-in suite is `87 passed`, and compileall, TypeScript/Vite, wheel, and
+current complete Python suite is `863 passed, 1 skipped`; the focused raw-upload plus adjacent
+inspection/publication suite is `85 passed`, the focused workbook-edit/publication suite is
+`190 passed`, the Add-in suite is `87 passed`, and compileall, TypeScript/Vite, wheel, and
 source-distribution builds pass.
 
 The adopted product default is provider-neutral web upload, not Microsoft 365. A normal user
@@ -317,6 +332,11 @@ uploads XLSX to server-owned object storage, runs prepare/aggregate, chats over 
 bundle, reviews edit proposals, and receives a revised workbook copy. OneDrive/SharePoint plus the
 Office.js executor is an optional direct-edit integration for Microsoft 365 and coauthoring users;
 it is not a prerequisite for the web UI or the core audit briefing product.
+
+The latest raw-upload smoke used the non-client 36-sheet 2025 K-IFRS account-procedure template.
+Its 352,145 bytes passed strict XLSX validation, immutable upload, SQLite restart, idempotent
+replay, status/download, and digest-bound source-provider checks with exact byte and SHA-256
+equality. This smoke stores a raw source only; it does not create or approve a prepared bundle.
 
 The current orchestration plan is intentionally staged:
 
@@ -339,9 +359,12 @@ The current orchestration plan is intentionally staged:
    digest-bound raw source only when the host supplies it, refs-only checkpoints, and no
    later-turn authority.
 5. Stabilize the web service boundary around opaque bundle snapshots and repository interfaces.
-   The next product slice is the provider-neutral default path: bounded XLSX upload to server-owned
-   S3/MinIO-style object storage, prepare/aggregate jobs, bundle-bound chat, edit proposal/approval,
-   and a downloadable revised workbook. Replace the in-memory receipt/idempotency/turn-lock
+   The current product slice adds bounded XLSX upload, a principal-scoped raw snapshot catalog,
+   exact status/download, and a digest-bound source provider without prematurely creating a
+   prepared bundle. The next slice connects that raw snapshot to deterministic convert, scope
+   planning, prepare/aggregate jobs, and commit-gated `BundleSnapshot` publication. Later slices
+   add server-copy edit proposal/approval and a downloadable revised workbook. Replace the
+   in-memory receipt/idempotency/turn-lock
    implementations with durable DB/object storage and a distributed claim/lock plus pending-claim
    reconciliation before multi-worker production use. Keep the current API synchronous until a
    job/queue product contract is chosen.

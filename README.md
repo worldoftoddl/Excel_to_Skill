@@ -420,6 +420,37 @@ XLSX 웹 업로드 → server-owned S3/MinIO-style object storage
 현재 열어 둔 Excel Web/공동편집 파일에 변경을 직접 반영하려는 경우에만 아래 Office.js와
 OneDrive/SharePoint provider 연동을 선택 기능으로 사용한다.
 
+### Raw workbook upload API
+
+`audit.workbook_asset_service`와 durable `audit.workbook_asset_sqlite` catalog는 웹 업로드를
+prepared audit bundle과 분리한다. 최초 업로드는 principal-scoped `workbook_id`와 immutable
+`raw_snapshot_id`만 만들며, 후속 convert/prepare commit이 끝나기 전에는 `bundle_id`를 발급하지
+않는다. 실제 XLSX bytes는 content-addressed store에 있고 public 응답에는 object ref나 서버 경로가
+포함되지 않는다.
+
+`audit.workbook_asset_web.create_workbook_asset_fastapi_app(...)`은 다음 경계를 제공한다.
+
+```text
+POST /v1/audit/workbooks
+GET  /v1/audit/workbooks/{workbook_id}/raw-snapshots/{raw_snapshot_id}
+GET  /v1/audit/workbooks/{workbook_id}/raw-snapshots/{raw_snapshot_id}/download
+```
+
+POST는 multipart가 아닌 XLSX raw body와 정확히 하나의 `Idempotency-Key`를 받는다. 인증과
+Content-Type/Content-Length 검사를 body보다 먼저 수행하고, 유한한 수신 deadline 안에서 최대
+64MiB를 private spool로 읽은 뒤
+ZIP framing, 압축 상한, CRC, 표준 XLSX content type, OOXML relationship을 검증한다. 정상 bytes만
+immutable store에 기록하며 workbook, snapshot, current head, completed replay receipt는 한 SQLite
+transaction에서 게시된다. 동일 command는 같은 snapshot을 재생하고 같은 key의 다른 workbook은
+충돌한다. 검증된 immutable object가 catalog commit보다 먼저 만들어져 충돌·장애 뒤 orphan 후보가
+남을 수 있지만 workbook/head로 노출되지는 않는다. Status/download와 completed replay는 exact
+principal scope와 catalog row를 다시 확인한다. Download와 completed replay는 immutable object의
+digest readback까지 다시 확인한다.
+
+이 API는 raw source 보관 경계일 뿐 convert, prepare, aggregate 또는 LLM을 실행하지 않는다. 다음
+processing slice가 raw snapshot을 deterministic loader에 연결하고 scope 선택 결과를 받은 뒤,
+commit gate를 통과한 package만 기존 conversation service의 `BundleSnapshot`으로 게시한다.
+
 ### 승인형 workbook 편집 계약
 
 대화 API가 workbook을 직접 수정하지 않도록 편집 경계도 별도 모듈로 분리한다.

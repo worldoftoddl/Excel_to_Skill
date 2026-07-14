@@ -24,7 +24,7 @@ from typing import Mapping, Protocol, runtime_checkable
 
 import openpyxl
 
-from .workbook_inspection import WorkbookInspectionError, _validate_xlsx_archive
+from .xlsx_safety import XlsxSafetyError, validate_xlsx_archive
 
 
 MAX_PUBLISHED_WORKBOOK_BYTES = 64 * 1024 * 1024
@@ -446,7 +446,7 @@ def validate_saved_workbook_manifest(
             or not 1 <= len(expected_after) <= 100
         ):
             raise _fail("SAVED_WORKBOOK_MISMATCH")
-        _validate_xlsx_archive(acquired.content)
+        validate_xlsx_archive(acquired.content)
         workbook = openpyxl.load_workbook(
             BytesIO(acquired.content),
             read_only=False,
@@ -487,7 +487,7 @@ def validate_saved_workbook_manifest(
             workbook.close()
     except WorkbookSnapshotPublicationError:
         raise
-    except (WorkbookInspectionError, OSError, ValueError, TypeError, KeyError, IndexError):
+    except (XlsxSafetyError, OSError, ValueError, TypeError, KeyError, IndexError):
         raise _fail("SAVED_WORKBOOK_MISMATCH") from None
     except Exception:
         raise _fail("SAVED_WORKBOOK_MISMATCH") from None

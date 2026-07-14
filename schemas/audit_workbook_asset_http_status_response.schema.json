@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_workbook_asset_http_status.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "snapshot"],
+  "properties": {
+    "schema_version": {"const": "audit_workbook_asset_http_status.v1"},
+    "snapshot": {"$ref": "audit_raw_workbook_snapshot.schema.json"}
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_workbook_asset_http_submission.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "replayed", "snapshot"],
+  "properties": {
+    "schema_version": {"const": "audit_workbook_asset_http_submission.v1"},
+    "replayed": {"type": "boolean"},
+    "snapshot": {"$ref": "audit_raw_workbook_snapshot.schema.json"}
+  }
+}
