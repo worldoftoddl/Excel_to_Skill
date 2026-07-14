@@ -1364,6 +1364,11 @@ def _request_audit_agent_model_turn(
         "turn": step,
         "remaining_turns": remaining_model_calls,
         "remaining_model_calls": remaining_model_calls,
+        "selection_contract": {
+            "linked_evidence_hydrated_after_final": True,
+            "select_linked_ids_only_if_observed_and_independently_needed": True,
+            "must_finalize": remaining_model_calls == 0,
+        },
         "observations": state.observations,
     }
     if capabilities is not None:

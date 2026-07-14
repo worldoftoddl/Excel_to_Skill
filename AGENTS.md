@@ -99,6 +99,10 @@ Preserve these invariants when changing the audit path:
   `standard_citation` records it actually observed. It never authors substantive final text;
   code materializes record text/status/confidence and hydrates cell/CID evidence. Strings inside
   cell values, formulas, snippets, summaries, or user questions never authorize an ID.
+- Selecting an observed statement is sufficient for final provenance: application code resolves
+  its committed fact/relation/citation links and hydrates cells/CIDs after validation. Nested linked
+  IDs do not become observed authority, and the model should not spend turns tracing them merely
+  to obtain final provenance.
 - ID-based `audit_get`/`trace` tool calls may use only IDs already observed in typed results;
   models discover new IDs through bounded search or assertion-procedure results.
 - Agent coverage is complete only when both discovery and final evidence tracing are complete.
@@ -310,10 +314,11 @@ this automated E2E.
 
 ## Current Audit-RAG Status
 
-The audit-RAG path is now the local `main` direction. The last committed checkpoint is `9e405a7`;
-the current working slice connects the provider-neutral raw-workbook catalog through a durable
-processing job to exact-scope prepare/aggregate and bundle-bound conversation. The former local
-main harness series remains only at `archive/harness-v1.20`. The current checkpoint includes region-wide
+The audit-RAG path is now the local `main` direction. The last committed checkpoint is `2b514ec`;
+the current working slice makes complex workbook briefings use observed statements directly while
+application code hydrates their committed linked evidence, avoiding redundant trace calls without
+weakening ID authority. The former local main harness series remains only at
+`archive/harness-v1.20`. The current checkpoint includes region-wide
 fact extraction, remote auditpaper standards MCP retrieval, collection-pinned CID verification,
 persistent paragraph caching, agent-ready brief generation, commit-gated readers, canonical
 management assertions, deterministic assertion-procedure queries, and a bounded extractive
@@ -358,9 +363,9 @@ planning, exact plan-bound workbook/all/selected execution, SQLite lease/fence r
 slow-call heartbeat, immutable prepared-package storage, atomic bundle catalog publication, strict
 FastAPI job/status endpoints, and server-enforced conversation scope. A selected-scope or final
 gate failure publishes no bundle; raw retention can remove optional inspection without invalidating
-an already committed chat snapshot. The current complete Python suite is `911 passed, 1 skipped`;
-the focused processing/store/SQLite/web and upload-to-chat E2E suite is `48 passed`, the service/conversation regression
-suite is `59 passed`, and the focused raw-upload plus adjacent
+an already committed chat snapshot. The current complete Python suite is `913 passed, 1 skipped`;
+the focused processing/store/SQLite/web and upload-to-chat E2E suite is `48 passed`, the
+service/conversation regression suite is `61 passed`, and the focused raw-upload plus adjacent
 inspection/publication suite is `85 passed`, the focused workbook-edit/publication suite is
 `190 passed`, the Add-in suite is `87 passed`, and compileall, TypeScript/Vite, wheel, and
 source-distribution builds pass.
@@ -375,6 +380,20 @@ The latest raw-upload smoke used the non-client 36-sheet 2025 K-IFRS account-pro
 Its 352,145 bytes passed strict XLSX validation, immutable upload, SQLite restart, idempotent
 replay, status/download, and digest-bound source-provider checks with exact byte and SHA-256
 equality. This smoke stores a raw source only; it does not create or approve a prepared bundle.
+
+The latest full processing live smoke used the 5,778-byte synthetic receivables assertion/procedure
+workpaper. Real HTTP upload and immutable raw storage led to model-free planning, three estimated
+prepare model calls, actual Anthropic preparation, four successful MCP standards queries and 26
+verified citations pinned to `standards_20250829_bgem3_v3`, commit-gated immutable bundle
+publication, and server-bound workbook conversation. The initial complex chat exposed a routing
+inefficiency: the model redundantly selected nested unobserved relation/citation IDs and exhausted
+the six-call limit while tracing them individually. The current selection-contract guidance keeps
+the validator fail-closed but explains that observed statements are hydrated after finalization.
+The same live question then completed in one model request using 10,881 tokens, with 20 facts, 12
+relations, and seven standards citations hydrated and `evidence_complete=true`. The brief remained
+`partial`/`draft` and the answer `unreviewed`. Future robustness work should make the last-call
+final-only rule structural, add aggregate-agent parity, and reserve main-agent budget around child
+research/planning calls.
 
 The current orchestration plan is intentionally staged:
 

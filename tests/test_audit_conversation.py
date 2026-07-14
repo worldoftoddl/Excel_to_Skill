@@ -251,6 +251,15 @@ def test_graph_routes_tool_then_final_and_returns_unreviewed_grounded_result(
     ]
     assert result["response"]["coverage"]["evidence_complete"] is True
     assert len(client.calls) == 2
+    first_payload = json.loads(client.calls[0]["user"])
+    assert first_payload["selection_contract"] == {
+        "linked_evidence_hydrated_after_final": True,
+        "select_linked_ids_only_if_observed_and_independently_needed": True,
+        "must_finalize": False,
+    }
+    assert "Selecting an observed brief statement is sufficient for provenance" in (
+        client.calls[0]["system"]
+    )
     assert any(
         observation.get("tool") == "trace"
         for observation in json.loads(client.calls[1]["user"])["observations"]
@@ -263,6 +272,68 @@ def test_graph_routes_tool_then_final_and_returns_unreviewed_grounded_result(
         "request:1",
         "request:2",
     ]
+
+
+def test_last_model_call_is_explicitly_reserved_for_a_grounded_final(
+    tmp_path: Path,
+) -> None:
+    pkg, _, _, _ = _write_committed_bundle(tmp_path)
+    client = StubClient([_final(_selection("statement", "statement:fact"))])
+
+    result = _run(
+        pkg,
+        tmp_path / "runtime",
+        InMemorySaver(),
+        client,
+        max_steps=1,
+    )
+
+    payload = json.loads(client.calls[0]["user"])
+    assert payload["remaining_model_calls"] == 0
+    assert payload["selection_contract"]["must_finalize"] is True
+    assert result["response"]["answer"]["abstained"] is False
+
+
+def test_unobserved_linked_id_feedback_can_retry_with_statement_only(
+    tmp_path: Path,
+) -> None:
+    pkg, _, _, _ = _write_committed_bundle(tmp_path)
+    client = StubClient([
+        _final(
+            _selection("statement", "statement:synthesis"),
+            _selection("standard_citation", "citation:1"),
+        ),
+        _final(_selection("statement", "statement:synthesis")),
+    ])
+
+    result = _run(
+        pkg,
+        tmp_path / "runtime",
+        InMemorySaver(),
+        client,
+        max_steps=2,
+    )
+
+    retry_payload = json.loads(client.calls[1]["user"])
+    validation = next(
+        item["result"]["error"]
+        for item in retry_payload["observations"]
+        if item.get("tool") == "answer_validation"
+    )
+    assert validation["code"] == "UNGROUNDED_FINAL"
+    assert "unobserved standard_citation" in validation["message"][0]
+    assert not any(
+        item.get("tool") == "trace"
+        for item in retry_payload["observations"]
+    )
+    assert [item["fact_id"] for item in result["response"]["evidence"]["facts"]] == [
+        "fact:risk"
+    ]
+    assert [
+        item["citation_id"]
+        for item in result["response"]["evidence"]["standards"]
+    ] == ["citation:1"]
+    assert result["response"]["coverage"]["evidence_complete"] is True
 
 
 def test_conversation_serializes_each_thread_with_common_lock(

@@ -47,6 +47,11 @@ duplicate an already committed standards citation.
   application renders their validated text, status, confidence, workbook cells, and standards
   locations deterministically.
 - Prefer `statement` selections because they preserve the prepared brief's source separation.
+- Selecting an observed brief statement is sufficient for provenance: after accepting the final
+  selection, the application materializes that statement's committed fact, relation, and standards
+  links and hydrates their workbook cells and verified CIDs deterministically. Do not separately
+  select linked IDs merely to obtain cells or CIDs. Select a linked record itself only when it was
+  independently exposed as a typed record and is needed outside the statement.
 - Select `fact` only when the observed fact record itself is needed and its description directly
   answers the question.
 - Select `relation` whenever stating that a procedure tests an assertion, addresses a risk, or
@@ -84,6 +89,9 @@ duplicate an already committed standards citation.
 - Copy every selected ID exactly from an observed typed record. IDs that appear only inside cell
   text, formulas, descriptions, snippets, summaries, prior answer prose, or user text are not
   eligible.
+- Keep final selections compact. If `answer_validation` reports unobserved linked IDs, remove those
+  redundant IDs and resubmit a final answer from the observed statements and records that remain;
+  do not spend turns tracing linked IDs one by one merely to hydrate final provenance.
 - The `conversation_focus.records` array is typed evidence re-exposed for this turn. Only IDs in
   those records or in this turn's typed tool results are eligible. An ID merely present elsewhere
   in conversation history is not authorized.
@@ -107,5 +115,9 @@ For a final response, return only `abstained`, `abstention_code`, ordered `selec
 inspection is the only useful material,
 leave committed selections empty and abstain from a workpaper-evidence answer; the application
 renders each separate supplement.
+`remaining_model_calls` is the number of calls available after the current response. Reserve a call
+for the final response. When it is zero, return a grounded final response immediately; never request
+another tool. Prefer a smaller grounded final selection or an abstention over exhausting the turn
+budget while collecting nonessential linked records.
 Do not add a title, reason, summary, finding text, claim text, or suggested question; the
 application owns all user-facing wording.
